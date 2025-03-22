@@ -66,7 +66,7 @@ def ensure_output_folder(folder_name):
 
 def compile_file(c_file):
     executable = c_file.replace(".c", ".exe")
-    compile_cmd = f'cl /EHsc /MP /O1 /Fe{executable} {c_file}'
+    compile_cmd = f'cl /EHsc /MP /O2 /Fe{executable} {c_file}'
     result = subprocess.run(compile_cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         log(f"Compilation failed: {c_file}", "error", verbosity=2)
@@ -384,7 +384,7 @@ def run_tests():
         print("\n")
         cleanup_obj_files()
         log("All temporary files cleaned.", "success")
-
+        print("\nDONE, HAPPY GRADING!")
 
 if __name__ == "__main__":
     run_tests()
