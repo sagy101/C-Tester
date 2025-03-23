@@ -1,7 +1,13 @@
-Grade: 89%
-(Calculated grade is: 88.68%)
+Grade: 88%
+(Calculated grade is: 87.74%)
+
+Timeouts: 1/106
 
 Discrepancies:
+Input: 2147483647
+Expected: 
+Actual: Timeout
+
 Input: -1
 Expected: Input: n = Output:
 Actual: Input: n = Output: 1

@@ -1,0 +1,80 @@
+Grade: 88%
+(Calculated grade is: 87.66%)
+
+Discrepancies:
+Input: 95 9
+Expected: Enter a number1: Enter a number2: Sum: 104
+Actual: Enter a number1: Enter a number2: Sum: 114
+
+Input: 94 46
+Expected: Enter a number1: Enter a number2: Sum: 140
+Actual: Enter a number1: Enter a number2: Sum: 150
+
+Input: 100 92
+Expected: Enter a number1: Enter a number2: Sum: 192
+Actual: Enter a number1: Enter a number2: Sum: 202
+
+Input: 93 82
+Expected: Enter a number1: Enter a number2: Sum: 175
+Actual: Enter a number1: Enter a number2: Sum: 185
+
+Input: 99 39
+Expected: Enter a number1: Enter a number2: Sum: 138
+Actual: Enter a number1: Enter a number2: Sum: 148
+
+Input: 91 29
+Expected: Enter a number1: Enter a number2: Sum: 120
+Actual: Enter a number1: Enter a number2: Sum: 130
+
+Input: 91 45
+Expected: Enter a number1: Enter a number2: Sum: 136
+Actual: Enter a number1: Enter a number2: Sum: 146
+
+Input: 93 37
+Expected: Enter a number1: Enter a number2: Sum: 130
+Actual: Enter a number1: Enter a number2: Sum: 140
+
+Input: 91 14
+Expected: Enter a number1: Enter a number2: Sum: 105
+Actual: Enter a number1: Enter a number2: Sum: 115
+
+Input: 92 97
+Expected: Enter a number1: Enter a number2: Sum: 189
+Actual: Enter a number1: Enter a number2: Sum: 199
+
+Input: 91 34
+Expected: Enter a number1: Enter a number2: Sum: 125
+Actual: Enter a number1: Enter a number2: Sum: 135
+
+Input: 95 19
+Expected: Enter a number1: Enter a number2: Sum: 114
+Actual: Enter a number1: Enter a number2: Sum: 124
+
+Input: 94 44
+Expected: Enter a number1: Enter a number2: Sum: 138
+Actual: Enter a number1: Enter a number2: Sum: 148
+
+Input: 93 91
+Expected: Enter a number1: Enter a number2: Sum: 184
+Actual: Enter a number1: Enter a number2: Sum: 194
+
+Input: 92 12
+Expected: Enter a number1: Enter a number2: Sum: 104
+Actual: Enter a number1: Enter a number2: Sum: 114
+
+Input: 100 24
+Expected: Enter a number1: Enter a number2: Sum: 124
+Actual: Enter a number1: Enter a number2: Sum: 134
+
+Input: 94 25
+Expected: Enter a number1: Enter a number2: Sum: 119
+Actual: Enter a number1: Enter a number2: Sum: 129
+
+Input: 97 78
+Expected: Enter a number1: Enter a number2: Sum: 175
+Actual: Enter a number1: Enter a number2: Sum: 185
+
+Input: 100 69
+Expected: Enter a number1: Enter a number2: Sum: 169
+Actual: Enter a number1: Enter a number2: Sum: 179
+

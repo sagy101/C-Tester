@@ -1,133 +1,131 @@
+# Automated C Program Grading and Excel Report Generation
+
 ## Overview
 
-This Python script automates the process of:
-1. Setting up a Visual Studio C++ build environment (on Windows).
-2. Discovering `.c` source files within specified question directories (e.g., `Q1`, `Q2` `...`).
-3. Compiling them in parallel using Visual Studio's `cl`.
-4. Executing each compiled program with inputs read from `input.txt`.
-5. Comparing their outputs with a "ground truth" output produced by `original_sol.c`.
-6. Generating an `output` folder containing the results from each program.
-7. Generating a `grade` folder containing a grade file (`.txt`) for each `.c` file.
-
-This script is primarily intended for batch grading or testing of multiple C programs against a known correct solution, using a uniform set of inputs.
-
----
+This project automates the batch grading of multiple C programs. It sets up the Visual Studio C++ build environment, compiles and executes student C source files against a known-correct solution, compares outputs, and produces grading reports. Additionally, it generates Excel files with detailed grade breakdowns for each question folder as well as a consolidated final grade file for easy uploading (e.g., to Moodle). An optional "slim" feature allows generating a simplified final Excel file that contains only the student IDs and final grades.
 
 ## Requirements
 
-- **Windows OS** (since it relies on `cmd` and the Visual Studio `cl` compiler).
-- **Visual Studio 2022** (Community or above), installed with C++ build tools.
-- A valid path to `vcvars64.bat` (or equivalent) so the script can set the required environment variables. 
-  - By default, the script uses:
+- **Operating System:** Windows (script uses `cmd` and Visual Studio’s C++ compiler)
+- **Visual Studio 2022:** Community or higher, with C++ build tools installed  
+  *Ensure the path to `vcvars64.bat` is correct (default: `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`).*
+- **Python 3:** Tested with standard libraries, plus:
+  - `tqdm` for progress bars  
     ```bash
-    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+    pip install tqdm
     ```
-- **Python 3** (tested with `concurrent.futures`, `tqdm`, etc.).
-- **tqdm** Python package for progress bars:
-  ```bash
-  pip install tqdm
-  ```
-
----
+  - `pandas` and `xlsxwriter` for Excel file creation  
+    ```bash
+    pip install pandas xlsxwriter
+    ```
 
 ## Project Structure
 
-The script expects a folder structure like this (for each question):
+The project consists of the following Python files:
+
+- **Process.py**  
+  Sets up the Visual Studio environment, reads inputs, compiles and executes C files (excluding `original_sol.c`), compares outputs with a ground truth solution, and writes individual grade text files.
+  
+- **CreateExcel.py**  
+  Scans the grade text files in each question folder, extracts grades (including flags for compilation errors and timeouts), and creates Excel files per folder along with a consolidated final grade file (`final_grades.xlsx`). The slim feature here allows you to generate a simplified Excel file with only final grades if desired.
+  
+- **main.py**  
+  Serves as the entry point by calling the test execution (grading) process and the Excel creation process. It defines the question folders (e.g., `Q1`, `Q2`, `Q3`) and their respective weights.
+  
+- **Utils.py**  
+  Provides a simple logging function and a configurable verbosity level for console output.
+
+The expected folder structure for each question (e.g., `Q1`, `Q2`, `Q3`) is:
 
 ```
-Q1/
- ├─ C/
- │   ├─ file1.c
- │   └─ file2.c
- ├─ original_sol.c
- └─ input.txt
-
-Q2/
- ├─ C/
- │   ├─ fileA.c
- │   └─ fileB.c
- ├─ original_sol.c
- └─ input.txt
- 
- .
- .
- .
+│
+├─ Q1/
+│   ├─ C/
+│   │   ├─ file1.c
+│   │   ├─ file2.c
+│   │   ├─ output folder
+│   │   └─ grade folder
+│   ├─ original_sol.c
+│   ├─ Q1_grades_to_upload.xlsx
+│   └─ input.txt
+├─ Q2/
+│   ├─ C/
+│   │   ├─ file1.c
+│   │   ├─ file2.c
+│   │   ├─ output folder
+│   │   └─ grade folder
+│   ├─ original_sol.c
+│   ├─ Q2_grades_to_upload.xlsx
+│   └─ input.txt
+├─ CreateExcel.py
+├─ final_grades.xlsx
+├─ main.py
+├─ Process.py
+├─ README.md
+├─ requirements.txt
+└─ Utils.py
 ```
-
-- Each question folder (e.g., `Q1`, `Q2`) must contain:
-  - An **input file**: `input.txt`  
-    - Holds multiple lines, each used as an input for compiled programs.
-  - A **subfolder**: `C`  
-    - Contains one or more `.c` files (solution attempts).
-    - Contains a special file named `original_sol.c`, which is treated as the "ground truth" solution.
-
----
 
 ## How It Works
 
-1. **Setup Visual Studio Environment**  
-   - The function `setup_visual_studio_environment()` runs the `vcvars64.bat` script to ensure `cl` and related environment variables are available.
+1. **Setup Visual Studio Environment:**  
+   The script runs `vcvars64.bat` to configure the environment for compiling C programs.
 
-2. **process_all_questions()**  
-   - Calls `process_folder()` for each question directory in the `questions` list.
+2. **Input & Ground Truth Generation:**  
+   - Reads test inputs from `input.txt`.
+   - Compiles and executes `original_sol.c` to generate correct output (ground truth) for each input.
 
-3. **process_folder()**  
-   - **Cleanup**: Removes any old `output` and `grade` folders before starting.  
-   - **Input Loading**: Reads `input.txt` from the question folder.  
-   - **Ground Truth Generation**: Compiles and runs `original_sol.c`, saving its outputs for each input line.  
-   - **Compile & Run**:
-     - All `.c` files except `original_sol.c` get compiled in parallel.  
-     - If compilation fails, a 0% grade is written for that file.  
-     - If successful, the compiled executable is run with each input, and the output is saved.  
-   - **Comparison & Grading**:
-     - Each program’s output is compared to the ground truth.  
-     - A text file summarizing the grade and any discrepancies is generated in the `grade` folder.
+3. **Compilation and Execution:**  
+   - All C files in the `C` subfolder (excluding `original_sol.c`) are compiled in parallel using Visual Studio’s `cl`.
+   - Each compiled executable is run with every input, and the outputs are stored in an `output` folder.
+   - Outputs are compared with the ground truth to calculate a grade and to note any discrepancies or timeouts.
 
-4. **Parallel Compilation & Execution**  
-   - Uses `concurrent.futures.ThreadPoolExecutor` to run compile and execute tasks in parallel.  
-   - Displays progress bars with `tqdm`.
+4. **Grading:**  
+   - For each C file, a grade text file is generated in a `grade` folder (including any compilation errors or timeouts).
 
-5. **Cleanup**  
-   - After processing, cleans up `.exe` files, `.obj` files, and old `output` / `grade` folders.
+5. **Excel Report Generation:**  
+   - **Per Folder:** An Excel file is created from the grade text files, extracting student IDs, grades, and error details.
+   - **Final Aggregation:** A consolidated `final_grades.xlsx` is generated, which computes weighted final grades based on folder-specific weights (configurable in `main.py`).  
+   - **Slim Feature:** You can opt to generate a "slim" final Excel file that contains only the `ID_number` and `Final_Grade` columns, instead of all detailed per-question data.
 
----
+6. **Cleanup:**  
+   Temporary files (e.g., executables, `.obj` files) and previous grading outputs are cleaned before processing.
 
 ## Script Usage
 
-1. **Clone/Copy** this script into a `.py` file (e.g., `run_tests.py`).  
-2. **Adjust** the path to `vcvars64.bat` in `setup_visual_studio_environment()` if your Visual Studio installation is in a different location.  
-3. **Place** your question folders (e.g., `Q1`, `Q2`, etc.) in the same directory as this script, matching the structure above.  
-4. **Install** Python dependencies (at least `tqdm`):
+1. **Clone/Copy** the project files into your working directory.
+2. **Adjust** the path to `vcvars64.bat` in `Process.py` if necessary.
+3. **Organize** your question folders (`Q1`, `Q2`, `Q3`, etc.) according to the expected structure.
+4. **Install** required Python dependencies:
    ```bash
-   pip install tqdm
+   pip install tqdm pandas xlsxwriter
    ```
-5. **Run** the script:
+5. **Run** the main script:
    ```bash
-   python run_tests.py
+   python main.py
    ```
-6. **Check** each question folder for the newly created `output` and `grade` folders.
-
----
+6. **Review** the generated outputs:
+   - Individual output and grade text files will be in each question folder.
+   - A consolidated Excel file `final_grades.xlsx` is created in the project root.  
+     *Optionally, you can enable the slim mode in the Excel creation process to generate a simplified final grade file.*
 
 ## Customization
 
-- **VERBOSITY_LEVEL**:  
-  Set in the script; higher values yield more detailed console output.  
-- **Timeout**:  
-  The `run_executable()` function allows specifying a `timeout`. Default is 30 seconds.  
-- **Max Workers**:  
-  The script uses `os.cpu_count()` for parallel tasks. Modify if needed.
-
----
+- **VERBOSITY_LEVEL:**  
+  Adjust this in `Utils.py` for more or less console output.
+- **Timeouts and Worker Settings:**  
+  Timeout duration for each executable run and maximum parallel workers (default: `os.cpu_count()`) can be modified in `Process.py`.
+- **Slim Feature:**  
+  In `CreateExcel.py`, set the `slim` parameter to `True` when calling `create_excels()` to generate a final Excel file with only the student IDs and final grades. Setting it to `False` will include detailed per-question data.
 
 ## Troubleshooting
 
-- **Missing `cl.exe`**:  
-  Ensure you have installed the C++ build tools for Visual Studio.  
-  Run Developer Command Prompt for Visual Studio or double-check the `vcvars64.bat` path.
-- **No `input.txt`**:  
-  If there's no input file, the script will generate a warning, and the question might receive a partial or zero grade.
+- **Missing `cl.exe` or Build Tools:**  
+  Verify that Visual Studio with C++ build tools is installed and the path to `vcvars64.bat` is correct.
+- **Missing or Incorrect `input.txt`:**  
+  Ensure each question folder contains a properly formatted `input.txt`.
+- **Compilation Failures:**  
+  Check the grade text files for error messages; ensure that the source code in the `C` folder adheres to C standards.
 
----
-
-# Happy testing and grading!
+# Happy Testing and Grading!
+```
