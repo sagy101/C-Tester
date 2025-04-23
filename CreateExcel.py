@@ -201,10 +201,3 @@ def create_excels(grade_folders, folder_weights, slim=True):
     else:
         log("No valid folder data available to compute final grades.", level="warning")
 
-
-if __name__ == "__main__":
-    # Define your parent folders here (e.g., Q1, Q2, Q3)
-    grade_folders = ["Q1", "Q2", "Q3"]
-    # Weight in percentage for each grade_folder
-    folder_weights = {grade_folders[0]: 25, grade_folders[1]: 45, grade_folders[2]: 30}
-    create_excels(grade_folders, folder_weights)

@@ -6,7 +6,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ## Requirements
 
-- **Operating System:** Windows (script uses `cmd` and Visual Studio’s C++ compiler)
+- **Operating System:** Windows (script uses `cmd` and Visual Studio's C++ compiler)
 - **Visual Studio 2022:** Community or higher, with C++ build tools installed  
   *Ensure the path to `vcvars64.bat` is correct (default: `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`).*
 - **Python 3:** Tested with standard libraries, plus:
@@ -22,6 +22,9 @@ This project automates the batch grading of multiple C programs. It sets up the 
 ## Project Structure
 
 The project consists of the following Python files:
+
+- **preprocess.py** (New)
+  Handles the initial processing of student submissions from a zip archive. Extracts nested zips, identifies student IDs from folder names, finds C files (*_qN.c), renames them to `ID.c`, and moves them to the appropriate `QN/C/` folder. Reports any submissions that couldn't be processed correctly to `submit_error.txt`.
 
 - **Process.py**  
   Sets up the Visual Studio environment, reads inputs, compiles and executes C files (excluding `original_sol.c`), compares outputs with a ground truth solution, and writes individual grade text files.
@@ -76,7 +79,7 @@ The expected folder structure for each question (e.g., `Q1`, `Q2`, `Q3`) is:
    - Compiles and executes `original_sol.c` to generate correct output (ground truth) for each input.
 
 3. **Compilation and Execution:**  
-   - All C files in the `C` subfolder (excluding `original_sol.c`) are compiled in parallel using Visual Studio’s `cl`.
+   - All C files in the `C` subfolder (excluding `original_sol.c`) are compiled in parallel using Visual Studio's `cl`.
    - Each compiled executable is run with every input, and the outputs are stored in an `output` folder.
    - Outputs are compared with the ground truth to calculate a grade and to note any discrepancies or timeouts.
 
@@ -86,7 +89,7 @@ The expected folder structure for each question (e.g., `Q1`, `Q2`, `Q3`) is:
 5. **Excel Report Generation:**  
    - **Per Folder:** An Excel file is created from the grade text files, extracting student IDs, grades, and error details.
    - **Final Aggregation:** A consolidated `final_grades.xlsx` is generated, which computes weighted final grades based on folder-specific weights (configurable in `main.py`).  
-   - **Slim Feature:** You can opt to generate a "slim" final Excel file that contains only the `ID_number` and `Final_Grade` columns, instead of all detailed per-question data.
+   - **Slim Feature:** You can opt to generate a "slim" final Excel file that contains only the student IDs and final grades.
 
 6. **Cleanup:**  
    Temporary files (e.g., executables, `.obj` files) and previous grading outputs are cleaned before processing.
@@ -100,13 +103,55 @@ The expected folder structure for each question (e.g., `Q1`, `Q2`, `Q3`) is:
    ```bash
    pip install tqdm pandas xlsxwriter
    ```
-5. **Run** the main script:
-   ```bash
-   python main.py
-   ```
+5. **Run** the main script using the desired command:
+
+   The main script (`main.py`) now accepts commands to perform different actions:
+
+   - **Preprocess submissions from a zip file:**
+       ```bash
+       python main.py preprocess --zip-path <path_to_your_zip_file.zip>
+       ```
+       This command extracts submissions from the specified main zip file. It expects the main zip to contain individual zip files for each student (e.g., `Student Name_12345_assign_file_ID.zip`). It then extracts each student zip, finds C files named like `somefile_q1.c`, `another_q2.c`, etc., renames them to `ID.c` (using the ID from the folder name), and places them into the corresponding `Q1/C/`, `Q2/C/`, etc. folders. If any submissions cannot be processed (e.g., missing C files, incorrect folder naming for ID extraction), details are logged to `submit_error.txt`.
+
+   - **Run the full grading process:**
+       ```bash
+       python main.py run
+       ```
+       This will execute the tests, compare outputs, and generate all grade files and Excel reports.
+
+   - **Clean up generated files:**
+     Use the `clear` command followed by what you want to clear:
+       - Clear grades folders:
+           ```bash
+           python main.py clear grades
+           ```
+       - Clear output folders:
+           ```bash
+           python main.py clear output
+           ```
+       - Clear C source folders (removes student code copies in `QN/C/`):
+           ```bash
+           python main.py clear c
+           ```
+       - Delete all build files (`*.exe`, `*.obj`):
+           ```bash
+           python main.py clear build
+           ```
+       - Clear grades, output, excel, and build files together:
+           ```bash
+           python main.py clear all
+           ```
+           *(Note: `clear all` does not include `clear c`)*
+
+   - **View help:**
+       ```bash
+       python main.py --help
+       ```
+       This displays all available commands and their descriptions.
+
 6. **Review** the generated outputs:
-   - Individual output and grade text files will be in each question folder.
-   - A consolidated Excel file `final_grades.xlsx` is created in the project root.  
+   - Individual output and grade text files will be in each question folder (if not cleared).
+   - A consolidated Excel file `final_grades.xlsx` is created in the project root (if not cleared).
      *Optionally, you can enable the slim mode in the Excel creation process to generate a simplified final grade file.*
 
 ## Customization

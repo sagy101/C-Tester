@@ -379,9 +379,3 @@ def run_tests(questions):
         cleanup_obj_files()
         log("All temporary files cleaned.", "success")
 
-
-if __name__ == "__main__":
-    # Define your parent folders here (e.g., Q1, Q2, Q3)
-    grade_folders = ["Q1", "Q2", "Q3"]
-
-    run_tests(grade_folders)
