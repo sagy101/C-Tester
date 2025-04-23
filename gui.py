@@ -5,6 +5,7 @@ import threading
 import sys
 import io
 import os
+import re # Import regex module
 
 # Import backend functions
 from main import questions # Use questions list from main
@@ -37,8 +38,10 @@ class GuiStream(io.StringIO):
 
     def _insert_text(self, s):
         try:
+            # Strip ANSI escape codes
+            clean_s = re.sub(r'\x1b\[[0-9;]*m', '', s)
             self.textbox.configure(state="normal")
-            self.textbox.insert(tk.END, s)
+            self.textbox.insert(tk.END, clean_s) # Insert the cleaned string
             self.textbox.configure(state="disabled")
             self.textbox.see(tk.END) # Scroll to the end
         except tk.TclError:
