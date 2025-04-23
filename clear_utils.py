@@ -18,12 +18,12 @@ def clear_folder_contents(folder_path):
             log(f'Failed to delete {file_path}. Reason: {e}', level="error") # Use log with error level
 
 def clear_grades(questions):
-    """Clears the contents of the 'grades' folder for each question."""
-    log("Clearing grades folders...", level="info") # Use log
+    """Clears the contents of the 'grade' folder for each question."""
+    log("Clearing grade folders...", level="info") # Use log
     for q_folder in questions:
-        grades_path = os.path.join(q_folder, 'grades')
+        grades_path = os.path.join(q_folder, 'grade')
         clear_folder_contents(grades_path)
-    log("Finished clearing grades folders.", level="success") # Use log with success level
+    log("Finished clearing grade folders.", level="success") # Use log with success level
 
 def clear_output(questions):
     """Clears the contents of the 'output' folder for each question."""
