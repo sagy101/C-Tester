@@ -1,0 +1,7 @@
+Example grade file for a student submission.
+File: example_student.c
+Grade: 95/100
+Comments: Passed all tests.
+
+This file (example_student_grade.txt) will be ignored by git.
+The .gitkeep file in this directory ensures the grade/ folder is tracked. 

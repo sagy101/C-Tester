@@ -1,0 +1,3 @@
+Example output from running student code (e.g., example_student.exe) with input.txt.
+This file (example_student.txt) will be ignored by git.
+The .gitkeep file in this directory ensures the output/ folder is tracked. 
