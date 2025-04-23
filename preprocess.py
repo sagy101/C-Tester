@@ -3,6 +3,26 @@ import zipfile
 import shutil
 import re
 import glob
+import threading
+from typing import Callable, Optional
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    class tqdm:
+        def __init__(self, iterable=None, *args, **kwargs):
+            self.iterable = iterable
+        def __iter__(self):
+            return iter(self.iterable)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def update(self, n=1):
+            pass
+
 from Utils import log
 
 def extract_main_zip(zip_filename):
@@ -159,7 +179,12 @@ def extract_zip(zip_path, extract_to):
         log(f"Error extracting '{zip_path}': {e}", level="error")
         return False
 
-def find_and_process_c_files(submission_folder, student_id, questions_base_path="."):
+def find_and_process_c_files(
+    submission_folder: str,
+    student_id: str,
+    questions_base_path: str = ".",
+    cancel_event: Optional[threading.Event] = None
+) -> tuple[str, set]:
     """Finds C files (*_qN.c), renames, moves them, and reports status.
 
     Searches the submission_folder first. If no files found, searches all
@@ -171,8 +196,8 @@ def find_and_process_c_files(submission_folder, student_id, questions_base_path=
           processed_q_numbers (set): Set of integers for successfully processed Q numbers.
     """
     processed_q_numbers = set()
-    status = 'not_found' # Default status
-    c_files_found_paths = [] # Store paths of found C files
+    status = 'not_found'
+    c_files_found_paths = []
 
     # 1. Search in the root submission folder
     log(f"Searching for C files in root: {submission_folder}", level="info")
@@ -208,6 +233,11 @@ def find_and_process_c_files(submission_folder, student_id, questions_base_path=
         else:
              log(f"No subfolders found in {submission_folder}", level="info")
 
+    # Check for cancellation before processing found files
+    if cancel_event and cancel_event.is_set():
+        log("File processing cancelled before starting.", "warning")
+        return "cancelled", processed_q_numbers
+
     # 3. Process all found C files (from root or subfolders)
     if not c_files_found_paths:
         log(f"No C files matching pattern '*_qN.c' found for submission ID {student_id} in {submission_folder} or its subfolders.", level="warning")
@@ -215,6 +245,12 @@ def find_and_process_c_files(submission_folder, student_id, questions_base_path=
 
     log(f"Processing {len(c_files_found_paths)} found C file(s) for ID {student_id}", level="info")
     for c_file_path in c_files_found_paths:
+        # --- Cancellation Check within loop --- 
+        if cancel_event and cancel_event.is_set():
+            log(f"File processing cancelled mid-way for ID {student_id}.", "warning")
+            status = "cancelled" # Mark status as cancelled
+            break # Exit loop
+
         filename = os.path.basename(c_file_path)
         # Extract question number: matches _q<digits>.c at the end
         match = re.search(r'_q(\d+)\.c$', filename, re.IGNORECASE)
@@ -240,17 +276,21 @@ def find_and_process_c_files(submission_folder, student_id, questions_base_path=
             log(f"Could not extract question number from filename '{filename}' (path: {c_file_path}). Skipping.", level="warning")
 
     # Final check on status: If files were found but none were processed successfully
-    if status != 'not_found' and not processed_q_numbers:
-        log(f"Files were found for ID {student_id}, but none could be processed successfully (check Q numbers in filenames).", level="warning")
-        # Treat as if not found for error reporting purposes if nothing was actually moved
+    if status == "cancelled":
+        pass # Keep status as cancelled
+    elif status != 'not_found' and not processed_q_numbers:
         status = 'not_found'
-    elif status == 'not_found' and processed_q_numbers: # Should not happen, but as a safeguard
-        log(f"Internal logic inconsistency: status is 'not_found' but processed questions exist for ID {student_id}. Reporting as 'ok_subfolder'.", level="error")
+    elif status == 'not_found' and processed_q_numbers:
         status = 'ok_subfolder'
 
     return status, processed_q_numbers
 
-def preprocess_submissions(zip_path, questions_list):
+def preprocess_submissions(
+    zip_path: str,
+    questions_list: list,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None
+):
     """
     Main function to preprocess submissions:
     1. Extracts the main zip.
@@ -288,6 +328,9 @@ def preprocess_submissions(zip_path, questions_list):
         log(f"Error creating base extraction folder '{base_extract_folder}': {e}", level="error")
         return
 
+    # --- Cancellation Point 1 (Before Extraction) --- 
+    if cancel_event and cancel_event.is_set(): log("Preprocessing cancelled before start.", "warning"); return
+
     # 1. Extract the main zip file
     if not extract_zip(zip_path, base_extract_folder):
         log("Aborting preprocessing due to error extracting main zip.", level="error")
@@ -297,6 +340,9 @@ def preprocess_submissions(zip_path, questions_list):
         except Exception as e:
             log(f"Error during cleanup after failed main extraction of '{base_extract_folder}': {e}", level="error")
         return
+
+    # --- Cancellation Point 2 (After Main Extract, Before Inner) --- 
+    if cancel_event and cancel_event.is_set(): log("Preprocessing cancelled after main extract.", "warning"); shutil.rmtree(base_extract_folder); return
 
     # 2. Find and extract inner zip files
     inner_zip_pattern = os.path.join(base_extract_folder, '*.zip')
@@ -322,7 +368,24 @@ def preprocess_submissions(zip_path, questions_list):
         "OK_SUBFOLDER_WARN": 6
     }
 
-    for inner_zip in inner_zips:
+    total_zips = len(inner_zips)
+    processed_zip_count = 0
+    description = "Processing student zips"
+
+    # Determine iterator
+    use_tqdm = TQDM_AVAILABLE and progress_callback is None
+    iterator_factory = tqdm if use_tqdm else lambda iterable, **kwargs: iterable
+
+    progress_iterator = iterator_factory(
+        inner_zips,
+        total=total_zips,
+        desc=description if use_tqdm else None,
+        unit="zip"
+        # No color codes needed here for tqdm format
+    )
+
+    for inner_zip in progress_iterator:
+        if cancel_event and cancel_event.is_set(): break
         zip_filename = os.path.basename(inner_zip)
         submission_name = os.path.splitext(zip_filename)[0]
         submission_folder_path = os.path.join(base_extract_folder, submission_name)
@@ -345,7 +408,7 @@ def preprocess_submissions(zip_path, questions_list):
                 student_id = id_match.group(1)
                 log(f"Processing submission folder: '{submission_folder_path}' for student ID: {student_id}", level="info")
 
-                status, processed_qs = find_and_process_c_files(submission_folder_path, student_id, ".")
+                status, processed_qs = find_and_process_c_files(submission_folder_path, student_id, ".", cancel_event)
 
                 missing_qs = expected_qs_set - processed_qs
                 missing_qs_str = ""
@@ -390,8 +453,17 @@ def preprocess_submissions(zip_path, questions_list):
         # Add issue to the list if one was generated
         if issue_priority is not None and issue_message is not None:
             submissions_issues.append((issue_priority, submission_name, issue_message))
+        
+        processed_zip_count += 1
+        if progress_callback:
+            progress_callback(processed_zip_count, total_zips, description)
 
-    # Report submissions with issues
+    # --- Cancellation Point 4 (Before Reporting/Cleanup) --- 
+    # Report only if not cancelled? Or report partial results?
+    if cancel_event and cancel_event.is_set():
+         log("Preprocessing was cancelled. Error report might be incomplete.", "warning")
+         # Optionally write partial report
+    
     if submissions_issues:
         error_file = "submit_error.txt"
         log(f"Found issues/warnings for {len(submissions_issues)} submissions. Writing details to '{error_file}'", level="warning")
@@ -412,15 +484,18 @@ def preprocess_submissions(zip_path, questions_list):
         except Exception as e:
              log(f"Could not write to error file '{error_file}': {e}", level="error")
     else:
-        log("All submissions processed without errors or warnings requiring reporting.", level="success")
+        if not (cancel_event and cancel_event.is_set()): # Only log full success if not cancelled
+             log("All submissions processed without errors or warnings requiring reporting.", level="success")
 
-    # 8. Delete the base extraction folder
-    log(f"Cleaning up temporary folder: '{base_extract_folder}'", level="info")
-    try:
-        shutil.rmtree(base_extract_folder)
-        log("Cleanup successful.", level="success")
-    except Exception as e:
-        log(f"Error during final cleanup of '{base_extract_folder}': {e}", level="error")
+    # Cleanup only if not cancelled?
+    if not (cancel_event and cancel_event.is_set()):
+        # 8. Delete the base extraction folder
+        log(f"Cleaning up temporary folder: '{base_extract_folder}'", level="info")
+        try:
+            shutil.rmtree(base_extract_folder)
+            log("Cleanup successful.", level="success")
+        except Exception as e:
+            log(f"Error during final cleanup of '{base_extract_folder}': {e}", level="error")
 
     log("Preprocessing finished.", level="success")
 
