@@ -25,6 +25,6 @@ submit_error.txt
 # Keep specific example files ONLY in Q1 subdirectories
 !Q1/C/example_student.c
 !Q1/output/example_student.txt
-!Q1/grade/example_student_grade.txt
+!Q1/grade/example_student.txt
 
 
