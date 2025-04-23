@@ -33,12 +33,26 @@ def clear_grades(questions):
     log("Finished clearing grade folders.", level="success") # Use log with success level
 
 def clear_output(questions):
-    """Clears the contents of the 'output' folder for each question."""
-    log("Clearing output folders...", level="info") # Use log
+    """Clears the contents of the 'output' folder and deletes 
+    'original_sol_output.txt' for each question.
+    """
+    log("Clearing output folders and original_sol_output.txt files...", level="info") # Updated log message
     for q_folder in questions:
+        # Clear contents of the output subfolder
         output_path = os.path.join(q_folder, 'output')
         clear_folder_contents(output_path)
-    log("Finished clearing output folders.", level="success") # Use log with success level
+        
+        # Delete the original_sol_output.txt file in the parent question folder
+        original_output_file = os.path.join(q_folder, "original_sol_output.txt")
+        if os.path.exists(original_output_file):
+            try:
+                os.remove(original_output_file)
+                log(f"Deleted original solution output file: {original_output_file}", level="info")
+            except Exception as e:
+                log(f"Failed to delete {original_output_file}. Reason: {e}", level="error")
+        # else: File didn't exist, nothing to delete
+            
+    log("Finished clearing output folders and original_sol_output.txt files.", level="success") # Updated log message
 
 def clear_c_files(questions):
     """Clears the contents of the 'C' folder for each question."""
