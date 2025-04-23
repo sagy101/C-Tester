@@ -1,12 +1,23 @@
+# folders
 .venv/
 .idea/
 .vs/
 __pycache__/
-*.zip
 */output/*
 */C/*
 */grade/*
+
+# files types
+*.xlsx
+*.zip
+*.exe
+*.obj
+
+# specific files
 submit_error.txt
+
+
+
 # --- EXCEPTIONS --- #
 # Keep .gitkeep files to allow tracking empty directories (e.g., in Q2, Q3...)
 !*/.gitkeep
@@ -15,3 +26,5 @@ submit_error.txt
 !Q1/C/example_student.c
 !Q1/output/example_student.txt
 !Q1/grade/example_student_grade.txt
+
+

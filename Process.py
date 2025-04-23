@@ -218,10 +218,20 @@ def write_grade(grade_path, correct_count, total, discrepancies, compile_error, 
                     rounded_percentage = math.ceil(percentage)
                     grade_file.write(f"Grade: {rounded_percentage}%\n")
                     grade_file.write(f"(Calculated grade is: {percentage:.2f}%)\n")
+                    
+                    # Add Wrong Inputs line if there were discrepancies
+                    if discrepancies:
+                        wrong_inputs = [str(d[0]) for d in discrepancies]
+                        grade_file.write(f"Wrong Inputs: {', '.join(wrong_inputs)}\n")
+                    else:
+                         # Add line even if no wrong inputs, for consistency?
+                         # grade_file.write("Wrong Inputs: None\n") 
+                         pass # Or just omit the line
 
                 if timeout_count != 0:
                     grade_file.write(f"\nTimeouts: {timeout_count}/{total}\n")
 
+                # Write discrepancies AFTER the summary lines
                 if discrepancies:
                     grade_file.write("\nDiscrepancies:\n")
                     for input_value, expected, actual in discrepancies:

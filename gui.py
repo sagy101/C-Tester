@@ -95,7 +95,8 @@ class App(ctk.CTk):
         self.gui_questions = default_questions[:] # Make copies
         self.gui_weights = default_weights.copy()
         self.gui_penalty = default_penalty # Initialize GUI penalty
-        self.config_valid = False # Track current validity
+        self.config_valid = False
+        self.config_dirty = False # Track unapplied changes
         self.current_task_thread = None
         self.cancel_event = None
         self.config_rows = [] # To store row widgets [q_entry, w_entry]
@@ -146,6 +147,7 @@ class App(ctk.CTk):
         self.penalty_label.pack(side=tk.LEFT, padx=(0,5))
         self.penalty_entry = ctk.CTkEntry(self.penalty_frame, width=50)
         self.penalty_entry.pack(side=tk.LEFT)
+        self.penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty()) 
         
         # Buttons below table
         self.config_buttons_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
@@ -156,6 +158,7 @@ class App(ctk.CTk):
         self.remove_row_button.pack(side=tk.LEFT, padx=5)
         self.apply_config_button = ctk.CTkButton(self.config_buttons_frame, text="Apply Config", command=self.apply_gui_configuration, width=120)
         self.apply_config_button.pack(side=tk.LEFT, padx=5)
+        self._default_apply_button_color = self.apply_config_button.cget("border_color") # Store default border
 
         self.config_status_label = ctk.CTkLabel(self.config_frame, text="Status: Unknown", anchor="w", text_color="gray")
         self.config_status_label.grid(row=5, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
@@ -389,29 +392,42 @@ class App(ctk.CTk):
         self.clear_all_button.configure(command=lambda: self.run_task(lambda: clear_all(self.gui_questions)))
 
     def _add_config_row(self, question_name="", weight=""):
-        """Adds a row of entry widgets to the config table."""
+        """Adds a row of entry widgets and binds KeyRelease event."""
         row_index = len(self.config_rows)
         q_entry = ctk.CTkEntry(self.config_table_frame)
         q_entry.grid(row=row_index, column=0, padx=5, pady=2, sticky="ew")
         q_entry.insert(0, question_name)
+        q_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
 
         w_entry = ctk.CTkEntry(self.config_table_frame, width=80) # Fixed width for weight
         w_entry.grid(row=row_index, column=1, padx=5, pady=2, sticky="ew")
         w_entry.insert(0, str(weight))
+        w_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
 
         self.config_rows.append([q_entry, w_entry])
 
     def add_new_config_row_action(self):
-        """Action for the 'Add Question' button."""
         self._add_config_row()
+        self.mark_config_dirty()
 
     def remove_last_config_row_action(self):
-        """Action for the 'Remove Last' button."""
-        if not self.config_rows:
-            return
+        if not self.config_rows: return
         last_row_widgets = self.config_rows.pop()
         for widget in last_row_widgets:
             widget.destroy()
+        self.mark_config_dirty()
+        
+    def mark_config_dirty(self):
+        """Updates UI to show configuration needs applying."""
+        if self.config_dirty: return # Already marked
+        self.config_dirty = True
+        self.config_status_label.configure(text="Status: Unapplied changes", text_color="#FFA000") # Orange
+        # Highlight Apply button (e.g., border color)
+        self.apply_config_button.configure(border_color="#FFA000", border_width=2) 
+        # Disable run buttons when dirty
+        self.preprocess_button.configure(state="disabled")
+        self.run_button.configure(state="disabled")
+        log("Configuration changed, please Apply.", "info")
 
     def populate_config_fields(self):
         """Populates the table and penalty field with the current config."""
@@ -434,7 +450,7 @@ class App(ctk.CTk):
         self.penalty_entry.insert(0, str(self.gui_penalty))
 
     def apply_gui_configuration(self):
-        """Parses GUI table and penalty, validates, updates state and buttons."""
+        """Parses, validates, updates state, resets dirty flag and UI."""
         parsed_questions = []
         parsed_weights = {}
         parse_errors = []
@@ -474,29 +490,41 @@ class App(ctk.CTk):
             messagebox.showerror("Configuration Parse Error", "\n".join(parse_errors))
             self.config_status_label.configure(text="Status: Invalid Input", text_color="#F44336")
             self.config_valid = False
+            self.config_dirty = True # Still dirty, needs fixing
+            self.apply_config_button.configure(border_color="#F44336", border_width=2) # Error border
             self.update_dependent_button_states()
             return
 
-        # Use the imported validator
         validation_errors = validate_config(parsed_questions, parsed_weights)
+        status_text = ""
+        status_color = "gray"
+        apply_border_color = self._default_apply_button_color
+        apply_border_width = 1 # Default maybe?
+        if hasattr(self.apply_config_button, "_apply_configure_kwargs"): # Get default width
+             apply_border_width = self.apply_config_button._apply_configure_kwargs.get("border_width", 1)
 
         if validation_errors:
-            self.config_valid = False
-            status_text = "Status: INVALID" 
-            status_color = "#F44336" # Red
-            tooltip = "\n".join(validation_errors)
-            messagebox.showwarning("Configuration Validation Error", tooltip)
+             self.config_valid = False
+             self.config_dirty = True # Still dirty, needs fixing
+             status_text = "Status: INVALID"
+             status_color = "#F44336" # Red
+             apply_border_color = "#F44336" # Error border
+             apply_border_width = 2
+             messagebox.showwarning("Configuration Validation Error", "\n".join(validation_errors))
         else:
-            self.config_valid = True
-            self.gui_questions = parsed_questions
-            self.gui_weights = parsed_weights
-            self.gui_penalty = parsed_penalty # Update penalty state
-            status_text = "Status: Valid" 
-            status_color = "#4CAF50" # Green
-            tooltip = "Configuration is valid."
-            log("GUI Configuration Applied and Validated.", "info")
+             self.config_valid = True
+             self.config_dirty = False # Applied successfully
+             self.gui_questions = parsed_questions
+             self.gui_weights = parsed_weights
+             self.gui_penalty = parsed_penalty
+             status_text = "Status: Valid"
+             status_color = "#4CAF50" # Green
+             # apply_border_color remains default
+             log("GUI Configuration Applied and Validated.", "info")
 
         self.config_status_label.configure(text=status_text, text_color=status_color)
+        # Reset Apply button appearance
+        self.apply_config_button.configure(border_color=apply_border_color, border_width=apply_border_width)
         self.update_dependent_button_states()
 
     def update_dependent_button_states(self):

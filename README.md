@@ -134,19 +134,27 @@ Recommended for interactive use.
     ```bash
     python gui.py
     ```
-2.  **Configure (Optional):** Modify the questions, weights, and penalty in the "Configuration" section and click "Apply Config". The status will indicate if the configuration is valid. Invalid configurations will disable relevant action buttons.
+2.  **Configure:**
+    *   The "Configuration" section displays the current questions and weights in a table.
+    *   Modify folder names and weights directly in the table.
+    *   Use "Add Question" to add a new empty row or "Remove Last" to delete the bottom row.
+    *   Edit the "Submission Error Penalty" value in its field.
+    *   **Important:** After making any changes, click **"Apply Config"**. This will parse and validate your inputs.
+        *   The **Status** label below the buttons will indicate if the current configuration is "Valid", "INVALID" (with details in a popup), or if there are "Unapplied changes".
+        *   The "Apply Config" button will be highlighted if changes are unapplied.
+        *   The "Run Preprocess" and "Run Grading" buttons are **disabled** if the configuration is invalid or has unapplied changes.
 3.  **Use the Actions:**
-    *   **Preprocessing:** Click "Browse" to select the main submissions zip file (containing individual student zips), then click "Run Preprocess".
-    *   **Grading:** Click "Run Grading" to start the compilation, execution, and report generation using the *currently applied GUI configuration*.
-    *   **Clear Actions:** Click the desired button to clear specific generated files or "Clear All". These actions use the *currently applied GUI question list* where needed.
-    *   **Output:** Logs, progress descriptions, and the progress bar appear at the bottom. You can cancel long-running tasks (Preprocessing, Grading) using the "Cancel Task" button.
+    *   **Preprocessing:** Click "Browse" to select the main submissions zip file, then click "Run Preprocess" (requires valid applied config).
+    *   **Grading:** Click "Run Grading" to start the compilation, execution, and report generation using the *currently applied GUI configuration* (requires valid applied config).
+    *   **Clear Actions:** Click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, All) use the *currently applied GUI question list*.
+    *   **Output:** Logs, progress descriptions, and the progress bar appear at the bottom. Long tasks can be cancelled.
 
 ### Command Line Interface (CLI)
 
-Suitable for scripting or users preferring the command line. Uses the configuration set in `configuration.py`.
+Suitable for scripting or users preferring the command line. Uses the static configuration set in `configuration.py`.
 
 1.  **Configure:** Edit `configuration.py` to define `questions`, `folder_weights`, and `penalty`.
-2.  **Run** `main.py` with commands (ensure dependencies are installed and environment is activated):
+2.  **Run** `main.py` with commands:
 
 <details>
   <summary>View CLI Commands</summary>
