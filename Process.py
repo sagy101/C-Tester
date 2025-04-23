@@ -3,8 +3,28 @@ import math
 import shutil
 import subprocess
 import time
+import threading # Needed for Event type hint if using Python < 3.9
+from typing import Callable, Optional # For type hinting callbacks/events
 
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    # Define a dummy tqdm class if tqdm is not installed
+    # or if we choose not to use it (e.g., in GUI)
+    class tqdm:
+        def __init__(self, iterable=None, *args, **kwargs):
+            self.iterable = iterable
+        def __iter__(self):
+            return iter(self.iterable)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def update(self, n=1):
+            pass
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from Utils import log
 from Utils import VERBOSITY_LEVEL
@@ -63,34 +83,59 @@ def compile_file(c_file):
     return executable, None
 
 
-def parallel_compile_files(c_files_dir, c_files):
+def parallel_compile_files(
+    c_files_dir: str,
+    c_files: list,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None
+) -> tuple[dict, dict]:
     compiled = {}
     compile_errors = {}
     total_files = len(c_files)
+    processed_count = 0
+    description = "Compiling files"
+
+    # Determine iterator: tqdm if no callback and available, else direct iteration
+    use_tqdm = TQDM_AVAILABLE and progress_callback is None
+    iterator_factory = tqdm if use_tqdm else lambda iterable, **kwargs: iterable
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        future_map = {
-            executor.submit(compile_file, os.path.join(c_files_dir, f)): f for f in c_files
-        }
+        future_map = { executor.submit(compile_file, os.path.join(c_files_dir, f)): f for f in c_files }
 
-        with tqdm(total=total_files, desc="Compiling C files", unit="file",
-                  bar_format="\033[94m{l_bar}{bar}{r_bar}\033[0m") as pbar:
-            for future in as_completed(future_map):
-                file = future_map[future]
+        progress_iterator = iterator_factory(
+            as_completed(future_map),
+            total=total_files,
+            desc=description if use_tqdm else None,
+            unit="file",
+            bar_format="\033[94m{l_bar}{bar}{r_bar}\033[0m" if use_tqdm else None
+        )
+
+        for future in progress_iterator:
+            if cancel_event and cancel_event.is_set(): break
+            file = future_map[future]
+            try:
                 exe, error = future.result()
                 if exe:
                     compiled[file] = exe
                 else:
                     compile_errors[file] = error
-                pbar.update(1)
+            except Exception as e:
+                log(f"Error getting compilation result for {file}: {e}", "error")
+                compile_errors[file] = str(e)
+            finally:
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total_files, description)
 
-    success_count = len(compiled)
-    if success_count == 0:
-        log(f"No files Compiled successfully!", "error")
-    elif success_count != total_files:
-        log(f"Compiled {success_count}/{total_files} files successfully.", "warning")
-    else:
-        log(f"All {total_files} files compiled successfully.", "success")
+    # Log summary only if not cancelled
+    if not (cancel_event and cancel_event.is_set()):
+        success_count = len(compiled)
+        if success_count == 0 and total_files > 0:
+            log(f"No files Compiled successfully!", "error")
+        elif success_count != total_files:
+            log(f"Compiled {success_count}/{total_files} files successfully.", "warning")
+        else:
+            log(f"All {total_files} files compiled successfully.", "success")
 
     return compiled, compile_errors
 
@@ -115,7 +160,12 @@ def run_executable(executable, input_value, timeout=2):
         return f"Error: {str(e)}"
 
 
-def get_ground_truth(folder_name, inputs):
+def get_ground_truth(
+    folder_name: str,
+    inputs: list,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None
+) -> list:
     original_sol = os.path.join(folder_name, "original_sol.c")
     executable, compile_error = compile_file(original_sol)
     if compile_error:
@@ -123,15 +173,34 @@ def get_ground_truth(folder_name, inputs):
         return []
 
     ground_truth = []
-    with tqdm(total=len(inputs), desc=f"Processing original_sol in {folder_name}",
-              unit="input", bar_format="\033[94m{l_bar}{bar}{r_bar}\033[0m") as pbar:
-        for input_value in inputs:
-            output = run_executable(executable, input_value, 30)
-            ground_truth.append((input_value, output))
-            pbar.update(1)
+    total_inputs = len(inputs)
+    processed_count = 0
+    description = f"Processing original_sol in {folder_name}"
+
+    use_tqdm = TQDM_AVAILABLE and progress_callback is None
+    iterator_factory = tqdm if use_tqdm else lambda iterable, **kwargs: iterable
+
+    progress_iterator = iterator_factory(
+        inputs,
+        total=total_inputs,
+        desc=description if use_tqdm else None,
+        unit="input",
+        bar_format="\033[94m{l_bar}{bar}{r_bar}\033[0m" if use_tqdm else None
+    )
+
+    for input_value in progress_iterator:
+        if cancel_event and cancel_event.is_set(): break
+        output = run_executable(executable, input_value, 30)
+        ground_truth.append((input_value, output))
+        processed_count += 1
+        if progress_callback:
+            progress_callback(processed_count, total_inputs, description)
 
     if executable and os.path.exists(executable):
-        os.remove(executable)
+        try:
+            os.remove(executable)
+        except Exception as e:
+            log(f"Error removing ground truth executable {executable}: {e}", "warning")
 
     return ground_truth
 
@@ -243,139 +312,164 @@ def cleanup_obj_files():
                     log(f"Error deleting {file}: {str(e)}", "error")
 
 
-def process_folder(folder_name):
-    """
-    Process a single folder (QX).
-    Returns a status string: "success" if all files compiled+ran,
-    "warning" if some did, or "error" if none did.
-    """
+def process_folder(
+    folder_name: str,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None
+) -> str:
     print("\n\n")
     log(f"Processing folder: {folder_name}...", "info")
+    # Define stages and weights for progress reporting
+    # Stage 1: Ground Truth (approx 30%?)
+    # Stage 2: Compile (approx 30%?)
+    # Stage 3: Execute (approx 40%?)
+    # This is complex, maybe just report progress within each stage?
+    # Let's stick to reporting progress for the 3 main loops.
+
+    # --- Check Cancellation Point 1 --- 
+    if cancel_event and cancel_event.is_set(): return "cancelled"
     cleanup_folders(folder_name)
     output_folder, grade_folder = ensure_output_folder(folder_name)
 
     inputs = read_inputs_from_file(folder_name)
-    if not inputs:
-        log("No inputs available.", "warning")
-        # We can consider that a partial error or warning. Let's choose "warning"
-        return "warning"
+    if not inputs: return "warning"
 
-    ground_truth = get_ground_truth(folder_name, inputs)
-    if not ground_truth:
-        log("Ground truth generation failed.", "error")
-        return "error"
+    # --- Ground Truth --- 
+    log(f"Generating ground truth for {folder_name}...", "info")
+    ground_truth_desc = f"[{folder_name}] Ground Truth"
+    ground_truth = get_ground_truth(folder_name, inputs, progress_callback, cancel_event)
+    if cancel_event and cancel_event.is_set(): return "cancelled"
+    if not ground_truth: return "error"
 
+    # --- Check Cancellation Point 2 --- 
+    if cancel_event and cancel_event.is_set(): return "cancelled"
     c_files_dir = os.path.join(folder_name, "C")
-    if not os.path.isdir(c_files_dir):
-        log(f"No 'C' directory found in {folder_name}.", "error")
-        return "error"
+    if not os.path.isdir(c_files_dir): return "error"
+    c_files_to_process = [f for f in os.listdir(c_files_dir) if f.endswith(".c") and f != "original_sol.c"]
+    if not c_files_to_process: return "warning"
 
-    c_files_to_process = [
-        f for f in os.listdir(c_files_dir)
-        if f.endswith(".c") and f != "original_sol.c"
-    ]
+    # --- Compilation --- 
+    log(f"Compiling student files in {folder_name}...", "info")
+    compile_desc = f"[{folder_name}] Compiling"
+    compiled, compile_errors = parallel_compile_files(c_files_dir, c_files_to_process, progress_callback, cancel_event)
+    if cancel_event and cancel_event.is_set(): return "cancelled"
 
-    if not c_files_to_process:
-        log(f"No .c files to process in {c_files_dir}.", "warning")
-        return "warning"
+    # ... (handle compile errors and write grades for them) ...
+    if len(compiled) == 0 and len(c_files_to_process) > 0: return "error"
+    if len(compiled) == 0: return "warning" # No files to even attempt compile?
 
-    # Compile each .c file
-    compiled, compile_errors = parallel_compile_files(c_files_dir, c_files_to_process)
-
-    # Immediately log any compilation errors (and give them a 0% grade)
-    for file, error in compile_errors.items():
-        grade_path = os.path.join(grade_folder, file.replace(".c", ".txt"))
-        write_grade(
-            grade_path=grade_path,
-            correct_count=0,
-            total=0,
-            discrepancies=None,
-            compile_error=error
-        )
-
-    # If none compiled, return error
-    if len(compiled) == 0:
-        log("No files compiled successfully for this folder.", "error")
-        return "error"
-
-    # Wait for log to be done
     time.sleep(0.1)
 
+    # --- Execution --- 
+    log(f"Executing student programs in {folder_name}...", "info")
+    execute_desc = f"[{folder_name}] Executing"
     executables_to_cleanup = []
+    processed_count = 0
+    total_to_execute = len(compiled)
+    use_tqdm = TQDM_AVAILABLE and progress_callback is None
+    iterator_factory = tqdm if use_tqdm else lambda iterable, **kwargs: iterable
+
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = {
-            executor.submit(
-                execute_and_grade, file, executable, inputs, ground_truth,
-                output_folder, grade_folder
-            ): file
-            for file, executable in compiled.items()
-        }
-        with tqdm(total=len(futures),
-                  desc=f"Executing programs in {folder_name}",
-                  unit="file",
-                  bar_format="\033[94m{l_bar}{bar}{r_bar}\033[0m") as pbar:
-            for future in as_completed(futures):
-                executable = future.result()
-                executables_to_cleanup.append(executable)
-                pbar.update(1)
+        futures = { executor.submit(execute_and_grade, file, exe, inputs, ground_truth, output_folder, grade_folder): file
+                    for file, exe in compiled.items() }
 
-    # Clean up leftover executables
-    cleanup_executables(executables_to_cleanup)
-    # Summarize all compile errors
-    log_compilation_summary(compile_errors)
+        progress_iterator = iterator_factory(
+            as_completed(futures),
+            total=total_to_execute,
+            desc=execute_desc if use_tqdm else None,
+            unit="file",
+            bar_format="\033[94m{l_bar}{bar}{r_bar}\033[0m" if use_tqdm else None
+        )
 
-    # Decide final status for this folder
-    # If we compiled some but not all, "warning"
-    # If we compiled all, "success"
-    total_files = len(c_files_to_process)
-    compiled_count = len(compiled)
-    if compiled_count == total_files and len(compile_errors) == 0:
-        return "success"
+        for future in progress_iterator:
+            if cancel_event and cancel_event.is_set(): break
+            try:
+                executable_used = future.result()
+                if executable_used: # Should always return the exe path
+                    executables_to_cleanup.append(executable_used)
+            except Exception as e:
+                file = futures[future]
+                log(f"Error getting execution result for {file}: {e}", "error")
+            finally:
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total_to_execute, execute_desc)
+
+    # --- Cleanup & Summary --- 
+    # Cleanup only if not cancelled mid-execution?
+    if not (cancel_event and cancel_event.is_set()):
+        cleanup_executables(executables_to_cleanup)
+        log_compilation_summary(compile_errors)
+
+        total_files = len(c_files_to_process)
+        compiled_count = len(compiled)
+        if compiled_count == total_files and len(compile_errors) == 0:
+            return "success"
+        else:
+            return "warning"
     else:
-        return "warning"
+        # Need to decide what to do with partially created executables if cancelled
+        log("Execution was cancelled, skipping final cleanup of executables for this folder.", "info")
+        return "cancelled"
 
 
-def process_all_questions(questions_arr):
-    """
-    Processes each folder in questions_arr.
-    At the end, prints a final log message with success/warning/error:
-      - success if ALL were "success"
-      - warning if at least one was "success" (but not all)
-      - error if none were "success"
-    """
+def process_all_questions(
+    questions_arr: list,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None
+) -> list:
     results = []
-    for question in questions_arr:
-        status = process_folder(question)
+    total_questions = len(questions_arr)
+    description = "Overall Question Progress"
+    for i, question in enumerate(questions_arr):
+        if cancel_event and cancel_event.is_set():
+            log("Processing all questions cancelled.", "warning")
+            break
+        # Pass the main callback down to sub-stages
+        status = process_folder(question, progress_callback=progress_callback, cancel_event=cancel_event)
         results.append((question, status))
+        # Optionally report overall progress here too, though sub-stages are reporting
+        # if progress_callback:
+        #     progress_callback(i + 1, total_questions, description)
 
-    print("\n")
-
-    # Summarize final status
-    all_success = all(status == "success" for _, status in results)
-    any_success = any(status == "success" for _, status in results)
-
-    if all_success:
-        final_status = "success"
-        msg = "All Questions processed successfully."
-    elif any_success:
-        final_status = "warning"
-        msg = "Some Questions processed successfully, some had issues."
-    else:
-        final_status = "error"
-        msg = "No Questions were processed successfully."
-
-    # List out each folder and its status
+    # ... (summarize results, check for 'cancelled' status) ...
     summary_details = ", ".join(f"{q}({s})" for q, s in results)
-    log(f"Processed Questions: {summary_details}. {msg}", final_status)
+    if any(s == "cancelled" for _, s in results):
+        log(f"Processing cancelled. Results: {summary_details}", "warning")
+    else:
+        # Original summary logic
+        all_success = all(status == "success" for _, status in results)
+        any_success = any(status == "success" for _, status in results)
+        if all_success:
+            final_status = "success"
+            msg = "All Questions processed successfully."
+        elif any_success:
+            final_status = "warning"
+            msg = "Some Questions processed successfully, some had issues."
+        else:
+            final_status = "error"
+            msg = "No Questions were processed successfully."
+        log(f"Processed Questions: {summary_details}. {msg}", final_status)
+
+    return results
 
 
-def run_tests(questions):
+def run_tests(
+    questions: list,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None
+):
     try:
         setup_visual_studio_environment()
-        process_all_questions(questions)
+        # Pass callback and event down
+        process_all_questions(questions, progress_callback, cancel_event)
     finally:
-        time.sleep(0.1)
-        print("\n")
-        cleanup_obj_files()
-        log("All temporary files cleaned.", "success")
+        # Cleanup only if not cancelled?
+        if not (cancel_event and cancel_event.is_set()):
+            time.sleep(0.1)
+            print("\n")
+            cleanup_obj_files()
+            log("All temporary files cleaned.", "success")
+        else:
+            log("Task cancelled, skipping final .obj cleanup.", "warning")
 

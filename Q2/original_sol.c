@@ -4,14 +4,18 @@
 
 int main()
 {
-	int n, reverse = 0;
-    printf("Enter a number to reverse: ");
-    scanf("%d", &n);
+    int num = 0, reversedNum=0, sign = 1;
+    scanf("%d", &num);
+    if (num <0){ /// if num negitive sign =-1
+      sign=-1;
+      num= -num; /// made num positive to reverse
+      }
+    while (num>0){ /// while num has positive value we want to reverse
+      reversedNum = (reversedNum * 10) + (num % 10); /// we multiple reversedNum by 10 to add space to the new digit and add a digit from num
+      num = num / 10; /// we "remove" the digit from num
+      }
+    reversedNum = reversedNum * sign; /// we make sure the sign is added again
+	printf("Reverse of number is: %d\n", reversedNum);
 
-    while (n != 0) {
-        reverse = reverse * 10 + n % 10;
-        n /= 10;
-    }
-    printf("Reverse of number is: %d", reverse);
 	return 0;
 }

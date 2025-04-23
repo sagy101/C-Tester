@@ -52,6 +52,41 @@ def extract_timeouts(text):
     return 0
 
 
+def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
+    """Reads the submit_error.txt file and returns a dict mapping student ID to error reason."""
+    errors = {}
+    if not os.path.exists(error_file):
+        log(f"'{error_file}' not found. Assuming no preprocessing errors.", "info")
+        return errors
+
+    try:
+        with open(error_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("- "):
+                    content = line[2:] # Remove "- "
+                    # Try to extract ID assuming format "..._ID (Reason...)"
+                    # Regex: Match name parts, underscore, digits (ID), space, parenthesis (reason)
+                    match = re.match(r'^.+_(\d+)\s*\((.*)\)$' , content)
+                    if match:
+                        student_id = match.group(1)
+                        reason = match.group(2).strip()
+                        errors[student_id] = reason
+                    else:
+                        # Fallback: Maybe no reason in parenthesis? Try just ID extraction
+                        match_no_reason = re.match(r'^.+_(\d+)$' , content)
+                        if match_no_reason:
+                            student_id = match_no_reason.group(1)
+                            errors[student_id] = "Preprocessing Error (Unknown Reason)" # Generic reason
+                        else:
+                             log(f"Could not parse student ID or reason from error line: {line}", "warning")
+    except Exception as e:
+        log(f"Error reading or parsing '{error_file}': {e}", "error")
+
+    log(f"Parsed {len(errors)} entries from '{error_file}' for penalty application.", "info")
+    return errors
+
+
 def create_excel_for_grades(parent_folders):
     """
     For each folder in parent_folders, reads text files from the folder/grade subfolder,
@@ -107,7 +142,7 @@ def create_excel_for_grades(parent_folders):
     return folder_data
 
 
-def compute_final_grades(folder_data, folder_weights, slim=True):
+def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     """
     Given a dictionary mapping folder names to DataFrames (which now include extra columns)
     and corresponding weight percentages, computes the final weighted grade for each student.
@@ -115,6 +150,9 @@ def compute_final_grades(folder_data, folder_weights, slim=True):
     In the final Excel, the grade column headers now include the folder weight (e.g. "Grade_Q1_25%").
     Returns a final DataFrame containing the final grade and (optionally) all additional details.
     """
+    # Parse preprocessing errors for penalty application
+    submission_errors = parse_submit_errors()
+    
     final_df = None
     # Merge the DataFrames on 'ID_number'
     for folder, df in folder_data.items():
@@ -140,27 +178,55 @@ def compute_final_grades(folder_data, folder_weights, slim=True):
     for col in compile_columns:
         final_df[col] = final_df[col].fillna(False)
 
-    # Calculate final weighted grade using only the grade columns
+    # Calculate initial final weighted grade
     final_df["Final_Grade"] = 0
     for folder, weight in folder_weights.items():
         grade_column = f"Grade_{folder}_{weight}%"
         if grade_column in final_df.columns:
             final_df["Final_Grade"] += final_df[grade_column] * weight / 100
 
+    # Apply Penalty
+    final_df["Penalty Applied"] = "" # Initialize empty column
+    penalty_applied_count = 0
+
+    for index, row in final_df.iterrows():
+        student_id = str(row["ID_number"]) # Ensure comparison as string
+        if student_id in submission_errors:
+            penalty_applied_count += 1
+            reason = submission_errors[student_id]
+            original_grade = row["Final_Grade"]
+            penalized_grade = max(0, original_grade - penalty) # Use the passed penalty argument here
+            final_df.loc[index, "Final_Grade"] = penalized_grade
+            # Store reason and penalty amount using the passed penalty
+            final_df.loc[index, "Penalty Applied"] = f"{reason} (-{penalty}%) "
+            log(f"Applied penalty ({penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info")
+
+    if penalty_applied_count > 0:
+        log(f"Applied submission error penalty to {penalty_applied_count} students.", "warning")
+
     # Round the final grade up to the ceiling value
     final_df["Final_Grade"] = final_df["Final_Grade"].apply(math.ceil)
 
     if slim:
-        # Option 1: If you only want to upload the final grade, select just ID and Final_Grade:
+        # Option 1: Slim output
         final_output = final_df[["ID_number", "Final_Grade"]]
     else:
-        # Option 2: Include all per-question details along with the final grade:
-        final_output = final_df
+        # Option 2: Full output - make sure Penalty Applied is included and maybe move it
+        # Get all columns except Final_Grade and Penalty Applied
+        other_cols = [col for col in final_df.columns if col not in ["Final_Grade", "Penalty Applied"]]
+        # Define desired column order
+        final_cols_order = ["ID_number"] + other_cols + ["Penalty Applied", "Final_Grade"]
+        # Reorder if all columns exist
+        if all(col in final_df.columns for col in final_cols_order):
+             final_output = final_df[final_cols_order]
+        else:
+            log("Warning: Columns mismatch during reordering, using default order.", "warning")
+            final_output = final_df # Fallback
 
     return final_output
 
 
-def create_excels(grade_folders, folder_weights, slim=True):
+def create_excels(grade_folders, folder_weights, penalty: int, slim=True):
     # Delete the final grades Excel file from the current directory if it exists
     final_output_excel = "final_grades.xlsx"
     if os.path.exists(final_output_excel):
@@ -175,7 +241,8 @@ def create_excels(grade_folders, folder_weights, slim=True):
 
     # Compute and write final grades if at least one folder was processed
     if folder_data:
-        final_grades_df = compute_final_grades(folder_data, folder_weights, slim)
+        # Pass the penalty value down to compute_final_grades
+        final_grades_df = compute_final_grades(folder_data, folder_weights, penalty, slim)
         # Use ExcelWriter with the XlsxWriter engine to enable formatting.
         with pd.ExcelWriter(final_output_excel, engine='xlsxwriter') as writer:
             final_grades_df.to_excel(writer, sheet_name='Sheet1', index=False)

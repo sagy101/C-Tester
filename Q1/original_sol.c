@@ -2,16 +2,20 @@
 
 #include <stdio.h>
 
-int main()
-{
-	int n, i;
-	printf("Input: n = ");
-	scanf("%d", &n);
-	printf("Output: ");
-	for (i = 1; i <= n; i++) {
-        if (n % i == 0) {
-            printf("%d ", i);
-        }
-    }
+int main() {
+	int num = 0, i;
+	scanf("%d", &num);
+	if (num == 0){ ///if num is zero we end
+		printf("%d has no Divisors!\n" , num);
+	}
+	else{
+		printf("Divisors of %d are: ",num);
+		for (i=1;i<=num;i++) {
+			if (num%i == 0) { ///if % is 0 so the number is divisor
+				printf("%d ",i);
+			}
+		}
+		printf("\n");
+	}
 	return 0;
 }

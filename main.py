@@ -6,23 +6,37 @@ from Process import run_tests
 from CreateExcel import create_excels
 from clear_utils import clear_grades, clear_output, clear_excels, clear_c_files, clear_all, clear_build_files
 from Utils import log
-from preprocess import preprocess_submissions # Import the new function
+from preprocess import preprocess_submissions
+# Import configuration from the new file
+from configuration import questions, folder_weights, penalty, validate_config
 
-# Define your parent folders here (e.g., Q1, Q2, Q3)
-questions = ["Q1", "Q2"]
+# Define your parent folders here - REMOVED, now in configuration.py
+# questions = ["Q1", "Q2"]
 
-# Weight in percentage for each question
-folder_weights = {questions[0]: 25, questions[1]: 45}
+# Weight in percentage for each question - REMOVED, now in configuration.py
+# folder_weights = {questions[0]: 50, questions[1]: 50}
 
-def run_grading(questions):
+def run_grading(questions_to_run):
     """Runs the test and creates the Excel files."""
     log("Starting grading process...", level="info")
-    run_tests(questions)
-    # Slim makes a final excel with only final grades, or with details per question
-    create_excels(questions, slim=False)
+    # Pass the globally imported questions list from configuration
+    run_tests(questions_to_run)
+    # Pass the globally imported weights and penalty from configuration
+    create_excels(questions_to_run, folder_weights, penalty, slim=False)
     log("\n\nDONE, HAPPY GRADING!", level="success")
 
 if __name__ == "__main__":
+    # --- Configuration Validation --- 
+    # Validate the imported configuration using the imported validator
+    config_errors = validate_config(questions, folder_weights)
+    if config_errors:
+        log("Configuration errors found:", level="error")
+        for error in config_errors:
+            log(f"- {error}", level="error")
+        sys.exit(1) # Stop execution
+    else:
+        log("Configuration validated successfully.", level="info")
+        
     parser = argparse.ArgumentParser(description="Run grading scripts or clear generated files.")
     subparsers = parser.add_subparsers(dest='command', help='Available commands', required=True) # Make command required
 
@@ -46,6 +60,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == 'run':
+        # Pass the imported config to run_grading
         run_grading(questions)
     elif args.command == 'preprocess':
         # Check if zip path exists
@@ -55,8 +70,10 @@ if __name__ == "__main__":
         if not zipfile.is_zipfile(args.zip_path):
              log(f"Error: Provided file is not a valid zip file: {args.zip_path}", level="error")
              sys.exit(1)
+        # Pass imported questions list
         preprocess_submissions(args.zip_path, questions)
     elif args.command == 'clear':
+        # Pass imported questions list
         if args.clear_command == 'grades':
             clear_grades(questions)
         elif args.clear_command == 'output':
