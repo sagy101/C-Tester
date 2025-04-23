@@ -9,19 +9,19 @@ This project automates the batch grading of multiple C programs. It sets up the 
 - **Operating System:** Windows (script uses `cmd` and Visual Studio's C++ compiler)
 - **Visual Studio 2022:** Community or higher, with C++ build tools installed  
   *Ensure the path to `vcvars64.bat` is correct (default: `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`).*
-- **Python 3:** Tested with standard libraries, plus:
-  - `tqdm` for progress bars  
-    ```bash
-    pip install tqdm
-    ```
-  - `pandas` and `xlsxwriter` for Excel file creation  
-    ```bash
-    pip install pandas xlsxwriter
-    ```
+- **Python 3:** Tested with standard libraries, plus dependencies listed in `requirements.txt`.
+
+  Install dependencies:
+  ```bash
+  pip install -r requirements.txt
+  ```
 
 ## Project Structure
 
 The project consists of the following Python files:
+
+- **gui.py** (New)
+  Provides a graphical user interface (GUI) built with CustomTkinter for running the preprocessing, grading, and clearing tasks interactively. Displays logs and progress in the interface.
 
 - **preprocess.py** (New)
   Handles the initial processing of student submissions from a zip archive. Extracts nested zips, identifies student IDs from folder names, finds C files (*_qN.c), renames them to `ID.c`, and moves them to the appropriate `QN/C/` folder. Reports any submissions that couldn't be processed correctly to `submit_error.txt`.
@@ -33,7 +33,7 @@ The project consists of the following Python files:
   Scans the grade text files in each question folder, extracts grades (including flags for compilation errors and timeouts), and creates Excel files per folder along with a consolidated final grade file (`final_grades.xlsx`). The slim feature here allows you to generate a simplified Excel file with only final grades if desired.
   
 - **main.py**  
-  Serves as the entry point by calling the test execution (grading) process and the Excel creation process. It defines the question folders (e.g., `Q1`, `Q2`, `Q3`) and their respective weights.
+  Serves as the **command-line** entry point for preprocessing, grading, and clearing actions. Also defines the question folders and weights.
   
 - **Utils.py**  
   Provides a simple logging function and a configurable verbosity level for console output.
@@ -96,58 +96,72 @@ The expected folder structure for each question (e.g., `Q1`, `Q2`, `Q3`) is:
 
 ## Script Usage
 
-1. **Clone/Copy** the project files into your working directory.
-2. **Adjust** the path to `vcvars64.bat` in `Process.py` if necessary.
-3. **Organize** your question folders (`Q1`, `Q2`, `Q3`, etc.) according to the expected structure.
-4. **Install** required Python dependencies:
-   ```bash
-   pip install tqdm pandas xlsxwriter
-   ```
-5. **Run** the main script using the desired command:
+You can run the tool either via the command line (`main.py`) or using the graphical interface (`gui.py`).
 
-   The main script (`main.py`) now accepts commands to perform different actions:
+### Graphical User Interface (GUI)
 
-   - **Preprocess submissions from a zip file:**
-       ```bash
-       python main.py preprocess --zip-path <path_to_your_zip_file.zip>
-       ```
-       This command extracts submissions from the specified main zip file. It expects the main zip to contain individual zip files for each student (e.g., `Student Name_12345_assign_file_ID.zip`). It then extracts each student zip, finds C files named like `somefile_q1.c`, `another_q2.c`, etc., renames them to `ID.c` (using the ID from the folder name), and places them into the corresponding `Q1/C/`, `Q2/C/`, etc. folders. If any submissions cannot be processed (e.g., missing C files, incorrect folder naming for ID extraction), details are logged to `submit_error.txt`.
+1.  **Ensure** all requirements (Visual Studio, Python, dependencies) are installed:
+    ```bash
+    pip install -r requirements.txt
+    ```
+2.  **Run** the GUI script:
+    ```bash
+    python gui.py
+    ```
+3.  **Use the interface:**
+    *   **Preprocessing:** Click "Browse" to select the main submissions zip file, then click "Run Preprocess".
+    *   **Grading:** Click "Run Grading" to start the compilation and testing process.
+    *   **Clear Actions:** Click the desired button to clear specific generated files (grades, output, C files, excels, build files) or click "Clear All".
+    *   **Output:** Logs and progress information from the running tasks will appear in the text box at the bottom.
 
-   - **Run the full grading process:**
-       ```bash
-       python main.py run
-       ```
-       This will execute the tests, compare outputs, and generate all grade files and Excel reports.
+### Command Line Interface (CLI)
 
-   - **Clean up generated files:**
-     Use the `clear` command followed by what you want to clear:
-       - Clear grades folders:
-           ```bash
-           python main.py clear grades
-           ```
-       - Clear output folders:
-           ```bash
-           python main.py clear output
-           ```
-       - Clear C source folders (removes student code copies in `QN/C/`):
-           ```bash
-           python main.py clear c
-           ```
-       - Delete all build files (`*.exe`, `*.obj`):
-           ```bash
-           python main.py clear build
-           ```
-       - Clear grades, output, excel, and build files together:
-           ```bash
-           python main.py clear all
-           ```
-           *(Note: `clear all` does not include `clear c`)*
+1.  **Ensure** requirements are installed.
+2.  **Organize** your question folders (`Q1`, `Q2`, `Q3`, etc.) according to the expected structure.
+3.  **Adjust** the path to `vcvars64.bat` in `Process.py` if necessary.
+4.  **Run** `main.py` with the desired command:
 
-   - **View help:**
-       ```bash
-       python main.py --help
-       ```
-       This displays all available commands and their descriptions.
+    - **Preprocess submissions from a zip file:**
+        ```bash
+        python main.py preprocess --zip-path <path_to_your_zip_file.zip>
+        ```
+        This command extracts submissions from the specified main zip file. It expects the main zip to contain individual zip files for each student (e.g., `Student Name_12345_assign_file_ID.zip`). It then extracts each student zip, finds C files named like `somefile_q1.c`, `another_q2.c`, etc., renames them to `ID.c` (using the ID from the folder name), and places them into the corresponding `Q1/C/`, `Q2/C/`, etc. folders. If any submissions cannot be processed (e.g., missing C files, incorrect folder naming for ID extraction), details are logged to `submit_error.txt`.
+
+    - **Run the full grading process:**
+        ```bash
+        python main.py run
+        ```
+        This will execute the tests, compare outputs, and generate all grade files and Excel reports.
+
+    - **Clean up generated files:**
+      Use the `clear` command followed by what you want to clear:
+        - Clear grades folders:
+            ```bash
+            python main.py clear grades
+            ```
+        - Clear output folders:
+            ```bash
+            python main.py clear output
+            ```
+        - Clear C source folders (removes student code copies in `QN/C/`):
+            ```bash
+            python main.py clear c
+            ```
+        - Delete all build files (`*.exe`, `*.obj`):
+            ```bash
+            python main.py clear build
+            ```
+        - Clear grades, output, excel, and build files together:
+            ```bash
+            python main.py clear all
+            ```
+            *(Note: `clear all` does not include `clear c`)*
+
+    - **View help:**
+        ```bash
+        python main.py --help
+        ```
+        This displays all available commands and their descriptions.
 
 6. **Review** the generated outputs:
    - Individual output and grade text files will be in each question folder (if not cleared).
@@ -171,6 +185,18 @@ The expected folder structure for each question (e.g., `Q1`, `Q2`, `Q3`) is:
   Ensure each question folder contains a properly formatted `input.txt`.
 - **Compilation Failures:**  
   Check the grade text files for error messages; ensure that the source code in the `C` folder adheres to C standards.
+
+### GUI / Tkinter Issues
+
+- **Error: `ModuleNotFoundError: No module named 'tkinter'` when running `gui.py`:**
+  This means the Tkinter library, which the GUI depends on, is not found in your Python environment. Tkinter relies on a Tcl/Tk installation that should be included with your base Python installation.
+  - **Solution:**
+    1.  Ensure your base Python installation includes Tcl/Tk. If you installed Python from python.org, run the installer again, choose "Modify", and make sure the "tcl/tk and IDLE" feature is checked.
+    2.  After modifying your base Python, it's recommended to **recreate** your virtual environment (`.venv`) to ensure it correctly links to the updated base Python. Deactivate the current environment (if active), delete the `.venv` folder, create a new one (`python -m venv .venv` or `py -m venv .venv`), activate it, and reinstall dependencies (`pip install -r requirements.txt`).
+    3.  You can test if Tkinter is available in your active environment by running `python -m tkinter` in the terminal. A small test window should appear.
+
+- **Network Errors during `pip install -r requirements.txt` (e.g., `WinError 10013`)**
+  This usually indicates a problem connecting to the Python Package Index (PyPI). It might be caused by a firewall, proxy server, or antivirus software interfering with the connection. Check your network settings and security software configurations.
 
 # Happy Testing and Grading!
 ```
