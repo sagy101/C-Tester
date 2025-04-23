@@ -173,7 +173,7 @@ Recommended for interactive use.
         *   The "Run Preprocess" and "Run Grading" buttons are **disabled** if the configuration is invalid or has unapplied changes.
 3.  **Use the Actions:**
     *   **Preprocessing:** Click "Browse" to select the main submissions zip file (containing individual student zips), then click "Run Preprocess" (requires valid applied config).
-    *   **Grading:** Click "Run Grading" to start the compilation, execution, and report generation using the *currently applied GUI configuration* (requires valid applied config).
+    *   **Grading:** Click "Run Grading" to start the compilation, execution, and report generation using the *currently applied GUI configuration*. The tool will re-validate the folder structure (`C/`, `input.txt`, `original_sol.c`) for the configured questions just before starting; if issues are found, it will show an error and stop.
     *   **Clear Actions:** Click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, All) use the *currently applied GUI question list*.
     *   **Output:** Logs, progress descriptions, and the progress bar appear at the bottom. Long tasks can be cancelled.
 
