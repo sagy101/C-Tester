@@ -15,10 +15,3 @@ Comments: Passed all tests.
 
 
 This file (example_student_grade.txt) will be ignored by git.
-
-
-The .gitkeep file in this directory ensures the grade/ folder is tracked. 
-
-Diff for: ‎clear_utils.py
-Copy file name to clipboard
-Expand all lines: clear_utils.py
