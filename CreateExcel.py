@@ -221,32 +221,28 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     if penalty_applied_count > 0:
         log(f"Applied submission error penalty to {penalty_applied_count} students.", "warning")
 
-    # Round the final grade up to the ceiling value
+    # Round the final grade
     final_df["Final_Grade"] = final_df["Final_Grade"].apply(math.ceil)
 
-    # --- Aggregate Wrong Inputs for Final Report --- 
-    if not slim:
-        final_df["Failed Test Cases"] = ""
-        for index, row in final_df.iterrows():
-            failed_cases_list = []
-            # Iterate through the renamed wrong_input_columns
-            for col_name in wrong_input_columns:
-                wrong_inputs_str = row[col_name]
-                if wrong_inputs_str: # Check if there's data in the column
-                    # Extract question name (e.g., Q1) from column name (Wrong_Inputs_Q1)
-                    q_name_match = re.match(r'Wrong_Inputs_(Q\d+)', col_name)
-                    if q_name_match:
-                        q_name = q_name_match.group(1)
-                        failed_cases_list.append(f"{q_name}: {wrong_inputs_str}")
-            # Join the list with newlines for the final cell
-            final_df.loc[index, "Failed Test Cases"] = "\n".join(failed_cases_list)
+    # --- Aggregate Wrong Inputs for Final Report (ALWAYS calculate this now) --- 
+    final_df["Failed Test Cases"] = ""
+    for index, row in final_df.iterrows():
+        failed_cases_list = []
+        for col_name in wrong_input_columns:
+            wrong_inputs_str = row[col_name]
+            if wrong_inputs_str:
+                q_name_match = re.match(r'Wrong_Inputs_(Q\d+)', col_name)
+                if q_name_match:
+                    q_name = q_name_match.group(1)
+                    failed_cases_list.append(f"{q_name}: {wrong_inputs_str}")
+        final_df.loc[index, "Failed Test Cases"] = "\n".join(failed_cases_list)
 
     # --- Handle Slim vs Full Output --- 
     if slim:
-        final_output = final_df[["ID_number", "Final_Grade"]]
+        # Slim output now includes ID, Failed Cases, and Grade
+        final_output = final_df[["ID_number", "Failed Test Cases", "Final_Grade"]]
     else:
-        # Option 2: Full output - make sure Penalty Applied is included and maybe move it
-        # Get all columns except the ones we explicitly place at the end or beginning
+        # Full output includes everything else plus Failed Cases, Penalty, Grade
         excluded_cols = ["ID_number", "Failed Test Cases", "Penalty Applied", "Final_Grade"]
         other_cols = [col for col in final_df.columns if col not in excluded_cols]
         
