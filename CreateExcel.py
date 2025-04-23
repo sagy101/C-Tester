@@ -3,6 +3,7 @@ import os
 import re
 import pandas as pd
 from Utils import log
+from configuration import penalty
 
 
 def delete_existing_excel_files(directory):
@@ -50,6 +51,17 @@ def extract_timeouts(text):
     if match:
         return int(match.group(1))
     return 0
+
+
+def extract_wrong_inputs(text):
+    """Extracts the list of wrong inputs from the text.
+    Looks for a pattern like 'Wrong Inputs: input1, input2, ...'
+    Returns the string content after the colon, or None if not found.
+    """
+    match = re.search(r'^Wrong Inputs:\s*(.*)$' , text, re.MULTILINE)
+    if match:
+        return match.group(1).strip() # Return the comma-separated string
+    return None # Return None if the line doesn't exist
 
 
 def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
@@ -107,7 +119,7 @@ def create_excel_for_grades(parent_folders):
             log(f"Skipping '{grade_folder}' - not found or not a directory.", level="warning")
             continue
 
-        rows = []  # Will store [student_id, grade, compilation_error, timeouts] for each file
+        rows = []  # Will store [student_id, grade, compilation_error, timeouts, wrong_inputs_str] for each file
 
         for filename in os.listdir(grade_folder):
             # Process only .txt files (adjust as needed)
@@ -126,14 +138,15 @@ def create_excel_for_grades(parent_folders):
             grade_value = extract_grade(text)
             compilation_error = extract_compilation_error(text)
             timeouts = extract_timeouts(text)
-            rows.append([student_id, grade_value, compilation_error, timeouts])
+            wrong_inputs_str = extract_wrong_inputs(text) # Extract the new info
+            
+            rows.append([student_id, grade_value, compilation_error, timeouts, wrong_inputs_str])
 
-        # Create a DataFrame from the rows with additional columns for error and timeouts
-        df = pd.DataFrame(rows, columns=["ID_number", "Grade", "Compilation_Error", "Timeouts"])
+        # Create a DataFrame with the new column
+        df = pd.DataFrame(rows, columns=["ID_number", "Grade", "Compilation_Error", "Timeouts", "Wrong_Inputs"])
 
-        # Write an Excel file for the folder's grades (including extra details)
+        # Write the per-question Excel
         output_excel = os.path.join(parent, f"{parent}_grades_to_upload.xlsx")
-        # You can similarly use ExcelWriter for individual folder files if you want to format them
         df.to_excel(output_excel, index=False)
         log(f"Created file: {output_excel} with {len(df)} records.", level="success")
 
@@ -161,7 +174,8 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
         df_temp = df.copy().rename(columns={
             "Grade": f"Grade_{folder}_{weight}%",
             "Compilation_Error": f"Compilation_Error_{folder}",
-            "Timeouts": f"Timeouts_{folder}"
+            "Timeouts": f"Timeouts_{folder}",
+            "Wrong_Inputs": f"Wrong_Inputs_{folder}" # Rename new column
         })
         if final_df is None:
             final_df = df_temp
@@ -172,11 +186,14 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     grade_columns = [col for col in final_df.columns if col.startswith("Grade_")]
     timeout_columns = [col for col in final_df.columns if col.startswith("Timeouts_")]
     compile_columns = [col for col in final_df.columns if col.startswith("Compilation_Error_")]
+    wrong_input_columns = [col for col in final_df.columns if col.startswith("Wrong_Inputs_")]
 
     final_df[grade_columns] = final_df[grade_columns].fillna(0)
     final_df[timeout_columns] = final_df[timeout_columns].fillna(0)
     for col in compile_columns:
         final_df[col] = final_df[col].fillna(False)
+    for col in wrong_input_columns:
+        final_df[col] = final_df[col].fillna("") # Fill missing wrong inputs with empty string
 
     # Calculate initial final weighted grade
     final_df["Final_Grade"] = 0
@@ -207,21 +224,48 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     # Round the final grade up to the ceiling value
     final_df["Final_Grade"] = final_df["Final_Grade"].apply(math.ceil)
 
+    # --- Aggregate Wrong Inputs for Final Report --- 
+    if not slim:
+        final_df["Failed Test Cases"] = ""
+        for index, row in final_df.iterrows():
+            failed_cases_list = []
+            # Iterate through the renamed wrong_input_columns
+            for col_name in wrong_input_columns:
+                wrong_inputs_str = row[col_name]
+                if wrong_inputs_str: # Check if there's data in the column
+                    # Extract question name (e.g., Q1) from column name (Wrong_Inputs_Q1)
+                    q_name_match = re.match(r'Wrong_Inputs_(Q\d+)', col_name)
+                    if q_name_match:
+                        q_name = q_name_match.group(1)
+                        failed_cases_list.append(f"{q_name}: {wrong_inputs_str}")
+            # Join the list with newlines for the final cell
+            final_df.loc[index, "Failed Test Cases"] = "\n".join(failed_cases_list)
+
+    # --- Handle Slim vs Full Output --- 
     if slim:
-        # Option 1: Slim output
         final_output = final_df[["ID_number", "Final_Grade"]]
     else:
         # Option 2: Full output - make sure Penalty Applied is included and maybe move it
-        # Get all columns except Final_Grade and Penalty Applied
-        other_cols = [col for col in final_df.columns if col not in ["Final_Grade", "Penalty Applied"]]
-        # Define desired column order
-        final_cols_order = ["ID_number"] + other_cols + ["Penalty Applied", "Final_Grade"]
-        # Reorder if all columns exist
+        # Get all columns except the ones we explicitly place at the end or beginning
+        excluded_cols = ["ID_number", "Failed Test Cases", "Penalty Applied", "Final_Grade"]
+        other_cols = [col for col in final_df.columns if col not in excluded_cols]
+        
+        # Define desired column order (ID first, then others, then specific last columns)
+        final_cols_order = ["ID_number"] + sorted(other_cols) + ["Failed Test Cases", "Penalty Applied", "Final_Grade"]
+        
+        # Ensure all columns exist before reordering
+        # This check might be overly cautious if we derive other_cols correctly
         if all(col in final_df.columns for col in final_cols_order):
              final_output = final_df[final_cols_order]
         else:
-            log("Warning: Columns mismatch during reordering, using default order.", "warning")
-            final_output = final_df # Fallback
+            log("Warning: Columns mismatch during final reordering, using default order.", "warning")
+            # Ensure ID is still first even in fallback
+            cols = list(final_df.columns)
+            if "ID_number" in cols:
+                cols.remove("ID_number")
+                final_output = final_df[["ID_number"] + cols]
+            else:
+                final_output = final_df 
 
     return final_output
 
