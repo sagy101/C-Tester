@@ -95,6 +95,7 @@ class App(ctk.CTk):
         self.gui_questions = default_questions[:] # Make copies
         self.gui_weights = default_weights.copy()
         self.gui_penalty = default_penalty # Initialize GUI penalty
+        self.slim_output_var = tk.BooleanVar(value=False) # Variable for slim checkbox
         self.config_valid = False
         self.config_dirty = False # Track unapplied changes
         self.current_task_thread = None
@@ -184,7 +185,13 @@ class App(ctk.CTk):
         self.grading_label = ctk.CTkLabel(self.grading_frame, text="Grading", font=ctk.CTkFont(size=14, weight="bold"))
         self.grading_label.grid(row=0, column=0, padx=10, pady=(10, 5))
         self.run_button = ctk.CTkButton(self.grading_frame, text="Run Grading", command=lambda: self.run_task(self.task_run_grading_internal))
-        self.run_button.grid(row=1, column=0, padx=10, pady=(5, 10))
+        self.run_button.grid(row=1, column=0, padx=10, pady=(5, 5))
+        # Add Slim Output Checkbox
+        self.slim_checkbox = ctk.CTkCheckBox(self.grading_frame, 
+                                           text="Slim Output (ID & Final Grade Only)",
+                                           variable=self.slim_output_var,
+                                           onvalue=True, offvalue=False)
+        self.slim_checkbox.grid(row=2, column=0, padx=10, pady=(5, 10), sticky="w")
 
         # Section 3: Clear Actions
         self.clear_frame = ctk.CTkFrame(self.controls_frame)
@@ -389,8 +396,10 @@ class App(ctk.CTk):
         # --- Proceed with Grading Task --- 
         run_tests(self.gui_questions, progress_callback, cancel_event)
         if not (cancel_event and cancel_event.is_set()):
-             # Pass the current GUI penalty value
-             create_excels(self.gui_questions, self.gui_weights, self.gui_penalty, slim=False)
+             # Get slim state from checkbox variable
+             slim_mode = self.slim_output_var.get()
+             log(f"Creating Excel output (Slim mode: {slim_mode})...", "info")
+             create_excels(self.gui_questions, self.gui_weights, self.gui_penalty, slim=slim_mode)
              log("Excel creation finished.", level="info")
         else:
              log("Skipping Excel creation due to cancellation.", "warning")
