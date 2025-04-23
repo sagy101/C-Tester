@@ -6,7 +6,7 @@ __pycache__/
 */output/*
 */C/*
 */grade/*
-
+submit_error.txt
 # --- EXCEPTIONS --- #
 # Keep .gitkeep files to allow tracking empty directories (e.g., in Q2, Q3...)
 !*/.gitkeep
