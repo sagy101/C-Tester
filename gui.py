@@ -8,7 +8,7 @@ import os
 import re # Import regex module
 
 # Import backend functions
-from main import questions # Use questions list from main
+from main import questions, folder_weights # Use questions list and weights from main
 from preprocess import preprocess_submissions
 from Process import run_tests
 from CreateExcel import create_excels
@@ -38,15 +38,54 @@ class GuiStream(io.StringIO):
 
     def _insert_text(self, s):
         try:
-            # Strip ANSI escape codes
+            # Clean ANSI codes
             clean_s = re.sub(r'\x1b\[[0-9;]*m', '', s)
+            if not clean_s: # Don't process empty strings
+                return
+
+            # Determine the tag based on the log level prefix
+            normalized_s = clean_s.lstrip() # Remove leading whitespace/newlines
+            tag_to_apply = "default_tag"
+            if normalized_s.startswith("[INFO]"):
+                tag_to_apply = "info_tag"
+            elif normalized_s.startswith("[SUCCESS]"):
+                tag_to_apply = "success_tag"
+            elif normalized_s.startswith("[WARNING]"):
+                tag_to_apply = "warning_tag"
+            elif normalized_s.startswith("[ERROR]"):
+                tag_to_apply = "error_tag"
+            # Add other potential prefixes like tqdm progress bar? Unlikely to match.
+
+            # --- Insert and Tag --- 
             self.textbox.configure(state="normal")
-            self.textbox.insert(tk.END, clean_s) # Insert the cleaned string
+            start_index = self.textbox.index(tk.END) # Index before insert
+            self.textbox.insert(tk.END, clean_s)
+            end_index = self.textbox.index(tk.END)   # Index after insert
+            
+            # Apply the tag to the inserted range if it's not the default
+            if tag_to_apply != "default_tag":
+                # Indices are complex, tk.END includes a newline.
+                # Tag from the character *before* the end index.
+                try:
+                    # Adjust for the newline Tkinter automatically adds
+                    actual_start = self.textbox.index(f"{start_index} -1c") if start_index != "1.0" else "1.0"
+                    actual_end = self.textbox.index(f"{end_index} -1c")
+                    # Ensure start is not after end (can happen with rapid updates)
+                    if self.textbox.compare(actual_start, "<=", actual_end):
+                       self.textbox.tag_add(tag_to_apply, actual_start, actual_end)
+                    # else: log to console if needed: print(f"Tagging skipped: start {actual_start} > end {actual_end}")
+                except tk.TclError as tag_error:
+                    # Handle potential errors during tagging itself, e.g., if indices become invalid
+                    print(f"Error applying tag '{tag_to_apply}': {tag_error}") # Log error to console
+
             self.textbox.configure(state="disabled")
-            self.textbox.see(tk.END) # Scroll to the end
+            self.textbox.see(tk.END)
         except tk.TclError:
-            # Handle cases where the widget might be destroyed
+            # Handle cases where the widget might be destroyed during the update
             pass
+        except Exception as e:
+             # Catch-all for other unexpected errors during text insertion/tagging
+             print(f"Error in GuiStream._insert_text: {e}")
 
     def flush(self):
         # CTkTextbox updates immediately, so flush is less critical
@@ -123,6 +162,15 @@ class App(ctk.CTk):
         # --- Log Frame Content ---
         self.log_textbox = ctk.CTkTextbox(self.log_frame, state="disabled", wrap="word", font=("Consolas", 11))
         self.log_textbox.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+
+        # Configure tags for log levels
+        # Using standard color names, could be themed later if needed
+        self.log_textbox.tag_config("info_tag", foreground="#1E88E5") # Blue
+        self.log_textbox.tag_config("success_tag", foreground="#4CAF50") # Green
+        self.log_textbox.tag_config("warning_tag", foreground="#FF9800") # Orange
+        self.log_textbox.tag_config("error_tag", foreground="#F44336") # Red
+        # Default tag uses the textbox's default text color (no explicit config needed unless overriding)
+        # self.log_textbox.tag_config("default_tag", foreground=self.log_textbox.cget("text_color"))
 
         # Store active buttons to disable during tasks
         self.active_buttons = [
@@ -205,7 +253,7 @@ class App(ctk.CTk):
         log("Starting grading task...", level="info")
         # Encapsulate original grading logic from main
         run_tests(questions)
-        create_excels(questions, slim=False)
+        create_excels(questions, folder_weights, slim=False)
         log("Grading task functions finished.", level="info") # Let wrapper add final message
 
 if __name__ == "__main__":
