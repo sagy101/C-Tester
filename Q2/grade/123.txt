@@ -1,5 +1,0 @@
-Grade: 0%
-Compilation error: Microsoft (R) C/C++ Optimizing Compiler Version 19.43.34809 for x64
-Copyright (C) Microsoft Corporation.  All rights reserved.
-
-
