@@ -367,6 +367,26 @@ class App(ctk.CTk):
 
     def task_run_grading_internal(self, progress_callback=None, cancel_event=None):
         log("Starting grading task...", level="info")
+        
+        # --- Re-validate configuration just before running --- 
+        log("Re-validating configuration before grading...", "info")
+        config_errors = validate_config(self.gui_questions, self.gui_weights)
+        if config_errors:
+            error_string = "Configuration check failed (folder structure changed?):\n\n" + "\n".join([f"- {e}" for e in config_errors])
+            error_string += "\n\nPlease check folder contents and re-apply configuration if needed."
+            log("Validation failed before grading run.", "error")
+            messagebox.showerror("Grading Configuration Error", error_string)
+            # Mark config as invalid in the GUI state
+            self.config_valid = False 
+            self.config_dirty = True # Force user to re-apply
+            self.after(10, self.update_dependent_button_states) # Update UI after returning
+            self.after(10, lambda: self.config_status_label.configure(text="Status: INVALID", text_color="#F44336")) 
+            self.after(10, lambda: self.apply_config_button.configure(border_color="#F44336", border_width=2))
+            return # Stop the task
+        else:
+            log("Configuration validated successfully.", "info")
+            
+        # --- Proceed with Grading Task --- 
         run_tests(self.gui_questions, progress_callback, cancel_event)
         if not (cancel_event and cancel_event.is_set()):
              # Pass the current GUI penalty value
