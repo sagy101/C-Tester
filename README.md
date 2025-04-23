@@ -1,10 +1,19 @@
 # C Auto Grader
 
+![Project Banner](docs/topBanner.png)
+
+*An automated tool for grading C programming assignments with GUI and CLI interfaces.*
+
 [![Python Version](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub issues](https://img.shields.io/github/issues/sagy101/C-Tester)](https://github.com/sagy101/C-Tester/issues) 
+<!-- Add other badges here if needed (e.g., build status, coverage, version) -->
 
-An automated tool for grading C programming assignments, featuring preprocessing, compilation, execution, output comparison, and report generation with a graphical user interface (GUI) and command-line interface (CLI).
+This project automates the batch grading of multiple C programs. It sets up the Visual Studio C++ build environment, compiles and executes student C source files against a known-correct solution, compares outputs, and produces grading reports. Additionally, it generates Excel files with detailed grade breakdowns for each question folder as well as a consolidated final grade file for easy uploading (e.g. Moodle). 
 
-## Features
+---
+
+## ✨ Features
 
 *   **Preprocessing:** Extracts student submissions from nested zip files, organizes C files (`*_qN.c`) into question folders (`QN/C/`), and renames them based on student ID. Reports processing issues.
 *   **Automated Grading:**
@@ -24,7 +33,9 @@ An automated tool for grading C programming assignments, featuring preprocessing
 *   **Flexible Configuration:** Define questions, weights, and penalties in `configuration.py` or override via the GUI.
 *   **Cleanup Utilities:** Easily clear generated files (grades, output, C copies, build files, excels) via GUI or CLI.
 
-## Screenshots
+---
+
+## 🖼️ Screenshots
 
 **Graphical User Interface (GUI):**
 
@@ -34,7 +45,9 @@ An automated tool for grading C programming assignments, featuring preprocessing
 
 ![CLI Screenshot](docs/cli.png)
 
-## Requirements
+---
+
+## 🔧 Requirements
 
 *   **Operating System:** Windows (uses `cmd` and Visual Studio's C++ compiler)
 *   **Visual Studio 2022:** Community or higher, with C++ build tools installed.
@@ -42,7 +55,9 @@ An automated tool for grading C programming assignments, featuring preprocessing
 *   **Python 3:** Tested with Python 3.10+. Tcl/Tk support required for the GUI (usually included with standard python.org installations - select "tcl/tk and IDLE" during setup/modify).
 *   **Dependencies:** Listed in `requirements.txt`.
 
-## Installation
+---
+
+## ⚙️ Installation
 
 1.  **Clone** or download the project files.
 2.  **Install** required Python dependencies (preferably within a virtual environment):
@@ -60,7 +75,9 @@ An automated tool for grading C programming assignments, featuring preprocessing
 3.  **Verify** Visual Studio path in `Process.py` (if not default).
 4.  **Prepare** Question Folders (see Structure below).
 
-## Project Structure
+---
+
+## 📁 Project Structure
 
 *   `configuration.py`: Defines questions, weights, penalty. **Edit this for CLI configuration.**
 *   `gui.py`: Entry point for the Graphical User Interface.
@@ -121,8 +138,9 @@ An automated tool for grading C programming assignments, featuring preprocessing
   ```
 </details>
 
+---
 
-## Usage
+## 🚀 Usage
 
 Choose the interface that suits your needs:
 
@@ -144,7 +162,7 @@ Recommended for interactive use.
         *   The "Apply Config" button will be highlighted if changes are unapplied.
         *   The "Run Preprocess" and "Run Grading" buttons are **disabled** if the configuration is invalid or has unapplied changes.
 3.  **Use the Actions:**
-    *   **Preprocessing:** Click "Browse" to select the main submissions zip file, then click "Run Preprocess" (requires valid applied config).
+    *   **Preprocessing:** Click "Browse" to select the main submissions zip file (containing individual student zips), then click "Run Preprocess" (requires valid applied config).
     *   **Grading:** Click "Run Grading" to start the compilation, execution, and report generation using the *currently applied GUI configuration* (requires valid applied config).
     *   **Clear Actions:** Click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, All) use the *currently applied GUI question list*.
     *   **Output:** Logs, progress descriptions, and the progress bar appear at the bottom. Long tasks can be cancelled.
@@ -189,7 +207,9 @@ Suitable for scripting or users preferring the command line. Uses the static con
       ```
 </details>
 
-## How It Works (Briefly)
+---
+
+## 📖 How It Works (Briefly)
 
 1.  **Preprocessing (`preprocess` command / GUI button):**
     *   Extracts main zip -> extracts inner student zips.
@@ -214,7 +234,9 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   Parses `submit_error.txt` and applies `penalty` from config.
     *   Generates `final_grades.xlsx` (full or slim format).
 
-## Troubleshooting
+---
+
+## 🐛 Troubleshooting
 
 <details>
   <summary>View Troubleshooting Tips</summary>
@@ -242,9 +264,11 @@ Suitable for scripting or users preferring the command line. Uses the static con
 
 </details>
 
-## License
+---
 
-[Specify License - e.g., MIT]
+## 📜 License
+
+This project is licensed under the MIT License - visit [https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT).
 
 ---
 
