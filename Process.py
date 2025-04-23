@@ -294,11 +294,28 @@ def log_compilation_summary(compile_errors):
 
 def cleanup_folders(base_folder):
     log(f"Cleaning folders in: {base_folder}", "info")
-    for root, dirs, files in os.walk(base_folder):
-        for dir_name in dirs:
-            if dir_name in ["output", "grade"]:
-                shutil.rmtree(os.path.join(root, dir_name), ignore_errors=True)
-                log(f"Cleaned: {dir_name}", "success", verbosity=2)
+    # Iterate through potential folders to clean (output, grade)
+    for folder_to_clean_name in ["output", "grade"]:
+        folder_path = os.path.join(base_folder, folder_to_clean_name)
+        if os.path.isdir(folder_path):
+            log(f"Cleaning contents of: {folder_path}", "info", verbosity=2)
+            for item_name in os.listdir(folder_path):
+                # Skip the specific example file
+                if item_name == "example_student.txt":
+                    log(f"Skipping cleanup of example file: {os.path.join(folder_path, item_name)}", "info", verbosity=2)
+                    continue
+                
+                item_path = os.path.join(folder_path, item_name)
+                try:
+                    if os.path.isfile(item_path) or os.path.islink(item_path):
+                        os.unlink(item_path)
+                        log(f"Cleaned file: {item_path}", "success", verbosity=3)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path) # Remove subdirectories if any
+                        log(f"Cleaned subdirectory: {item_path}", "success", verbosity=3)
+                except Exception as e:
+                    log(f"Error cleaning item {item_path}: {e}", "error")
+        # else: Folder didn't exist, nothing to clean
 
 
 def cleanup_executables(executables):
@@ -313,13 +330,25 @@ def cleanup_executables(executables):
 
 def cleanup_obj_files():
     log("Cleaning up all *.obj files...", "info")
+    deleted_count = 0
     for root, _, files in os.walk("."):
         for file in files:
             if file.endswith(".obj"):
+                # Skip example object file
+                if file == "example_student.obj":
+                    log(f"Skipping cleanup of example object file: {os.path.join(root, file)}", "info", verbosity=2)
+                    continue
                 try:
-                    os.remove(os.path.join(root, file))
+                    file_path = os.path.join(root, file)
+                    os.remove(file_path)
+                    deleted_count += 1
+                    log(f"Deleted obj file: {file_path}", "success", verbosity=3)
                 except Exception as e:
-                    log(f"Error deleting {file}: {str(e)}", "error")
+                    log(f"Error deleting obj file {os.path.join(root, file)}: {str(e)}", "error")
+    if deleted_count > 0:
+        log(f"Deleted {deleted_count} .obj file(s).", "info")
+    else:
+        log("No .obj files found to delete.", "info")
 
 
 def process_folder(
@@ -355,8 +384,15 @@ def process_folder(
     if cancel_event and cancel_event.is_set(): return "cancelled"
     c_files_dir = os.path.join(folder_name, "C")
     if not os.path.isdir(c_files_dir): return "error"
-    c_files_to_process = [f for f in os.listdir(c_files_dir) if f.endswith(".c") and f != "original_sol.c"]
-    if not c_files_to_process: return "warning"
+    
+    # Filter C files to process, EXCLUDING example_student.c
+    c_files_to_process = [
+        f for f in os.listdir(c_files_dir)
+        if f.endswith(".c") and f != "original_sol.c" and f != "example_student.c"
+    ]
+    if not c_files_to_process:
+        log(f"No student .c files (excluding examples/originals) to process in {c_files_dir}.", "warning")
+        return "warning" # Or success? If only example/original exist, maybe that's ok.
 
     # --- Compilation --- 
     log(f"Compiling student files in {folder_name}...", "info")

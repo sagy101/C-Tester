@@ -3,11 +3,18 @@ import glob
 from Utils import log # Import the log function
 
 def clear_folder_contents(folder_path):
-    """Removes all files within a given folder, but not the folder itself."""
+    """Removes all files within a given folder, but not the folder itself.
+    Skips deleting 'example_student.c' and 'example_student.txt'.
+    """
     if not os.path.isdir(folder_path):
         log(f"Directory not found: {folder_path}", level="warning") # Use log with warning level
         return
     for filename in os.listdir(folder_path):
+        # Skip the specific example files
+        if filename == "example_student.c" or filename == "example_student.txt":
+            log(f"Skipping deletion of example file: {os.path.join(folder_path, filename)}", "info", verbosity=2)
+            continue 
+            
         file_path = os.path.join(folder_path, filename)
         try:
             if os.path.isfile(file_path) or os.path.islink(file_path):

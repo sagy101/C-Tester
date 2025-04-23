@@ -122,8 +122,8 @@ def create_excel_for_grades(parent_folders):
         rows = []  # Will store [student_id, grade, compilation_error, timeouts, wrong_inputs_str] for each file
 
         for filename in os.listdir(grade_folder):
-            # Process only .txt files (adjust as needed)
-            if not filename.lower().endswith(".txt"):
+            # Process only .txt files AND skip example_student.txt
+            if not filename.lower().endswith(".txt") or filename == "example_student.txt":
                 continue
 
             # Example: filename = "id1_id2.txt" => "id1_id2"

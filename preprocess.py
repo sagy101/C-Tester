@@ -233,6 +233,12 @@ def find_and_process_c_files(
         else:
              log(f"No subfolders found in {submission_folder}", level="info")
 
+    # --- Filter out example file BEFORE processing --- 
+    original_count = len(c_files_found_paths)
+    c_files_found_paths = [p for p in c_files_found_paths if os.path.basename(p) != "example_student.c"]
+    if len(c_files_found_paths) < original_count:
+        log("Ignoring 'example_student.c' found during preprocessing search.", "info")
+
     # Check for cancellation before processing found files
     if cancel_event and cancel_event.is_set():
         log("File processing cancelled before starting.", "warning")
