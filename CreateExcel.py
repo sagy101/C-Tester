@@ -224,9 +224,12 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     # Round the final grade
     final_df["Final_Grade"] = final_df["Final_Grade"].apply(math.ceil)
 
-    # --- Aggregate Wrong Inputs for Final Report (ALWAYS calculate this now) --- 
-    final_df["Failed Test Cases"] = ""
+    # --- Create comprehensive Comments column with all information --- 
+    final_df["Comments"] = ""
     for index, row in final_df.iterrows():
+        comments_parts = []
+        
+        # 1. Add Failed Test Cases
         failed_cases_list = []
         for col_name in wrong_input_columns:
             wrong_inputs_str = row[col_name]
@@ -235,22 +238,54 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
                 if q_name_match:
                     q_name = q_name_match.group(1)
                     failed_cases_list.append(f"{q_name}: {wrong_inputs_str}")
-        final_df.loc[index, "Failed Test Cases"] = "\n".join(failed_cases_list)
+        if failed_cases_list:
+            comments_parts.append("Failed Test Cases:\n" + "\n".join(failed_cases_list))
+        
+        # 2. Add Penalty reason and amount
+        penalty_info = row["Penalty Applied"]
+        if penalty_info:
+            comments_parts.append(f"Penalty: {penalty_info}")
+        
+        # 3. Add Timeouts information
+        timeout_list = []
+        for col_name in timeout_columns:
+            timeout_count = row[col_name]
+            if timeout_count > 0:
+                q_name_match = re.match(r'Timeouts_(Q\d+)', col_name)
+                if q_name_match:
+                    q_name = q_name_match.group(1)
+                    timeout_list.append(f"{q_name}: {timeout_count} timeout(s)")
+        if timeout_list:
+            comments_parts.append("Timeouts:\n" + "\n".join(timeout_list))
+        
+        # 4. Add Compilation errors
+        compile_error_list = []
+        for col_name in compile_columns:
+            has_error = row[col_name]
+            if has_error:
+                q_name_match = re.match(r'Compilation_Error_(Q\d+)', col_name)
+                if q_name_match:
+                    q_name = q_name_match.group(1)
+                    compile_error_list.append(f"{q_name}: Compilation error")
+        if compile_error_list:
+            comments_parts.append("Compilation Errors:\n" + "\n".join(compile_error_list))
+        
+        # Join all parts with double newlines
+        final_df.loc[index, "Comments"] = "\n\n".join(comments_parts)
 
     # --- Handle Slim vs Full Output --- 
     if slim:
-        # Slim output now includes ID, Failed Cases, and Grade
-        final_output = final_df[["ID_number", "Failed Test Cases", "Final_Grade"]]
+        # Slim output now includes ID, Comments, and Grade
+        final_output = final_df[["ID_number", "Comments", "Final_Grade"]]
     else:
-        # Full output includes everything else plus Failed Cases, Penalty, Grade
-        excluded_cols = ["ID_number", "Failed Test Cases", "Penalty Applied", "Final_Grade"]
+        # Full output includes everything else plus Comments, Penalty, Grade
+        excluded_cols = ["ID_number", "Comments", "Penalty Applied", "Final_Grade"]
         other_cols = [col for col in final_df.columns if col not in excluded_cols]
         
         # Define desired column order (ID first, then others, then specific last columns)
-        final_cols_order = ["ID_number"] + sorted(other_cols) + ["Failed Test Cases", "Penalty Applied", "Final_Grade"]
+        final_cols_order = ["ID_number"] + sorted(other_cols) + ["Comments", "Penalty Applied", "Final_Grade"]
         
         # Ensure all columns exist before reordering
-        # This check might be overly cautious if we derive other_cols correctly
         if all(col in final_df.columns for col in final_cols_order):
              final_output = final_df[final_cols_order]
         else:
