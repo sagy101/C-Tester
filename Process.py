@@ -5,6 +5,7 @@ import subprocess
 import time
 import threading # Needed for Event type hint if using Python < 3.9
 from typing import Callable, Optional # For type hinting callbacks/events
+import signal
 
 try:
     from tqdm import tqdm
@@ -140,21 +141,56 @@ def parallel_compile_files(
     return compiled, compile_errors
 
 
-def run_executable(executable, input_value, timeout=2):
+def run_executable(executable, input_value, timeout=5):
+    """Run an executable with the given input and timeout (in seconds)."""
     try:
-        result = subprocess.run(
-            [executable],
-            input=str(input_value),
-            capture_output=True,
+        # Start the process without shell=True to avoid cmd.exe wrapper
+        process = subprocess.Popen(
+            executable,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            shell=True,
-            timeout=timeout
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP  # Windows-specific: create new process group
         )
-        return result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        timeout_msg = f"Timeout after {timeout}s for input '{input_value}'"
-        log(timeout_msg, "warning")
-        return "Timeout"
+        
+        # Send input and get output with timeout
+        try:
+            stdout, stderr = process.communicate(input=str(input_value), timeout=timeout)
+            if process.returncode != 0:
+                return f"Runtime Error: {stderr.strip()}"
+            return stdout.strip()
+        except subprocess.TimeoutExpired:
+            # On Windows, we need to be more aggressive with process termination
+            try:
+                # First try CTRL+BREAK to the process group
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+                time.sleep(0.1)  # Give it a moment to handle the signal
+                
+                # If still running, terminate
+                if process.poll() is None:
+                    process.terminate()
+                    time.sleep(0.1)  # Give it a moment to terminate
+                
+                # If STILL running, kill it forcefully
+                if process.poll() is None:
+                    process.kill()
+                
+                # Clean up any remaining pipes
+                try:
+                    process.communicate(timeout=0.1)
+                except:
+                    pass
+            except:
+                # If any of the termination attempts fail, ensure the process is killed
+                try:
+                    process.kill()
+                except:
+                    pass
+            
+            timeout_msg = f"Timeout after {timeout}s"
+            log(timeout_msg, "warning")
+            return "Timeout"
     except Exception as e:
         log(f"Error running {executable}: {str(e)}", "error")
         return f"Error: {str(e)}"
@@ -190,7 +226,7 @@ def get_ground_truth(
 
     for input_value in progress_iterator:
         if cancel_event and cancel_event.is_set(): break
-        output = run_executable(executable, input_value, 30)
+        output = run_executable(executable, input_value, timeout=5)  # Use same timeout as student solutions
         ground_truth.append((input_value, output))
         processed_count += 1
         if progress_callback:
@@ -230,6 +266,10 @@ def write_grade(grade_path, correct_count, total, discrepancies, compile_error, 
 
                 if timeout_count != 0:
                     grade_file.write(f"\nTimeouts: {timeout_count}/{total}\n")
+                    # Add list of inputs that caused timeouts
+                    timeout_inputs = [str(d[0]) for d in discrepancies if d[2] == "Timeout"]
+                    if timeout_inputs:
+                        grade_file.write(f"Timeout Inputs: {', '.join(timeout_inputs)}\n")
 
                 # Write discrepancies AFTER the summary lines
                 if discrepancies:

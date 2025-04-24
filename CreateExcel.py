@@ -64,6 +64,17 @@ def extract_wrong_inputs(text):
     return None # Return None if the line doesn't exist
 
 
+def extract_timeout_inputs(text):
+    """Extracts the list of timeout inputs from the text.
+    Looks for a pattern like 'Timeout Inputs: input1, input2, ...'
+    Returns the string content after the colon, or None if not found.
+    """
+    match = re.search(r'^Timeout Inputs:\s*(.*)$', text, re.MULTILINE)
+    if match:
+        return match.group(1).strip()  # Return the comma-separated string
+    return None  # Return None if the line doesn't exist
+
+
 def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
     """Reads the submit_error.txt file and returns a dict mapping student ID to error reason."""
     errors = {}
@@ -119,7 +130,7 @@ def create_excel_for_grades(parent_folders):
             log(f"Skipping '{grade_folder}' - not found or not a directory.", level="warning")
             continue
 
-        rows = []  # Will store [student_id, grade, compilation_error, timeouts, wrong_inputs_str] for each file
+        rows = []  # Will store [student_id, grade, compilation_error, timeouts, wrong_inputs_str, timeout_inputs_str] for each file
 
         for filename in os.listdir(grade_folder):
             # Process only .txt files AND skip example_student.txt
@@ -138,12 +149,13 @@ def create_excel_for_grades(parent_folders):
             grade_value = extract_grade(text)
             compilation_error = extract_compilation_error(text)
             timeouts = extract_timeouts(text)
-            wrong_inputs_str = extract_wrong_inputs(text) # Extract the new info
+            wrong_inputs_str = extract_wrong_inputs(text)
+            timeout_inputs_str = extract_timeout_inputs(text)  # Extract the new timeout inputs
             
-            rows.append([student_id, grade_value, compilation_error, timeouts, wrong_inputs_str])
+            rows.append([student_id, grade_value, compilation_error, timeouts, wrong_inputs_str, timeout_inputs_str])
 
         # Create a DataFrame with the new column
-        df = pd.DataFrame(rows, columns=["ID_number", "Grade", "Compilation_Error", "Timeouts", "Wrong_Inputs"])
+        df = pd.DataFrame(rows, columns=["ID_number", "Grade", "Compilation_Error", "Timeouts", "Wrong_Inputs", "Timeout_Inputs"])
 
         # Write the per-question Excel
         output_excel = os.path.join(parent, f"{parent}_grades_to_upload.xlsx")
@@ -175,7 +187,8 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
             "Grade": f"Grade_{folder}_{weight}%",
             "Compilation_Error": f"Compilation_Error_{folder}",
             "Timeouts": f"Timeouts_{folder}",
-            "Wrong_Inputs": f"Wrong_Inputs_{folder}" # Rename new column
+            "Wrong_Inputs": f"Wrong_Inputs_{folder}",
+            "Timeout_Inputs": f"Timeout_Inputs_{folder}"  # Rename new column
         })
         if final_df is None:
             final_df = df_temp
@@ -187,13 +200,16 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     timeout_columns = [col for col in final_df.columns if col.startswith("Timeouts_")]
     compile_columns = [col for col in final_df.columns if col.startswith("Compilation_Error_")]
     wrong_input_columns = [col for col in final_df.columns if col.startswith("Wrong_Inputs_")]
+    timeout_input_columns = [col for col in final_df.columns if col.startswith("Timeout_Inputs_")]  # Add new column type
 
     final_df[grade_columns] = final_df[grade_columns].fillna(0)
     final_df[timeout_columns] = final_df[timeout_columns].fillna(0)
     for col in compile_columns:
         final_df[col] = final_df[col].fillna(False)
     for col in wrong_input_columns:
-        final_df[col] = final_df[col].fillna("") # Fill missing wrong inputs with empty string
+        final_df[col] = final_df[col].fillna("")  # Fill missing wrong inputs with empty string
+    for col in timeout_input_columns:
+        final_df[col] = final_df[col].fillna("")  # Fill missing timeout inputs with empty string
 
     # Calculate initial final weighted grade
     final_df["Final_Grade"] = 0
@@ -241,37 +257,25 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
         if failed_cases_list:
             comments_parts.append("Failed Test Cases:\n" + "\n".join(failed_cases_list))
         
-        # 2. Add Penalty reason and amount
+        # 2. Add Timeout Cases
+        timeout_cases_list = []
+        for col_name in timeout_input_columns:
+            timeout_inputs_str = row[col_name]
+            if timeout_inputs_str:
+                q_name_match = re.match(r'Timeout_Inputs_(Q\d+)', col_name)
+                if q_name_match:
+                    q_name = q_name_match.group(1)
+                    timeout_cases_list.append(f"{q_name}: {timeout_inputs_str}")
+        if timeout_cases_list:
+            comments_parts.append("Timeout Cases:\n" + "\n".join(timeout_cases_list))
+        
+        # 3. Add Penalty reason and amount
         penalty_info = row["Penalty Applied"]
         if penalty_info:
             comments_parts.append(f"Penalty: {penalty_info}")
         
-        # 3. Add Timeouts information
-        timeout_list = []
-        for col_name in timeout_columns:
-            timeout_count = row[col_name]
-            if timeout_count > 0:
-                q_name_match = re.match(r'Timeouts_(Q\d+)', col_name)
-                if q_name_match:
-                    q_name = q_name_match.group(1)
-                    timeout_list.append(f"{q_name}: {timeout_count} timeout(s)")
-        if timeout_list:
-            comments_parts.append("Timeouts:\n" + "\n".join(timeout_list))
-        
-        # 4. Add Compilation errors
-        compile_error_list = []
-        for col_name in compile_columns:
-            has_error = row[col_name]
-            if has_error:
-                q_name_match = re.match(r'Compilation_Error_(Q\d+)', col_name)
-                if q_name_match:
-                    q_name = q_name_match.group(1)
-                    compile_error_list.append(f"{q_name}: Compilation error")
-        if compile_error_list:
-            comments_parts.append("Compilation Errors:\n" + "\n".join(compile_error_list))
-        
-        # Join all parts with double newlines
-        final_df.loc[index, "Comments"] = "\n\n".join(comments_parts)
+        # Join all comments with newlines
+        final_df.loc[index, "Comments"] = "\n\n".join(comments_parts) if comments_parts else ""
 
     # --- Handle Slim vs Full Output --- 
     if slim:
