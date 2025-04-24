@@ -400,6 +400,11 @@ def process_folder(
     compiled, compile_errors = parallel_compile_files(c_files_dir, c_files_to_process, progress_callback, cancel_event)
     if cancel_event and cancel_event.is_set(): return "cancelled"
 
+    # Write grade files for compilation errors
+    for file, error in compile_errors.items():
+        grade_path = os.path.join(grade_folder, file.replace(".c", ".txt"))
+        write_grade(grade_path, 0, 0, [], error, 0)
+
     # ... (handle compile errors and write grades for them) ...
     if len(compiled) == 0 and len(c_files_to_process) > 0: return "error"
     if len(compiled) == 0: return "warning" # No files to even attempt compile?
