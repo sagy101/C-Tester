@@ -233,6 +233,45 @@ def find_and_process_c_files(
         else:
              log(f"No subfolders found in {submission_folder}", level="info")
 
+    # If no properly named files found, look for any .c files with q<number> pattern
+    if not c_files_found_paths:
+        # Search in root and all immediate subdirectories for any .c files
+        all_c_files = []
+        # Search root
+        root_c_files = glob.glob(os.path.join(submission_folder, '*.c'))
+        log(f"Found {len(root_c_files)} C files in root: {root_c_files}", level="info")
+        all_c_files.extend(root_c_files)
+        
+        # Search subdirectories
+        for subdir in subdirs:
+            subdir_c_files = glob.glob(os.path.join(subdir, '*.c'))
+            if subdir_c_files:
+                log(f"Found {len(subdir_c_files)} C files in subdir {subdir}: {subdir_c_files}", level="info")
+            all_c_files.extend(subdir_c_files)
+        
+        log(f"Total C files found before filtering: {len(all_c_files)}", level="info")
+        
+        # Filter for files containing 'q' followed by a number
+        wrong_named_files = []
+        for c_file in all_c_files:
+            filename = os.path.basename(c_file)
+            # Check both patterns: 'q' followed by number anywhere, or exact 'q<number>.c'
+            if re.search(r'q\d+', filename, re.IGNORECASE) or re.match(r'^q\d+\.c$', filename, re.IGNORECASE):
+                wrong_named_files.append(c_file)
+                log(f"Found incorrectly named file: {filename}", level="info")
+            else:
+                log(f"File did not match pattern: {filename}", level="info")
+        
+        if wrong_named_files:
+            c_files_found_paths = wrong_named_files
+            status = 'found_wrong_name'
+            log(f"Found {len(wrong_named_files)} C file(s) with incorrect naming pattern: {[os.path.basename(f) for f in wrong_named_files]}", level="info")
+        else:
+            # Double check - list all .c files that were found but didn't match
+            log(f"No matching files found. All C files found were: {[os.path.basename(f) for f in all_c_files]}", level="warning")
+            status = 'not_found'
+            log(f"No C files with question numbers found in any format", level="warning")
+
     # --- Filter out example file BEFORE processing --- 
     original_count = len(c_files_found_paths)
     c_files_found_paths = [p for p in c_files_found_paths if os.path.basename(p) != "example_student.c"]
@@ -258,8 +297,8 @@ def find_and_process_c_files(
             break # Exit loop
 
         filename = os.path.basename(c_file_path)
-        # Extract question number: matches _q<digits>.c at the end
-        match = re.search(r'_q(\d+)\.c$', filename, re.IGNORECASE)
+        # Extract question number: matches _q<digits>.c at the end OR just q<digits>.c
+        match = re.search(r'(?:_)?q(\d+)\.c$', filename, re.IGNORECASE)
         if match:
             q_number_str = match.group(1)
             try:
@@ -409,7 +448,16 @@ def preprocess_submissions(
 
             # 5, 6, 7. Process the extracted submission folder
             # Extract student ID - assuming format "..._ID" where ID is numeric at the end
+            # First try the normal pattern without .zip
             id_match = re.search(r'_(\d+)$', submission_name)
+            if not id_match:
+                # If not found, try pattern with .zip at the end
+                id_match = re.search(r'_(\d+)\.zip$', submission_name)
+                if id_match:
+                    # Add to issues list that the file had incorrect naming
+                    issue_priority = PRIORITY["ID_FAIL"]
+                    issue_message = f"{submission_name} (ID found but has .zip suffix)"
+
             if id_match:
                 student_id = id_match.group(1)
                 log(f"Processing submission folder: '{submission_folder_path}' for student ID: {student_id}", level="info")
@@ -439,9 +487,12 @@ def preprocess_submissions(
                         issue_priority = PRIORITY["OK_SUBFOLDER_WARN"]
                         issue_message = f"{submission_name} ({base_msg})"
                         log(f"Submission {submission_name} (ID: {student_id}) processed successfully from subfolder(s).", level="info")
+                elif status == 'found_wrong_name':
+                    issue_priority = PRIORITY["NO_C_FILES"]  # Using same priority as no files
+                    issue_message = f"{submission_name} (C files found with incorrect naming pattern)"
                 elif status == 'not_found':
-                     issue_priority = PRIORITY["NO_C_FILES"]
-                     issue_message = f"{submission_name} (No C files found)"
+                    issue_priority = PRIORITY["NO_C_FILES"]
+                    issue_message = f"{submission_name} (No C files found at all)"
                 else:
                     issue_priority = PRIORITY["UNKNOWN_STATUS"]
                     issue_message = f"{submission_name} (Unknown processing status: {status})"
