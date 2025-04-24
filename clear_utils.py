@@ -33,10 +33,19 @@ def clear_grades(questions):
     log("Finished clearing grade folders.", level="success") # Use log with success level
 
 def clear_output(questions):
-    """Clears the contents of the 'output' folder and deletes 
-    'original_sol_output.txt' for each question.
+    """Clears the contents of the 'output' folder, deletes 
+    'original_sol_output.txt' for each question, and deletes submit_error.txt.
     """
-    log("Clearing output folders and original_sol_output.txt files...", level="info") # Updated log message
+    log("Clearing output folders, original_sol_output.txt files, and submit_error.txt...", level="info")
+    
+    # Delete submit_error.txt in the current directory
+    if os.path.exists("submit_error.txt"):
+        try:
+            os.remove("submit_error.txt")
+            log("Deleted submit_error.txt", level="info")
+        except Exception as e:
+            log(f"Failed to delete submit_error.txt. Reason: {e}", level="error")
+    
     for q_folder in questions:
         # Clear contents of the output subfolder
         output_path = os.path.join(q_folder, 'output')
@@ -52,7 +61,7 @@ def clear_output(questions):
                 log(f"Failed to delete {original_output_file}. Reason: {e}", level="error")
         # else: File didn't exist, nothing to delete
             
-    log("Finished clearing output folders and original_sol_output.txt files.", level="success") # Updated log message
+    log("Finished clearing output folders, original_sol_output.txt files, and submit_error.txt.", level="success")
 
 def clear_c_files(questions):
     """Clears the contents of the 'C' folder for each question."""
@@ -104,9 +113,9 @@ def clear_build_files():
 
 def clear_all(questions):
     """Runs clear_grades, clear_output, clear_excels, and clear_build_files."""
-    log("Starting clear all operation...", level="info") # Use log
+    log("Starting clear all operation...", level="info")
     clear_grades(questions)
-    clear_output(questions)
+    clear_output(questions)  # This will now also delete submit_error.txt
     clear_excels()
-    clear_build_files() # Add call to clear build files
-    log("Finished clear all operation.", level="success") # Use log with success level 
+    clear_build_files()
+    log("Finished clear all operation.", level="success") 
