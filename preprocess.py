@@ -201,7 +201,7 @@ def find_and_process_c_files(
 
     # 1. Search in the root submission folder
     log(f"Searching for C files in root: {submission_folder}", level="info")
-    root_c_file_pattern = os.path.join(submission_folder, '*_q[0-9]*.c')
+    root_c_file_pattern = os.path.join(submission_folder, '*_q[0-9].c')
     c_files_found_paths = glob.glob(root_c_file_pattern)
 
     if c_files_found_paths:
@@ -256,7 +256,7 @@ def find_and_process_c_files(
         for c_file in all_c_files:
             filename = os.path.basename(c_file)
             # Check both patterns: 'q' followed by number anywhere, or exact 'q<number>.c'
-            if re.search(r'q\d+', filename, re.IGNORECASE) or re.match(r'^q\d+\.c$', filename, re.IGNORECASE):
+            if re.search(r'^q\d+\.c$|_q\d+(?:_.*)?\.c$', filename, re.IGNORECASE):
                 wrong_named_files.append(c_file)
                 log(f"Found incorrectly named file: {filename}", level="info")
             else:
@@ -285,7 +285,7 @@ def find_and_process_c_files(
 
     # 3. Process all found C files (from root or subfolders)
     if not c_files_found_paths:
-        log(f"No C files matching pattern '*_qN.c' found for submission ID {student_id} in {submission_folder} or its subfolders.", level="warning")
+        log(f"No C files matching pattern '*_qN*.c' found for submission ID {student_id} in {submission_folder} or its subfolders.", level="warning")
         return 'not_found', processed_q_numbers # Return current status and empty set
 
     log(f"Processing {len(c_files_found_paths)} found C file(s) for ID {student_id}", level="info")
@@ -298,9 +298,9 @@ def find_and_process_c_files(
 
         filename = os.path.basename(c_file_path)
         # Extract question number: matches _q<digits>.c at the end OR just q<digits>.c
-        match = re.search(r'(?:_)?q(\d+)\.c$', filename, re.IGNORECASE)
+        match = re.search(r'^q(\d+)\.c$|_q(\d+)(?:_.*)?\.c$', filename, re.IGNORECASE)
         if match:
-            q_number_str = match.group(1)
+            q_number_str = match.group(1) if match.group(1) else match.group(2)
             try:
                 q_number = int(q_number_str)
                 target_folder = os.path.join(questions_base_path, f"Q{q_number}", "C")
@@ -457,6 +457,13 @@ def preprocess_submissions(
                     # Add to issues list that the file had incorrect naming
                     issue_priority = PRIORITY["ID_FAIL"]
                     issue_message = f"{submission_name} (ID found but has .zip suffix)"
+                else:
+                    id_match = re.search(r'_(\d+)\.$', submission_name)
+                    if id_match:
+                        # Add to issues list that the file had incorrect naming
+                        issue_priority = PRIORITY["ID_FAIL"]
+                        issue_message = f"{submission_name} (ID found but has . suffix)"
+
 
             if id_match:
                 student_id = id_match.group(1)

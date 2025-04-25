@@ -189,8 +189,8 @@ def run_executable(executable, input_value, timeout=5):
                     pass
             
             timeout_msg = f"Timeout after {timeout}s"
-            log(timeout_msg, "warning")
-            return "Timeout"
+        log(timeout_msg, "warning")
+        return "Timeout"
     except Exception as e:
         log(f"Error running {executable}: {str(e)}", "error")
         return f"Error: {str(e)}"
