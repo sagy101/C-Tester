@@ -434,6 +434,7 @@ def preprocess_submissions(
         zip_filename = os.path.basename(inner_zip)
         submission_name = os.path.splitext(zip_filename)[0]
         submission_folder_path = os.path.join(base_extract_folder, submission_name)
+        #TODO: make issues array so they can stack and then add issue for rar files
         issue_priority = None
         issue_message = None
 
