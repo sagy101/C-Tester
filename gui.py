@@ -12,6 +12,7 @@ import re # Import regex module
 from configuration import questions as default_questions
 from configuration import folder_weights as default_weights
 from configuration import penalty as default_penalty # Import default penalty
+from configuration import per_error_penalty as default_per_error_penalty # Import default per-error-penalty flag
 # Import validator from configuration now
 from configuration import validate_config
 from preprocess import preprocess_submissions
@@ -95,7 +96,9 @@ class App(ctk.CTk):
         self.gui_questions = default_questions[:] # Make copies
         self.gui_weights = default_weights.copy()
         self.gui_penalty = default_penalty # Initialize GUI penalty
+        self.gui_per_error_penalty = default_per_error_penalty # Initialize per-error penalty flag
         self.slim_output_var = tk.BooleanVar(value=False) # Variable for slim checkbox
+        self.per_error_penalty_var = tk.BooleanVar(value=default_per_error_penalty) # Variable for per-error penalty checkbox
         self.config_valid = False
         self.config_dirty = False # Track unapplied changes
         self.current_task_thread = None
@@ -150,9 +153,19 @@ class App(ctk.CTk):
         self.penalty_entry.pack(side=tk.LEFT)
         self.penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty()) 
         
+        # Add Per-Error Penalty Checkbox
+        self.per_error_penalty_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
+        self.per_error_penalty_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+        self.per_error_penalty_checkbox = ctk.CTkCheckBox(self.per_error_penalty_frame, 
+                                                   text="Apply penalty per error (cumulative)",
+                                                   variable=self.per_error_penalty_var,
+                                                   onvalue=True, offvalue=False,
+                                                   command=self.mark_config_dirty)
+        self.per_error_penalty_checkbox.pack(side=tk.LEFT)
+        
         # Buttons below table
         self.config_buttons_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.config_buttons_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=5)
+        self.config_buttons_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=5)
         self.add_row_button = ctk.CTkButton(self.config_buttons_frame, text="Add Question", command=self.add_new_config_row_action, width=120)
         self.add_row_button.pack(side=tk.LEFT, padx=5)
         self.remove_row_button = ctk.CTkButton(self.config_buttons_frame, text="Remove Last", command=self.remove_last_config_row_action, width=100)
@@ -162,7 +175,7 @@ class App(ctk.CTk):
         self._default_apply_button_color = self.apply_config_button.cget("border_color") # Store default border
 
         self.config_status_label = ctk.CTkLabel(self.config_frame, text="Status: Unknown", anchor="w", text_color="gray")
-        self.config_status_label.grid(row=5, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+        self.config_status_label.grid(row=6, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
 
         # Section 1: Preprocessing
         self.preprocess_frame = ctk.CTkFrame(self.controls_frame)
@@ -398,8 +411,14 @@ class App(ctk.CTk):
         if not (cancel_event and cancel_event.is_set()):
              # Get slim state from checkbox variable
              slim_mode = self.slim_output_var.get()
-             log(f"Creating Excel output (Slim mode: {slim_mode})...", "info")
-             create_excels(self.gui_questions, self.gui_weights, self.gui_penalty, slim=slim_mode)
+             per_error_penalty_mode = self.gui_per_error_penalty
+             
+             # Log the modes being used
+             mode_str = "per error" if per_error_penalty_mode else "once per student"
+             log(f"Creating Excel output (Slim mode: {slim_mode}, Penalty mode: {mode_str})...", "info")
+             
+             # Pass the per_error_penalty parameter
+             create_excels(self.gui_questions, self.gui_weights, self.gui_penalty, slim=slim_mode, per_error_penalty=per_error_penalty_mode)
              log("Excel creation finished.", level="info")
         else:
              log("Skipping Excel creation due to cancellation.", "warning")
@@ -477,6 +496,8 @@ class App(ctk.CTk):
         # Populate penalty
         self.penalty_entry.delete(0, tk.END)
         self.penalty_entry.insert(0, str(self.gui_penalty))
+        # Set per-error penalty checkbox
+        self.per_error_penalty_var.set(self.gui_per_error_penalty)
 
     def apply_gui_configuration(self):
         """Parses, validates, updates state, resets dirty flag and UI."""
@@ -514,6 +535,9 @@ class App(ctk.CTk):
                  parsed_penalty = None # Mark as invalid
         except ValueError:
             parse_errors.append(f"Invalid numeric value for Penalty: '{penalty_str}'.")
+            
+        # Get per-error penalty value
+        parsed_per_error_penalty = self.per_error_penalty_var.get()
 
         if parse_errors:
             messagebox.showerror("Configuration Parse Error", "\n".join(parse_errors))
@@ -546,6 +570,7 @@ class App(ctk.CTk):
              self.gui_questions = parsed_questions
              self.gui_weights = parsed_weights
              self.gui_penalty = parsed_penalty
+             self.gui_per_error_penalty = parsed_per_error_penalty
              status_text = "Status: Valid"
              status_color = "#4CAF50" # Green
              # apply_border_color remains default

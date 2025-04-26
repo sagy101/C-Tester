@@ -32,7 +32,7 @@ from Utils import VERBOSITY_LEVEL
 
 
 def setup_visual_studio_environment():
-    log("Setting up Visual Studio environment...", "info")
+    log("Setting up Visual Studio environment...", "info", verbosity=1)
     vs_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
     command = f'cmd /c ""{vs_path}" && set"'
     try:
@@ -43,9 +43,9 @@ def setup_visual_studio_environment():
             if '=' in line:
                 key, value = line.split('=', 1)
                 os.environ[key] = value
-        log("Visual Studio environment setup complete.", "success")
+        log("Visual Studio environment setup complete.", "success", verbosity=1)
     except Exception as e:
-        log(f"Error setting up Visual Studio environment: {str(e)}", "error")
+        log(f"Error setting up Visual Studio environment: {str(e)}", "error", verbosity=1)
 
 
 def sanitize_input(input_value):
@@ -69,7 +69,7 @@ def ensure_output_folder(folder_name):
     grade_folder = os.path.join(folder_name, "grade")
     os.makedirs(output_folder, exist_ok=True)
     os.makedirs(grade_folder, exist_ok=True)
-    log(f"Output and grade folders ready in {folder_name}", "success", verbosity=2)
+    log(f"Output and grade folders ready in {folder_name}", "success", verbosity=1)
     return output_folder, grade_folder
 
 
@@ -78,7 +78,7 @@ def compile_file(c_file):
     compile_cmd = f'cl /TC /EHsc /MP /O2 /Za /Fe{executable} {c_file}'
     result = subprocess.run(compile_cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
-        log(f"Compilation failed: {c_file}", "error", verbosity=2)
+        log(f"Compilation failed: {c_file}", "error", verbosity=1)
         return None, result.stderr
     log(f"Compilation successful: {c_file}", "success", verbosity=2)
     return executable, None
@@ -325,7 +325,7 @@ def log_compilation_summary(compile_errors):
     """
     if compile_errors:
         files_str = ", ".join(compile_errors.keys())
-        log(f"Compilation failed for: {files_str}", "warning", verbosity=2)
+        log(f"Compilation failed for: {files_str}", "warning", verbosity=1)
 
         if VERBOSITY_LEVEL > 2:
             for file, error in compile_errors.items():
@@ -333,7 +333,7 @@ def log_compilation_summary(compile_errors):
 
 
 def cleanup_folders(base_folder):
-    log(f"Cleaning folders in: {base_folder}", "info")
+    log(f"Cleaning folders in: {base_folder}", "info", verbosity=1)
     # Iterate through potential folders to clean (output, grade)
     for folder_to_clean_name in ["output", "grade"]:
         folder_path = os.path.join(base_folder, folder_to_clean_name)
@@ -354,7 +354,7 @@ def cleanup_folders(base_folder):
                         shutil.rmtree(item_path) # Remove subdirectories if any
                         log(f"Cleaned subdirectory: {item_path}", "success", verbosity=3)
                 except Exception as e:
-                    log(f"Error cleaning item {item_path}: {e}", "error")
+                    log(f"Error cleaning item {item_path}: {e}", "error", verbosity=1)
         # else: Folder didn't exist, nothing to clean
 
 
@@ -514,7 +514,7 @@ def process_all_questions(
     description = "Overall Question Progress"
     for i, question in enumerate(questions_arr):
         if cancel_event and cancel_event.is_set():
-            log("Processing all questions cancelled.", "warning")
+            log("Processing all questions cancelled.", "warning", verbosity=1)
             break
         # Pass the main callback down to sub-stages
         status = process_folder(question, progress_callback=progress_callback, cancel_event=cancel_event)
@@ -526,7 +526,7 @@ def process_all_questions(
     # ... (summarize results, check for 'cancelled' status) ...
     summary_details = ", ".join(f"{q}({s})" for q, s in results)
     if any(s == "cancelled" for _, s in results):
-        log(f"Processing cancelled. Results: {summary_details}", "warning")
+        log(f"Processing cancelled. Results: {summary_details}", "warning", verbosity=1)
     else:
         # Original summary logic
         all_success = all(status == "success" for _, status in results)
@@ -540,7 +540,7 @@ def process_all_questions(
         else:
             final_status = "error"
             msg = "No Questions were processed successfully."
-        log(f"Processed Questions: {summary_details}. {msg}", final_status)
+        log(f"Processed Questions: {summary_details}. {msg}", final_status, verbosity=1)
 
     return results
 
@@ -560,7 +560,7 @@ def run_tests(
             time.sleep(0.1)
             print("\n")
             cleanup_obj_files()
-            log("All temporary files cleaned.", "success")
+            log("All temporary files cleaned.", "success", verbosity=1)
         else:
-            log("Task cancelled, skipping final .obj cleanup.", "warning")
+            log("Task cancelled, skipping final .obj cleanup.", "warning", verbosity=1)
 
