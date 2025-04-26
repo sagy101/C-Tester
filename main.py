@@ -8,7 +8,7 @@ from clear_utils import clear_grades, clear_output, clear_excels, clear_c_files,
 from Utils import log
 from preprocess import preprocess_submissions
 # Import configuration from the new file
-from configuration import questions, folder_weights, penalty, validate_config
+from configuration import questions, folder_weights, penalty, per_error_penalty, validate_config
 
 # Define your parent folders here - REMOVED, now in configuration.py
 # questions = ["Q1", "Q2"]
@@ -16,13 +16,21 @@ from configuration import questions, folder_weights, penalty, validate_config
 # Weight in percentage for each question - REMOVED, now in configuration.py
 # folder_weights = {questions[0]: 50, questions[1]: 50}
 
-def run_grading(questions_to_run, slim_mode=False):
+def run_grading(questions_to_run, slim_mode=False, per_error_penalty_mode=False):
     """Runs the test and creates the Excel files."""
     log("Starting grading process...", level="info")
     # Pass the globally imported questions list from configuration
     run_tests(questions_to_run)
+    
+    # Use provided per_error_penalty_mode directly (no longer uses config default)
+    # The default is now explicitly False (single penalty mode)
+    
+    # Log the mode being used
+    mode_str = "per error" if per_error_penalty_mode else "once per student"
+    log(f"Using penalty mode: {mode_str}", level="info")
+    
     # Pass the globally imported weights and penalty from configuration
-    create_excels(questions_to_run, folder_weights, penalty, slim=slim_mode)
+    create_excels(questions_to_run, folder_weights, penalty, slim=slim_mode, per_error_penalty=per_error_penalty_mode)
     log("\n\nDONE, HAPPY GRADING!", level="success")
 
 if __name__ == "__main__":
@@ -44,6 +52,9 @@ if __name__ == "__main__":
     parser_run = subparsers.add_parser('run', help='Run the grading process (run tests and create excels).')
     parser_run.add_argument('--slim', action='store_true', 
                           help='Generate final_grades.xlsx with only ID and Final_Grade columns.')
+    parser_run.add_argument('--per-error-penalty', action='store_true',
+                          help='Apply penalty for each submission error (can accumulate).')
+    # Removed the --single-penalty option since it's now the default
 
     # Preprocess command
     parser_preprocess = subparsers.add_parser('preprocess', help='Preprocess submissions from a zip file.')
@@ -62,8 +73,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == 'run':
+        # Simplified handling - now we only have one flag (--per-error-penalty)
+        # Default mode is single penalty (per_error_penalty=False)
+        per_error_penalty_mode = args.per_error_penalty
+            
         # Pass the imported config to run_grading
-        run_grading(questions, slim_mode=args.slim)
+        run_grading(questions, slim_mode=args.slim, per_error_penalty_mode=per_error_penalty_mode)
     elif args.command == 'preprocess':
         # Check if zip path exists
         if not os.path.exists(args.zip_path):

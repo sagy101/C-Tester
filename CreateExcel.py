@@ -18,7 +18,7 @@ def delete_existing_excel_files(directory):
                     os.remove(file_path)
                     log(f"Deleted existing file: {file_path}", level="success", verbosity=2)
                 except Exception as e:
-                    log(f"Failed to delete {file_path}: {e}", level="error")
+                    log(f"Failed to delete {file_path}: {e}", level="error", verbosity=1)
 
 
 def extract_grade(text):
@@ -224,7 +224,7 @@ def create_excel_for_grades(parent_folders):
     return folder_data
 
 
-def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
+def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, per_error_penalty=False):
     """
     Given a dictionary mapping folder names to DataFrames (which now include extra columns)
     and corresponding weight percentages, computes the final weighted grade for each student.
@@ -319,21 +319,50 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
             reason = submission_errors[error_id]
             penalty_applied_count += 1
             original_grade = row["Final_Grade"]
-            penalized_grade = max(0, original_grade - penalty) # Use the passed penalty argument here
+            
+            # Calculate penalty based on number of errors if per_error_penalty is True
+            if per_error_penalty:
+                # Count the number of separate errors (split by semicolons)
+                error_list = reason.split("; ")
+                error_count = len(error_list)
+                total_penalty = penalty * error_count
+                penalized_grade = max(0, original_grade - total_penalty)
+                penalty_text = f"{reason} (-{penalty}% x {error_count} = -{total_penalty}%)"
+                log(f"Applied penalty ({penalty}% x {error_count} = {total_penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
+            else:
+                # Traditional single penalty regardless of error count
+                total_penalty = penalty
+                penalized_grade = max(0, original_grade - penalty)
+                penalty_text = f"{reason} (-{penalty}%)"
+                log(f"Applied penalty ({penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
+            
             final_df.loc[index, "Final_Grade"] = penalized_grade
-            # Store reason and penalty amount using the passed penalty
-            final_df.loc[index, "Penalty Applied"] = f"{reason} (-{penalty}%) "
-            log(f"Applied penalty ({penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info")
+            final_df.loc[index, "Penalty Applied"] = penalty_text
+        
         # Traditional matching (backward compatibility)
         elif student_id in submission_errors:
-            penalty_applied_count += 1
             reason = submission_errors[student_id]
+            penalty_applied_count += 1
             original_grade = row["Final_Grade"]
-            penalized_grade = max(0, original_grade - penalty) # Use the passed penalty argument here
+            
+            # Calculate penalty based on number of errors if per_error_penalty is True
+            if per_error_penalty:
+                # Count the number of separate errors (split by semicolons)
+                error_list = reason.split("; ")
+                error_count = len(error_list)
+                total_penalty = penalty * error_count
+                penalized_grade = max(0, original_grade - total_penalty)
+                penalty_text = f"{reason} (-{penalty}% x {error_count} = -{total_penalty}%)"
+                log(f"Applied penalty ({penalty}% x {error_count} = {total_penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
+            else:
+                # Traditional single penalty regardless of error count
+                total_penalty = penalty
+                penalized_grade = max(0, original_grade - penalty)
+                penalty_text = f"{reason} (-{penalty}%)"
+                log(f"Applied penalty ({penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
+            
             final_df.loc[index, "Final_Grade"] = penalized_grade
-            # Store reason and penalty amount using the passed penalty
-            final_df.loc[index, "Penalty Applied"] = f"{reason} (-{penalty}%) "
-            log(f"Applied penalty ({penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info")
+            final_df.loc[index, "Penalty Applied"] = penalty_text
 
     if penalty_applied_count > 0:
         log(f"Applied submission error penalty to {penalty_applied_count} students.", "warning")
@@ -408,7 +437,18 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     return final_output
 
 
-def create_excels(grade_folders, folder_weights, penalty: int, slim=True):
+def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_error_penalty=False):
+    """
+    Create the final output file final_grades.xlsx
+    
+    :param grade_folders: A list of folder names
+    :param folder_weights: A dictionary of weights per folder
+    :param penalty: The penalty to apply for submission with error
+    :param slim: If True, only output the most necessary columns
+    :param per_error_penalty: If True, apply penalties per error. If False, apply only once per student.
+    :return: None
+    """
+    log(f'\nCreating final excel file...', level='success')
     # Delete the final grades Excel file from the current directory if it exists
     final_output_excel = "final_grades.xlsx"
     if os.path.exists(final_output_excel):
@@ -416,7 +456,7 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True):
             os.remove(final_output_excel)
             log(f"Deleted existing file: {final_output_excel}", level="success", verbosity=2)
         except Exception as e:
-            log(f"Failed to delete {final_output_excel}: {e}", level="error")
+            log(f"Failed to delete {final_output_excel}: {e}", level="error", verbosity=1)
 
     # Process each folder and get their DataFrames (with extra columns)
     folder_data = create_excel_for_grades(grade_folders)
@@ -424,7 +464,7 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True):
     # Compute and write final grades if at least one folder was processed
     if folder_data:
         # Pass the penalty value down to compute_final_grades
-        final_grades_df = compute_final_grades(folder_data, folder_weights, penalty, slim)
+        final_grades_df = compute_final_grades(folder_data, folder_weights, penalty, slim, per_error_penalty)
         # Use ExcelWriter with the XlsxWriter engine to enable formatting.
         with pd.ExcelWriter(final_output_excel, engine='xlsxwriter') as writer:
             final_grades_df.to_excel(writer, sheet_name='Sheet1', index=False)

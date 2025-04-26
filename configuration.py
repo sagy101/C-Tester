@@ -5,6 +5,11 @@ import os # Needed for validate_config
 # Penalty points for submission errors reported in submit_error.txt
 penalty = 15
 
+# Flag to determine if penalty is applied per error or once globally per student
+# When True: each error gets its own penalty (can accumulate)
+# When False: only apply penalty once per student regardless of number of errors
+per_error_penalty = False
+
 # List of question folder names (must match actual folder names in the project root)
 questions = ["Q1", "Q2"]
 
