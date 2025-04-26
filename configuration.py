@@ -3,7 +3,7 @@
 import os # Needed for validate_config
 
 # Penalty points for submission errors reported in submit_error.txt
-penalty = 15
+penalty = 5
 
 # Flag to determine if penalty is applied per error or once globally per student
 # When True: each error gets its own penalty (can accumulate)
