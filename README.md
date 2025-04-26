@@ -27,12 +27,13 @@ This project automates the batch grading of multiple C programs. It sets up the 
     *   Generates detailed Excel reports per question (`QN_grades_to_upload.xlsx`).
     *   Creates a consolidated `final_grades.xlsx` with weighted averages.
     *   Applies penalties based on preprocessing errors (`submit_error.txt`).
+    *   Flexible penalty modes: apply once per student or cumulatively per error.
     *   Lists failed test cases and timeout-causing inputs in the Comments column.
     *   Optional "slim" mode for final grades only.
 *   **Dual Interface:**
     *   Modern GUI (`gui.py`) for interactive use with progress display and cancellation.
     *   Robust CLI (`main.py`) for scripting and automation.
-*   **Flexible Configuration:** Define questions, weights, and penalties in `configuration.py` or override via the GUI.
+*   **Flexible Configuration:** Define questions, weights, penalties, and penalty modes in `configuration.py` or override via the GUI.
 *   **Cleanup Utilities:** Easily clear generated files (grades, output, C copies, build files, excels) via GUI or CLI.
 
 ---
@@ -81,7 +82,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ## 📁 Project Structure
 
-*   `configuration.py`: Defines questions, weights, penalty. **Edit this for CLI configuration.**
+*   `configuration.py`: Defines questions, weights, penalty, and per-error penalty flag. **Edit this for CLI configuration.**
 *   `gui.py`: Entry point for the Graphical User Interface.
 *   `main.py`: Entry point for the Command Line Interface.
 *   `preprocess.py`: Logic for extracting and organizing student submissions.
@@ -175,6 +176,7 @@ Recommended for interactive use.
     *   Modify folder names and weights directly in the table.
     *   Use "Add Question" to add a new empty row or "Remove Last" to delete the bottom row.
     *   Edit the "Submission Error Penalty" value in its field.
+    *   Check "Apply penalty per error (cumulative)" if you want penalties to add up for each error a student has. Leave unchecked to apply only a single penalty per student regardless of error count.
     *   **Important:** After making any changes, click **"Apply Config"**. This will parse and validate your inputs.
         *   The **Status** label below the buttons will indicate if the current configuration is "Valid", "INVALID" (with details in a popup), or if there are "Unapplied changes".
         *   The "Apply Config" button will be highlighted if changes are unapplied.
@@ -189,7 +191,7 @@ Recommended for interactive use.
 
 Suitable for scripting or users preferring the command line. Uses the static configuration set in `configuration.py`.
 
-1.  **Configure:** Edit `configuration.py` to define `questions`, `folder_weights`, and `penalty`.
+1.  **Configure:** Edit `configuration.py` to define `questions`, `folder_weights`, `penalty`, and `per_error_penalty`.
 2.  **Run** `main.py` with commands:
 
 <details>
@@ -207,8 +209,14 @@ Suitable for scripting or users preferring the command line. Uses the static con
       python main.py run
       # Slim output (ID & Final Grade only in final_grades.xlsx)
       python main.py run --slim 
+      # Apply penalty per error (can accumulate)
+      python main.py run --per-error-penalty
+      # Both options can be combined
+      python main.py run --slim --per-error-penalty
       ```
-      Compiles, executes, compares outputs, and generates grade files and Excel reports based on `configuration.py`. Use `--slim` for minimal final report.
+      Compiles, executes, compares outputs, and generates grade files and Excel reports based on `configuration.py`. 
+      * Use `--slim` for minimal final report.
+      * Use `--per-error-penalty` to apply penalties for each error a student has (instead of just once).
 
   *   **Clear generated files:**
       ```bash
@@ -255,7 +263,9 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   Reads grade files for each question.
     *   Generates `QN_grades_to_upload.xlsx` with timeout information.
     *   Merges data, calculates weighted final grades.
-    *   Parses `submit_error.txt` and applies `penalty` from config.
+    *   Parses `submit_error.txt` and applies penalties based on configuration:
+         *   Either once per student (default) or per-error (accumulates for multiple errors).
+         *   Shows detailed penalty calculation in comments (e.g., "-5% x 3 = -15%" for per-error mode). 
     *   Generates `final_grades.xlsx` (full or slim format) with:
         *   Timeout inputs per question.
         *   Comprehensive Comments column listing failed and timeout cases.
