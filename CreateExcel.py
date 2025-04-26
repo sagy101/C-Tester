@@ -75,8 +75,23 @@ def extract_timeout_inputs(text):
     return None  # Return None if the line doesn't exist
 
 
+def normalize_id(id_str):
+    """
+    Normalize an ID string by removing non-digit characters and leading zeros.
+    This helps match IDs across different formats.
+    """
+    # Keep only the digits
+    digits_only = ''.join(c for c in str(id_str) if c.isdigit())
+    # Remove leading zeros
+    return digits_only.lstrip('0') if digits_only else ''
+
+
 def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
-    """Reads the submit_error.txt file and returns a dict mapping student ID to error reason."""
+    """
+    Reads the submit_error.txt file and returns a dict mapping student ID to error reason.
+    New format (single line per submission):
+    - submission_name:  * error1 * error2
+    """
     errors = {}
     if not os.path.exists(error_file):
         log(f"'{error_file}' not found. Assuming no preprocessing errors.", "info")
@@ -84,29 +99,71 @@ def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
 
     try:
         with open(error_file, 'r') as f:
-            for line in f:
-                line = line.strip()
+            lines = f.readlines()
+            
+            # Skip the header line
+            start_idx = 0
+            for i, line in enumerate(lines):
+                if line.startswith("Submissions with processing errors/warnings:"):
+                    start_idx = i + 1
+                    break
+            
+            # Process each line (one submission per line)
+            for i in range(start_idx, len(lines)):
+                line = lines[i].strip()
+                
+                # Lines starting with "- " are submission entries
                 if line.startswith("- "):
-                    content = line[2:] # Remove "- "
-                    # Try to extract ID assuming format "..._ID (Reason...)"
-                    # Regex: Match name parts, underscore, digits (ID), space, parenthesis (reason)
-                    match = re.match(r'^.+_(\d+)\s*\((.*)\)$' , content)
+                    # Split the line into submission name and issues
+                    parts = line[2:].split(":")  # Remove "- " and split at colon
+                    
+                    if len(parts) < 2:
+                        log(f"Invalid line format (missing colon): {line}", "warning")
+                        continue
+                        
+                    submission_name = parts[0].strip()
+                    issues_part = parts[1].strip()
+                    
+                    # Extract ID from submission name
+                    # Try multiple ID extraction patterns
+                    # Pattern 1: Standard "_123456" at the end
+                    match = re.search(r'_(\d{5,12})(?:\.zip)?$', submission_name)
+                    
+                    # Pattern 2: Look for submission ID patterns like 633190_assignsubmission_file_HW1_315406280
+                    if not match:
+                        match = re.search(r'(\d{5,12})(?:\.zip)?$', submission_name)
+                    
+                    # Pattern 3: More aggressive - find any 5+ digit number that could be an ID
+                    if not match:
+                        match = re.search(r'_(\d{5,12})', submission_name)
+                    
                     if match:
-                        student_id = match.group(1)
-                        reason = match.group(2).strip()
-                        errors[student_id] = reason
+                        current_id = match.group(1)
+                        # Normalize the ID
+                        normalized_id = normalize_id(current_id)
+                        if normalized_id:
+                            # Extract all issues by splitting on "* " and removing empty entries
+                            issues = [issue.strip() for issue in issues_part.split("* ") if issue.strip()]
+                            
+                            # Join all issues with semicolons
+                            errors[normalized_id] = "; ".join(issues)
+                            
+                            log(f"Found ID {current_id} from submission: {submission_name}", "info", verbosity=2)
+                            if issues:
+                                log(f"  Issues: {', '.join(issues)}", "info", verbosity=3)
                     else:
-                        # Fallback: Maybe no reason in parenthesis? Try just ID extraction
-                        match_no_reason = re.match(r'^.+_(\d+)$' , content)
-                        if match_no_reason:
-                            student_id = match_no_reason.group(1)
-                            errors[student_id] = "Preprocessing Error (Unknown Reason)" # Generic reason
-                        else:
-                             log(f"Could not parse student ID or reason from error line: {line}", "warning")
+                        log(f"Could not parse student ID from line: {line}", "warning")
+                
     except Exception as e:
         log(f"Error reading or parsing '{error_file}': {e}", "error")
 
-    log(f"Parsed {len(errors)} entries from '{error_file}' for penalty application.", "info")
+    # Debug output to see what IDs were extracted
+    if errors:
+        log(f"Parsed {len(errors)} entries from '{error_file}' for penalty application.", "info")
+        log(f"IDs with errors: {', '.join(sorted(errors.keys()))}", "info", verbosity=2)
+    else:
+        log("No errors parsed from submit_error.txt", "warning")
+    
     return errors
 
 
@@ -140,7 +197,7 @@ def create_excel_for_grades(parent_folders):
             # Example: filename = "id1_id2.txt" => "id1_id2"
             base_name, _ = os.path.splitext(filename)
             student_id = base_name  # use the entire base name as the student ID
-
+            
             # Read file text
             file_path = os.path.join(grade_folder, filename)
             with open(file_path, "r", encoding="utf-8") as f:
@@ -177,6 +234,37 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
     """
     # Parse preprocessing errors for penalty application
     submission_errors = parse_submit_errors()
+    
+    # Debug output: list all IDs in the final_df
+    all_student_ids = set()
+    normalized_id_mapping = {}  # Maps normalized ID to original ID
+    
+    for folder, df in folder_data.items():
+        for student_id in df["ID_number"]:
+            str_id = str(student_id)
+            normalized_id = normalize_id(str_id)
+            all_student_ids.add(str_id)
+            normalized_id_mapping[normalized_id] = str_id
+            
+    log(f"Found {len(all_student_ids)} unique student IDs in grade files", "info")
+    log(f"Sample student IDs: {', '.join(sorted(list(all_student_ids))[:5])}...", "info", verbosity=2)
+    
+    # Check if any student IDs match the submission errors after normalization
+    matching_ids = set()
+    id_mapping = {}  # Maps original grade file ID to matching error ID
+    
+    for error_id in submission_errors.keys():
+        normalized_error_id = normalize_id(error_id)
+        if normalized_error_id in normalized_id_mapping:
+            matching_student_id = normalized_id_mapping[normalized_error_id]
+            matching_ids.add(matching_student_id)
+            id_mapping[matching_student_id] = error_id
+    
+    log(f"Found {len(matching_ids)} matching IDs between grade files and submission errors", "info")
+    if matching_ids:
+        log(f"Matching IDs: {', '.join(sorted(list(matching_ids))[:5])}...", "info", verbosity=2)
+    else:
+        log("No matching IDs found between grade files and submission errors!", "warning")
     
     final_df = None
     # Merge the DataFrames on 'ID_number'
@@ -224,7 +312,20 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
 
     for index, row in final_df.iterrows():
         student_id = str(row["ID_number"]) # Ensure comparison as string
-        if student_id in submission_errors:
+        
+        # Check if this ID has a matching error ID through normalization
+        if student_id in id_mapping:
+            error_id = id_mapping[student_id]
+            reason = submission_errors[error_id]
+            penalty_applied_count += 1
+            original_grade = row["Final_Grade"]
+            penalized_grade = max(0, original_grade - penalty) # Use the passed penalty argument here
+            final_df.loc[index, "Final_Grade"] = penalized_grade
+            # Store reason and penalty amount using the passed penalty
+            final_df.loc[index, "Penalty Applied"] = f"{reason} (-{penalty}%) "
+            log(f"Applied penalty ({penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info")
+        # Traditional matching (backward compatibility)
+        elif student_id in submission_errors:
             penalty_applied_count += 1
             reason = submission_errors[student_id]
             original_grade = row["Final_Grade"]
@@ -236,6 +337,8 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True):
 
     if penalty_applied_count > 0:
         log(f"Applied submission error penalty to {penalty_applied_count} students.", "warning")
+    else:
+        log("No penalties were applied to any students", "warning")
 
     # Round the final grade
     final_df["Final_Grade"] = final_df["Final_Grade"].apply(math.ceil)

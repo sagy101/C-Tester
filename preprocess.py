@@ -5,6 +5,7 @@ import re
 import glob
 import threading
 from typing import Callable, Optional
+import json  # Add missing import for json
 
 try:
     from tqdm import tqdm
@@ -183,58 +184,76 @@ def find_and_process_c_files(
     submission_folder: str,
     student_id: str,
     questions_base_path: str = ".",
-    cancel_event: Optional[threading.Event] = None
-) -> tuple[str, set]:
+    cancel_event: Optional[threading.Event] = None,
+    expected_question_count: int = 0  # New parameter to know how many questions to expect
+) -> tuple[list, set]:
     """Finds C files (*_qN.c), renames, moves them, and reports status.
 
     Searches the submission_folder first. If no files found, searches all
     immediate subdirectories.
 
+    Args:
+        submission_folder: Path to the submission folder to search.
+        student_id: Student ID to use for renamed files.
+        questions_base_path: Base path where question folders are located.
+        cancel_event: Optional event to signal cancellation.
+        expected_question_count: Number of expected question files (default: 0).
+
     Returns:
-        tuple: (status, processed_q_numbers)
-          status (str): 'ok_root', 'ok_subfolder', 'not_found'
+        tuple: (statuses, processed_q_numbers)
+          statuses (list): List of status strings like 'ok_root', 'ok_subfolder', 'found_wrong_name', etc.
           processed_q_numbers (set): Set of integers for successfully processed Q numbers.
     """
     processed_q_numbers = set()
-    status = 'not_found'
+    statuses = []
     c_files_found_paths = []
+    found_in_subfolder = False
+    found_wrong_names = False
+    subdirs = []
 
     # 1. Search in the root submission folder
     log(f"Searching for C files in root: {submission_folder}", level="info")
-    root_c_file_pattern = os.path.join(submission_folder, '*_q[0-9].c')
+    root_c_file_pattern = os.path.join(submission_folder, 'hw[0-9]_q[0-9].c')
     c_files_found_paths = glob.glob(root_c_file_pattern)
 
     if c_files_found_paths:
         log(f"Found {len(c_files_found_paths)} C file(s) directly in {submission_folder}", level="info")
-        status = 'ok_root'
+        statuses.append('ok_root')
     else:
         log(f"No C files found directly in {submission_folder}. Checking immediate subfolders...", level="info")
         # 2. If no files in root, search immediate subdirectories
-        subdirs = []
         try:
             items = os.listdir(submission_folder)
             subdirs = [os.path.join(submission_folder, item) for item in items if os.path.isdir(os.path.join(submission_folder, item))]
         except OSError as e:
             log(f"Error listing directory {submission_folder}: {e}", level="error")
-            # Cannot proceed with subfolder check, status remains 'not_found'
+            statuses.append('error_listing_dir')
 
         if subdirs:
             log(f"Found {len(subdirs)} subfolder(s) to check.", level="info")
             for subdir in subdirs:
                 log(f"Searching for C files in subfolder: {subdir}", level="info")
-                subdir_c_file_pattern = os.path.join(subdir, '*_q[0-9]*.c')
+                subdir_c_file_pattern = os.path.join(subdir, 'hw[0-9]_q[0-9].c')
                 files_in_subdir = glob.glob(subdir_c_file_pattern)
                 if files_in_subdir:
                     log(f"Found {len(files_in_subdir)} C file(s) in {subdir}", level="info")
                     c_files_found_paths.extend(files_in_subdir)
-                    # If we find files in any subfolder, status becomes 'ok_subfolder'
-                    # We don't break, collect files from all immediate subdirs
-                    status = 'ok_subfolder'
+                    found_in_subfolder = True
+            
+            if found_in_subfolder:
+                statuses.append('ok_subfolder')
         else:
              log(f"No subfolders found in {submission_folder}", level="info")
 
-    # If no properly named files found, look for any .c files with q<number> pattern
-    if not c_files_found_paths:
+    # Check if we should look for incorrectly named files:
+    # 1. If we have no files at all, or
+    # 2. If we have some files but fewer than expected (mixed case)
+    found_file_count = len(c_files_found_paths)
+    should_find_wrong_names = (found_file_count == 0) or (expected_question_count > 0 and found_file_count < expected_question_count)
+    
+    if should_find_wrong_names:
+        log(f"Found {found_file_count} correctly named files but expected {expected_question_count}. Searching for incorrectly named files...", level="info")
+        
         # Search in root and all immediate subdirectories for any .c files
         all_c_files = []
         # Search root
@@ -251,26 +270,35 @@ def find_and_process_c_files(
         
         log(f"Total C files found before filtering: {len(all_c_files)}", level="info")
         
-        # Filter for files containing 'q' followed by a number
-        wrong_named_files = []
-        for c_file in all_c_files:
-            filename = os.path.basename(c_file)
-            # Check both patterns: 'q' followed by number anywhere, or exact 'q<number>.c'
-            if re.search(r'^q\d+\.c$|_q\d+(?:_.*)?\.c$', filename, re.IGNORECASE):
-                wrong_named_files.append(c_file)
-                log(f"Found incorrectly named file: {filename}", level="info")
-            else:
-                log(f"File did not match pattern: {filename}", level="info")
+        # Filter out already found files to avoid duplicates
+        already_found_paths = set(c_files_found_paths)
+        new_c_files = [f for f in all_c_files if f not in already_found_paths]
         
-        if wrong_named_files:
-            c_files_found_paths = wrong_named_files
-            status = 'found_wrong_name'
-            log(f"Found {len(wrong_named_files)} C file(s) with incorrect naming pattern: {[os.path.basename(f) for f in wrong_named_files]}", level="info")
-        else:
-            # Double check - list all .c files that were found but didn't match
-            log(f"No matching files found. All C files found were: {[os.path.basename(f) for f in all_c_files]}", level="warning")
-            status = 'not_found'
-            log(f"No C files with question numbers found in any format", level="warning")
+        if new_c_files:
+            log(f"Found {len(new_c_files)} additional C files that might be incorrectly named", level="info")
+            
+            # Filter for files containing 'q' followed by a number
+            wrong_named_files = []
+            for c_file in new_c_files:
+                filename = os.path.basename(c_file)
+                # Check both patterns: 'q' followed by number anywhere, or exact 'q<number>.c'
+                if re.search(r'^q\d+\.c$|_q\d+(?:_.*)?\.c$|hw\d+.*\.c$', filename, re.IGNORECASE):
+                    wrong_named_files.append(c_file)
+                    log(f"Found incorrectly named file: {filename}", level="info")
+                else:
+                    log(f"File did not match pattern: {filename}", level="info")
+            
+            if wrong_named_files:
+                statuses.append('found_wrong_name')
+                found_wrong_names = True
+                c_files_found_paths.extend(wrong_named_files)
+                log(f"Found {len(wrong_named_files)} C file(s) with incorrect naming pattern: {[os.path.basename(f) for f in wrong_named_files]}", level="info")
+            elif not c_files_found_paths:
+                # Only report "no files found" if we have no files at all
+                log(f"No matching files found. All C files found were: {[os.path.basename(f) for f in all_c_files]}", level="warning")
+                if not statuses:  # Only add not_found if we haven't found anything else
+                    statuses.append('not_found')
+                log(f"No C files with question numbers found in any format", level="warning")
 
     # --- Filter out example file BEFORE processing --- 
     original_count = len(c_files_found_paths)
@@ -281,26 +309,29 @@ def find_and_process_c_files(
     # Check for cancellation before processing found files
     if cancel_event and cancel_event.is_set():
         log("File processing cancelled before starting.", "warning")
-        return "cancelled", processed_q_numbers
+        return ["cancelled"], processed_q_numbers
 
     # 3. Process all found C files (from root or subfolders)
     if not c_files_found_paths:
         log(f"No C files matching pattern '*_qN*.c' found for submission ID {student_id} in {submission_folder} or its subfolders.", level="warning")
-        return 'not_found', processed_q_numbers # Return current status and empty set
+        if not statuses:  # Only add not_found if we haven't found anything else
+            statuses.append('not_found')
+        return statuses, processed_q_numbers
 
     log(f"Processing {len(c_files_found_paths)} found C file(s) for ID {student_id}", level="info")
     for c_file_path in c_files_found_paths:
         # --- Cancellation Check within loop --- 
         if cancel_event and cancel_event.is_set():
             log(f"File processing cancelled mid-way for ID {student_id}.", "warning")
-            status = "cancelled" # Mark status as cancelled
+            statuses = ["cancelled"]  # Override with cancelled status
             break # Exit loop
 
         filename = os.path.basename(c_file_path)
-        # Extract question number: matches _q<digits>.c at the end OR just q<digits>.c
-        match = re.search(r'^q(\d+)\.c$|_q(\d+)(?:_.*)?\.c$', filename, re.IGNORECASE)
+        # Extract question number: matches any filename containing q<digits> and ending with .c
+        match = re.search(r'q(\d+).*\.c$', filename, re.IGNORECASE)
         if match:
-            q_number_str = match.group(1) if match.group(1) else match.group(2)
+            # Use the first matching group that isn't None
+            q_number_str = next((g for g in match.groups() if g is not None), None)
             try:
                 q_number = int(q_number_str)
                 target_folder = os.path.join(questions_base_path, f"Q{q_number}", "C")
@@ -315,20 +346,38 @@ def find_and_process_c_files(
                 except Exception as e:
                     log(f"Error copying '{c_file_path}' to '{target_path}': {e}", level="error")
                     # If copy fails, don't add to processed set
+                    if 'error_copying' not in statuses:
+                        statuses.append('error_copying')
             except ValueError:
                  log(f"Could not convert question number '{q_number_str}' to integer in '{filename}'. Skipping.", level="warning")
+                 if 'invalid_q_number' not in statuses:
+                     statuses.append('invalid_q_number')
         else:
             log(f"Could not extract question number from filename '{filename}' (path: {c_file_path}). Skipping.", level="warning")
+            if 'cant_extract_q_number' not in statuses:
+                statuses.append('cant_extract_q_number')
 
-    # Final check on status: If files were found but none were processed successfully
-    if status == "cancelled":
-        pass # Keep status as cancelled
-    elif status != 'not_found' and not processed_q_numbers:
-        status = 'not_found'
-    elif status == 'not_found' and processed_q_numbers:
-        status = 'ok_subfolder'
-
-    return status, processed_q_numbers
+    # Final status checks
+    if "cancelled" in statuses:
+        # Keep only cancelled if present
+        return ["cancelled"], processed_q_numbers
+    
+    # Check if we found files but couldn't process any
+    if not processed_q_numbers and c_files_found_paths:
+        if 'processing_failed' not in statuses:
+            statuses.append('processing_failed')
+    
+    # If we found fewer questions than expected, add a status for it
+    if expected_question_count > 0 and len(processed_q_numbers) < expected_question_count:
+        if 'missing_expected_questions' not in statuses:
+            statuses.append('missing_expected_questions')
+            log(f"Processed {len(processed_q_numbers)} questions but expected {expected_question_count}", level="warning")
+    
+    # If we have no status at all, mark as not_found
+    if not statuses:
+        statuses.append('not_found')
+        
+    return statuses, processed_q_numbers
 
 def preprocess_submissions(
     zip_path: str,
@@ -355,6 +404,9 @@ def preprocess_submissions(
         else:
             log(f"Warning: Could not parse question number from folder name '{q_name}' in config. Skipping for completeness check.", level="warning")
     log(f"Expecting questions: {sorted(list(expected_qs_set))}", level="info")
+    
+    # Number of expected questions
+    expected_question_count = len(expected_qs_set)
 
     base_extract_folder = "_extracted_submissions" # Temporary folder
 
@@ -399,8 +451,9 @@ def preprocess_submissions(
     else:
          log(f"Found {len(inner_zips)} inner zip files. Extracting...", level="info")
 
-    # List to store tuples: (priority, submission_name, message)
-    submissions_issues = []
+    # Dictionary to store issues per submission: submission_name -> list of (priority, message)
+    # This change allows tracking multiple issues per submission
+    submissions_issues = {}
 
     # Define priorities (lower number = higher priority)
     PRIORITY = {
@@ -410,7 +463,8 @@ def preprocess_submissions(
         "NO_C_FILES": 3,
         "MISSING_QS_ROOT": 4,
         "MISSING_QS_SUB": 5,
-        "OK_SUBFOLDER_WARN": 6
+        "OK_SUBFOLDER_WARN": 6,
+        "RAR_FILE": 7  # New priority for RAR files
     }
 
     total_zips = len(inner_zips)
@@ -434,9 +488,20 @@ def preprocess_submissions(
         zip_filename = os.path.basename(inner_zip)
         submission_name = os.path.splitext(zip_filename)[0]
         submission_folder_path = os.path.join(base_extract_folder, submission_name)
-        #TODO: make issues array so they can stack and then add issue for rar files
-        issue_priority = None
-        issue_message = None
+        
+        # Initialize list to collect issues for this submission
+        current_issues = []
+
+        # Check if it's a RAR file misnamed as ZIP
+        if zip_filename.endswith('.zip'):
+            try:
+                with open(inner_zip, 'rb') as f:
+                    header = f.read(4)
+                    if header.startswith(b'Rar!'):
+                        current_issues.append((PRIORITY["RAR_FILE"], f"Found RAR file misnamed as ZIP"))
+                        log(f"Warning: {zip_filename} is a RAR file with .zip extension", level="warning")
+            except Exception as e:
+                log(f"Error checking file type of {zip_filename}: {e}", level="warning")
 
         # Extract inner zip
         if extract_zip(inner_zip, submission_folder_path):
@@ -446,78 +511,95 @@ def preprocess_submissions(
                 log(f"Deleted inner zip file: '{inner_zip}'", level="info")
             except Exception as e:
                 log(f"Could not delete inner zip '{inner_zip}': {e}", level="warning") # Non-fatal
+                current_issues.append((PRIORITY["EXTRACT_FAIL"], f"Could not delete inner zip: {e}"))
 
             # 5, 6, 7. Process the extracted submission folder
             # Extract student ID - assuming format "..._ID" where ID is numeric at the end
             # First try the normal pattern without .zip
             id_match = re.search(r'_(\d+)$', submission_name)
+            id_found = True
+            
             if not id_match:
                 # If not found, try pattern with .zip at the end
                 id_match = re.search(r'_(\d+)\.zip$', submission_name)
                 if id_match:
                     # Add to issues list that the file had incorrect naming
-                    issue_priority = PRIORITY["ID_FAIL"]
-                    issue_message = f"{submission_name} (ID found but has .zip suffix)"
+                    current_issues.append((PRIORITY["ID_FAIL"], f"ID found but has .zip suffix"))
                 else:
                     id_match = re.search(r'_(\d+)\.$', submission_name)
                     if id_match:
                         # Add to issues list that the file had incorrect naming
-                        issue_priority = PRIORITY["ID_FAIL"]
-                        issue_message = f"{submission_name} (ID found but has . suffix)"
+                        current_issues.append((PRIORITY["ID_FAIL"], f"ID found but has . suffix"))
+                    else:
+                        id_found = False
+                        current_issues.append((PRIORITY["ID_FAIL"], f"ID extraction failed"))
+                        log(f"Could not extract numeric student ID from folder name '{submission_name}'. Skipping processing.", level="warning")
 
-
-            if id_match:
+            if id_found:
                 student_id = id_match.group(1)
                 log(f"Processing submission folder: '{submission_folder_path}' for student ID: {student_id}", level="info")
 
-                status, processed_qs = find_and_process_c_files(submission_folder_path, student_id, ".", cancel_event)
+                status, processed_qs = find_and_process_c_files(
+                    submission_folder_path, 
+                    student_id, 
+                    ".", 
+                    cancel_event,
+                    expected_question_count
+                )
 
                 missing_qs = expected_qs_set - processed_qs
                 missing_qs_str = ""
                 if missing_qs:
                     missing_qs_str = f"Missing Qs: {', '.join(f'Q{q}' for q in sorted(list(missing_qs)))}"
 
-                # Determine issue message and priority based on status and missing questions
-                if status == 'ok_root':
-                    if missing_qs:
-                        issue_priority = PRIORITY["MISSING_QS_ROOT"]
-                        issue_message = f"{submission_name} ({missing_qs_str})"
-                    else:
-                        # Success from root, no issue to report
-                        log(f"Submission {submission_name} (ID: {student_id}) processed successfully from root.", level="success")
-                elif status == 'ok_subfolder':
-                    base_msg = "Files found in subfolder(s)"
-                    if missing_qs:
-                        issue_priority = PRIORITY["MISSING_QS_SUB"]
-                        issue_message = f"{submission_name} ({base_msg}, {missing_qs_str})"
-                    else:
-                        # Files found in subfolder is a warning, not an error
-                        issue_priority = PRIORITY["OK_SUBFOLDER_WARN"]
-                        issue_message = f"{submission_name} ({base_msg})"
-                        log(f"Submission {submission_name} (ID: {student_id}) processed successfully from subfolder(s).", level="info")
-                elif status == 'found_wrong_name':
-                    issue_priority = PRIORITY["NO_C_FILES"]  # Using same priority as no files
-                    issue_message = f"{submission_name} (C files found with incorrect naming pattern)"
-                elif status == 'not_found':
-                    issue_priority = PRIORITY["NO_C_FILES"]
-                    issue_message = f"{submission_name} (No C files found at all)"
+                # Process multiple status codes returned from find_and_process_c_files
+                # The status is now a list of strings instead of a single string
+                if 'cancelled' in status:
+                    # Don't add an issue for cancellations
+                    log(f"Processing for {submission_name} was cancelled", level="warning")
                 else:
-                    issue_priority = PRIORITY["UNKNOWN_STATUS"]
-                    issue_message = f"{submission_name} (Unknown processing status: {status})"
-                    log(f"Unknown status '{status}' returned for {submission_name}", level="error")
-
-            else:
-                issue_priority = PRIORITY["ID_FAIL"]
-                issue_message = f"{submission_name} (ID extraction failed)"
-                log(f"Could not extract numeric student ID from folder name '{submission_name}'. Skipping processing.", level="warning")
+                    # Check for specific statuses and add issues accordingly
+                    for status_code in status:
+                        if status_code == 'ok_root':
+                            if missing_qs:
+                                current_issues.append((PRIORITY["MISSING_QS_ROOT"], missing_qs_str))
+                            else:
+                                # Success from root, no issue to report
+                                log(f"Submission {submission_name} (ID: {student_id}) processed successfully from root.", level="success")
+                        elif status_code == 'ok_subfolder':
+                            base_msg = "Files found in subfolder(s)"
+                            if missing_qs:
+                                current_issues.append((PRIORITY["MISSING_QS_SUB"], f"{base_msg}, {missing_qs_str}"))
+                            else:
+                                # Files found in subfolder is a warning, not an error
+                                current_issues.append((PRIORITY["OK_SUBFOLDER_WARN"], base_msg))
+                                log(f"Submission {submission_name} (ID: {student_id}) processed successfully from subfolder(s).", level="info")
+                        elif status_code == 'found_wrong_name':
+                            current_issues.append((PRIORITY["NO_C_FILES"], "C files found with incorrect naming pattern"))
+                        elif status_code == 'not_found':
+                            current_issues.append((PRIORITY["NO_C_FILES"], "No C files found at all"))
+                        elif status_code == 'error_listing_dir':
+                            current_issues.append((PRIORITY["EXTRACT_FAIL"], "Error listing directory contents"))
+                        elif status_code == 'error_copying':
+                            current_issues.append((PRIORITY["EXTRACT_FAIL"], "Error copying C files to destination"))
+                        elif status_code == 'invalid_q_number':
+                            current_issues.append((PRIORITY["NO_C_FILES"], "Invalid question number found in filename"))
+                        elif status_code == 'cant_extract_q_number':
+                            current_issues.append((PRIORITY["NO_C_FILES"], "Could not extract question number from filename"))
+                        elif status_code == 'processing_failed':
+                            current_issues.append((PRIORITY["NO_C_FILES"], "Files found but processing failed"))
+                        elif status_code == 'missing_expected_questions':
+                            current_issues.append((PRIORITY["NO_C_FILES"], "Missing expected questions"))
+                        else:
+                            current_issues.append((PRIORITY["UNKNOWN_STATUS"], f"Unknown processing status: {status_code}"))
+                            log(f"Unknown status '{status_code}' returned for {submission_name}", level="error")
         else:
-             issue_priority = PRIORITY["EXTRACT_FAIL"]
-             issue_message = f"{submission_name} (Extraction failed)"
+             current_issues.append((PRIORITY["EXTRACT_FAIL"], "Extraction failed"))
              log(f"Failed to extract inner zip '{inner_zip}'. Skipping processing for this submission.", level="error")
 
-        # Add issue to the list if one was generated
-        if issue_priority is not None and issue_message is not None:
-            submissions_issues.append((issue_priority, submission_name, issue_message))
+        # Add all issues to the submission's issue list
+        if current_issues:
+            submissions_issues[submission_name] = current_issues
         
         processed_zip_count += 1
         if progress_callback:
@@ -533,18 +615,27 @@ def preprocess_submissions(
         error_file = "submit_error.txt"
         log(f"Found issues/warnings for {len(submissions_issues)} submissions. Writing details to '{error_file}'", level="warning")
         try:
-            # Sort by priority (primary) and submission_name (secondary)
-            submissions_issues.sort()
+            # Create a list of entries to sort
+            sorted_entries = []
+            total_issues_count = 0
+            for submission_name, issues in submissions_issues.items():
+                # Sort issues by priority
+                issues.sort(key=lambda x: x[0])
+                # Find the highest priority (lowest number) for sorting submissions
+                highest_priority = issues[0][0] if issues else 999
+                sorted_entries.append((highest_priority, submission_name, issues))
+                total_issues_count += len(issues)
+            
+            # Sort by highest priority (primary) and submission_name (secondary)
+            sorted_entries.sort()
+            
             with open(error_file, 'w') as f:
-                f.write("Submissions with processing errors/warnings (sorted by issue type):\n")
-                # Optional: Add headers for categories if desired
-                # current_priority = -1
-                for priority, sub_name, message in submissions_issues:
-                    # Example category header logic:
-                    # if priority != current_priority:
-                    #     f.write(f"\n--- Category {priority} ---\n")
-                    #     current_priority = priority
-                    f.write(f"- {message}\n")
+                f.write(f"Submissions with processing errors/warnings: {len(submissions_issues)} submissions with a total of {total_issues_count} issues (sorted by issue type):\n")
+                for _, submission_name, issues in sorted_entries:
+                    f.write(f"- {submission_name}: ")
+                    for _, message in issues:
+                        f.write(f" * {message}")
+                    f.write("\n")
             log(f"Successfully wrote error report to '{error_file}'", level="success")
         except Exception as e:
              log(f"Could not write to error file '{error_file}': {e}", level="error")
