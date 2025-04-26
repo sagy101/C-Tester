@@ -1,6 +1,6 @@
 VERBOSITY_LEVEL = 1  # Adjust verbosity (0=minimal, 1=normal, 2=verbose)
 
-def log(message, level="info", verbosity=1):
+def log(message, level="info", verbosity=2):
     if verbosity <= VERBOSITY_LEVEL:
         colors = {
             "info": "\033[94m",
