@@ -6,6 +6,7 @@ import sys
 import io
 import os
 import re # Import regex module
+import subprocess
 
 # Import backend functions & default config
 # Import defaults from configuration.py now
@@ -13,6 +14,8 @@ from configuration import questions as default_questions
 from configuration import folder_weights as default_weights
 from configuration import penalty as default_penalty # Import default penalty
 from configuration import per_error_penalty as default_per_error_penalty # Import default per-error-penalty flag
+from configuration import vs_path as default_vs_path # Import default VS path
+from configuration import winrar_path as default_winrar_path # Import default WinRAR path
 # Import validator from configuration now
 from configuration import validate_config
 from preprocess import preprocess_submissions
@@ -101,8 +104,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("C Auto Grader")
-        self.geometry("1200x800")  # Increased width from 1100 to 1200
-        self.minsize(1300, 700)     # Increased minimum width from 900 to 1000
+        self.geometry("1200x900")  # Increased height from 800 to 900
+        self.minsize(1300, 800)     # Increased minimum height from 700 to 800
         
         # Add application icon (if available)
         try:
@@ -121,10 +124,14 @@ class App(ctk.CTk):
         self.gui_penalty = default_penalty  # Initialize GUI penalty
         self.gui_per_error_penalty = default_per_error_penalty  # Initialize per-error penalty flag
         self.gui_rar_support = False  # New RAR support variable
+        self.gui_vs_path = default_vs_path  # Initialize VS path
+        self.gui_winrar_path = default_winrar_path  # Initialize WinRAR path
         self.slim_output_var = tk.BooleanVar(value=False)  # Variable for slim checkbox
         self.per_error_penalty_var = tk.BooleanVar(value=default_per_error_penalty)  # Variable for per-error penalty checkbox
         self.config_valid = False
         self.config_dirty = False  # Track unapplied changes
+        self.vs_path_dirty = False  # Track unapplied VS path
+        self.winrar_path_dirty = False  # Track unapplied WinRAR path
         self.current_task_thread = None
         self.cancel_event = None
         self.config_rows = []  # To store row widgets [q_entry, w_entry]
@@ -152,13 +159,15 @@ class App(ctk.CTk):
         # Adjust column weights to provide more space for config which needs more width
         self.controls_frame.grid_columnconfigure(0, weight=3)  # Config gets more space
         self.controls_frame.grid_columnconfigure((1, 2, 3), weight=2)  # Other sections
+        self.controls_frame.grid_rowconfigure(0, weight=1)  # Main sections row
+        self.controls_frame.grid_rowconfigure(1, weight=0)  # Dependencies row
 
-        # Section 0: Configuration
+        # Section 0: Configuration - Now spans rows 0-1
         self.config_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
-        self.config_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.config_frame.grid(row=0, column=0, rowspan=2, padx=10, pady=10, sticky="nsew")  # Added rowspan=2 to span both rows
         self.config_frame.grid_columnconfigure((0, 1), weight=1)  # Columns for table
         # Row 1 for headers, Row 2 for table frame (expands), Row 3 for penalty, Row 4 for buttons, Row 5 for status
-        self.config_frame.grid_rowconfigure(2, weight=1)
+        self.config_frame.grid_rowconfigure(2, weight=1) 
 
         # Section title with icon-like emoji and better font
         self.config_label = ctk.CTkLabel(
@@ -287,6 +296,8 @@ class App(ctk.CTk):
             border_width=1
         )
         self.zip_entry.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        # Add binding to check preprocess button state when path changes
+        self.zip_path_var.trace_add("write", lambda *args: self.check_preprocess_button_state())
         
         # Browse button with icon
         self.browse_button = ctk.CTkButton(
@@ -325,6 +336,7 @@ class App(ctk.CTk):
             self.rar_support_frame, 
             text="Enable RAR file support",
             variable=self.rar_support_var,
+            command=self.update_rar_dependency_state,
             border_width=2,
             hover=True,
             width=200  # Ensure enough width for the text
@@ -377,7 +389,7 @@ class App(ctk.CTk):
         self.slim_checkbox = ctk.CTkCheckBox(
             self.slim_checkbox_frame, 
             text="Slim Output (ID & Grade Only)",  # Shortened text slightly
-            variable=self.slim_output_var,
+                                           variable=self.slim_output_var,
             onvalue=True, 
             offvalue=False,
             border_width=2,
@@ -472,6 +484,142 @@ class App(ctk.CTk):
         )
         self.clear_all_button.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
 
+        # Section 4: Dependencies - Now placed in row 1, spanning columns 1-3
+        self.dependencies_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
+        self.dependencies_frame.grid(row=1, column=1, columnspan=3, padx=10, pady=(5, 10), sticky="ew")  # Span columns 1-3 in row 1
+        self.dependencies_frame.grid_columnconfigure((0, 1, 2), weight=1)  # Equal weights for 3 sections
+
+        # Title for Dependencies section
+        self.dependencies_label = ctk.CTkLabel(
+            self.dependencies_frame, 
+            text="🔌 Dependencies", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["primary"]
+        )
+        self.dependencies_label.grid(row=0, column=0, columnspan=3, padx=10, pady=(10, 15), sticky="w")
+
+        # Visual Studio Path - Column 0-1
+        self.vs_path_frame = ctk.CTkFrame(self.dependencies_frame, fg_color="transparent")
+        self.vs_path_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.vs_path_frame.grid_columnconfigure(0, weight=1)
+
+        self.vs_path_label = ctk.CTkLabel(
+            self.vs_path_frame, 
+            text="Visual Studio Path:", 
+            anchor="w"
+        )
+        self.vs_path_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        self.vs_path_var = tk.StringVar(value=default_vs_path)
+        self.vs_path_entry = ctk.CTkEntry(
+            self.vs_path_frame, 
+            textvariable=self.vs_path_var,
+            height=32,
+            border_width=1
+        )
+        self.vs_path_entry.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+        self.vs_path_entry.bind("<KeyRelease>", lambda event: self.mark_vs_path_dirty())
+
+        # VS Path Buttons and Status - Row 2
+        self.vs_buttons_frame = ctk.CTkFrame(self.vs_path_frame, fg_color="transparent")
+        self.vs_buttons_frame.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
+        self.vs_buttons_frame.grid_columnconfigure(0, weight=1)
+        self.vs_buttons_frame.grid_columnconfigure(1, weight=1)
+
+        self.browse_vs_path_button = ctk.CTkButton(
+            self.vs_buttons_frame, 
+            text="📁 Browse", 
+            command=self.browse_vs_path,
+            height=32,
+            width=120,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
+        self.browse_vs_path_button.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        self.apply_vs_path_button = ctk.CTkButton(
+            self.vs_buttons_frame, 
+            text="Apply VS Path", 
+            command=self.apply_vs_path,
+            height=32,
+            width=120,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
+        self.apply_vs_path_button.grid(row=0, column=1, padx=5, pady=5, sticky="e")
+
+        self.vs_path_status_label = ctk.CTkLabel(
+            self.vs_path_frame, 
+            text="Status: Unchecked", 
+            anchor="w", 
+            text_color="gray",
+            height=25
+        )
+        self.vs_path_status_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+
+        # WinRAR Path - Column 2-3
+        self.winrar_path_frame = ctk.CTkFrame(self.dependencies_frame, fg_color="transparent")
+        self.winrar_path_frame.grid(row=1, column=2, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.winrar_path_frame.grid_columnconfigure(0, weight=1)
+
+        self.winrar_path_label = ctk.CTkLabel(
+            self.winrar_path_frame, 
+            text="WinRAR Path:", 
+            anchor="w"
+        )
+        self.winrar_path_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        self.winrar_path_var = tk.StringVar(value=default_winrar_path)
+        self.winrar_path_entry = ctk.CTkEntry(
+            self.winrar_path_frame, 
+            textvariable=self.winrar_path_var,
+            height=32,
+            border_width=1
+        )
+        self.winrar_path_entry.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+        self.winrar_path_entry.bind("<KeyRelease>", lambda event: self.mark_winrar_path_dirty())
+
+        # WinRAR Path Buttons and Status - Row 2
+        self.winrar_buttons_frame = ctk.CTkFrame(self.winrar_path_frame, fg_color="transparent")
+        self.winrar_buttons_frame.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
+        self.winrar_buttons_frame.grid_columnconfigure(0, weight=1)
+        self.winrar_buttons_frame.grid_columnconfigure(1, weight=1)
+
+        self.browse_winrar_path_button = ctk.CTkButton(
+            self.winrar_buttons_frame, 
+            text="📁 Browse", 
+            command=self.browse_winrar_path,
+            height=32,
+            width=120,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
+        self.browse_winrar_path_button.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        self.apply_winrar_path_button = ctk.CTkButton(
+            self.winrar_buttons_frame, 
+            text="Apply WinRAR Path", 
+            command=self.apply_winrar_path,
+            height=32,
+            width=120,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
+        self.apply_winrar_path_button.grid(row=0, column=1, padx=5, pady=5, sticky="e")
+
+        self.winrar_path_status_label = ctk.CTkLabel(
+            self.winrar_path_frame, 
+            text="Status: Unchecked", 
+            anchor="w", 
+            text_color="gray",
+            height=25
+        )
+        self.winrar_path_status_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+
         # --- Progress/Cancel Frame Content ---
         self.progress_desc_label = ctk.CTkLabel(
             self.progress_cancel_frame, 
@@ -544,7 +692,10 @@ class App(ctk.CTk):
         # --- Populate initial config & Validate --- 
         self.populate_config_fields()
         self.apply_gui_configuration() # Validate initial config
-        self.setup_button_commands() # Bind main task button commands
+        
+        # Perform initial validation of VS and WinRAR paths when the GUI starts
+        # Use after() to ensure GUI is fully initialized first
+        self.after(100, self.validate_initial_paths)
 
     def browse_zip(self):
         filepath = filedialog.askopenfilename(
@@ -553,6 +704,31 @@ class App(ctk.CTk):
         )
         if filepath:
             self.zip_path_var.set(filepath)
+            # Enable the preprocess button now that a file is selected
+            self.check_preprocess_button_state()
+        else:
+            # If user cancelled the dialog and no file was previously selected
+            self.check_preprocess_button_state()
+
+    def check_preprocess_button_state(self):
+        """Check if preprocess button should be enabled based on zip file selection and WinRAR validation."""
+        zip_path = self.zip_path_var.get().strip()
+        
+        # First check if a zip file is selected
+        if not zip_path:
+            self.preprocess_button.configure(state="disabled")
+            return
+        
+        # Then check if RAR support is enabled and WinRAR path is valid
+        if self.rar_support_var.get() and self.winrar_path_dirty:
+            self.preprocess_button.configure(state="disabled")
+        else:
+            # If zip is selected and either RAR is disabled or WinRAR path is valid
+            self.preprocess_button.configure(
+                state="normal",
+                fg_color=COLORS["secondary"],
+                hover_color=("#2aa65a", "#216e3d")
+            )
 
     def set_controls_state(self, state):
         """Enable or disable all control buttons."""
@@ -670,8 +846,15 @@ class App(ctk.CTk):
         self.gui_rar_support = rar_support
         
         log(f"Starting preprocessing task for: {zip_path} (RAR support: {'enabled' if rar_support else 'disabled'})", level="info")
-        # Pass the CURRENT GUI config
-        preprocess_submissions(zip_path, self.gui_questions, rar_support, progress_callback, cancel_event)
+        # Pass the CURRENT GUI config including the WinRAR path
+        preprocess_submissions(
+            zip_path, 
+            self.gui_questions, 
+            rar_support, 
+            progress_callback, 
+            cancel_event, 
+            winrar_path=self.gui_winrar_path
+        )
 
     def task_run_grading_internal(self, progress_callback=None, cancel_event=None):
         log("Starting grading task...", level="info")
@@ -856,7 +1039,30 @@ class App(ctk.CTk):
              status_color = COLORS["danger"]
              apply_border_color = COLORS["danger"]  # Error border
              apply_border_width = 2
-             messagebox.showwarning("Configuration Validation Error", "\n".join(validation_errors))
+             
+             # Format validation errors with bullet points and better spacing
+             formatted_errors = []
+             for error in validation_errors:
+                 # Parse error to improve formatting
+                 if "Folder '" in error and "' not found" in error:
+                     parts = error.split("(Expected path: ")
+                     if len(parts) > 1:
+                         folder_part = parts[0].replace("Configuration error: ", "")
+                         path_part = parts[1].rstrip(").") if parts[1].endswith(").") else parts[1].rstrip(")")
+                         formatted_errors.append(f"• {folder_part}\n  Expected path: {path_part}")
+                     else:
+                         formatted_errors.append(f"• {error}")
+                 elif "Folder weights sum to" in error:
+                     parts = error.split("sum to ")
+                     if len(parts) > 1:
+                         weight_part = parts[1].split("%")[0]
+                         formatted_errors.append(f"• Total weight is {weight_part}%, must be exactly 100%")
+                     else:
+                         formatted_errors.append(f"• {error}")
+                 else:
+                     formatted_errors.append(f"• {error}")
+             
+             messagebox.showwarning("Configuration Validation Error", "\n\n".join(formatted_errors))
         else:
              self.config_valid = True
              self.config_dirty = False  # Applied successfully
@@ -878,17 +1084,21 @@ class App(ctk.CTk):
     def update_dependent_button_states(self):
         """Enable/disable buttons based on config validity with enhanced visual feedback."""
         if self.config_valid:
-            # Enable buttons with normal styling
-            self.preprocess_button.configure(
-                state="normal",
-                fg_color=COLORS["secondary"],
-                hover_color=("#2aa65a", "#216e3d")
-            )
-            self.run_button.configure(
-                state="normal",
-                fg_color=COLORS["accent"],
-                hover_color=("#8649a3", "#61347a")
-            )
+            # Check the preprocess button state separately
+            self.check_preprocess_button_state()
+            
+            # Enable run button only if VS path is valid
+            if not self.vs_path_dirty:
+                self.run_button.configure(
+                    state="normal",
+                    fg_color=COLORS["accent"],
+                    hover_color=("#8649a3", "#61347a")
+                )
+            else:
+                self.run_button.configure(
+                    state="disabled",
+                    fg_color=("gray80", "gray30")
+                )
             
             # Enable clear buttons if questions exist
             if self.gui_questions:
@@ -904,23 +1114,344 @@ class App(ctk.CTk):
                 self.clear_c_button.configure(state=clear_state)
                 self.clear_all_button.configure(state=clear_state)
         else:
-            # Disable buttons with visually muted appearance
+            # If config is invalid, disable most buttons
             disabled_color = ("gray80", "gray30")
-            self.preprocess_button.configure(
-                state="disabled",
-                fg_color=disabled_color
-            )
+            
+            # Disable run button if config is invalid
             self.run_button.configure(
                 state="disabled",
                 fg_color=disabled_color
             )
             
-            # Also disable question-dependent clear buttons
+            # Disable question-dependent clear buttons if config is invalid
             clear_state = "disabled"
             self.clear_grades_button.configure(state=clear_state)
             self.clear_output_button.configure(state=clear_state)
             self.clear_c_button.configure(state=clear_state)
             self.clear_all_button.configure(state=clear_state)
+            
+            # Check preprocess button state separately
+            self.check_preprocess_button_state()
+
+    def browse_vs_path(self):
+        filepath = filedialog.askopenfilename(
+            title="Select Visual Studio vcvars64.bat",
+            filetypes=(("Batch files", "*.bat"), ("All files", "*.*"))
+        )
+        if filepath:
+            # Check if it's a .bat file
+            if not filepath.lower().endswith('.bat'):
+                messagebox.showwarning("Invalid File Type", "Please select a .bat file for Visual Studio path.")
+                return
+            self.vs_path_var.set(filepath)
+            self.mark_vs_path_dirty()
+    
+    def browse_winrar_path(self):
+        filepath = filedialog.askopenfilename(
+            title="Select WinRAR Executable",
+            filetypes=(("Executable files", "*.exe"), ("All files", "*.*"))
+        )
+        if filepath:
+            # Check if it's an .exe file
+            if not filepath.lower().endswith('.exe'):
+                messagebox.showwarning("Invalid File Type", "Please select an .exe file for WinRAR path.")
+                return
+            self.winrar_path_var.set(filepath)
+            self.mark_winrar_path_dirty()
+    
+    def mark_vs_path_dirty(self):
+        """Updates UI to show VS path needs applying."""
+        if self.vs_path_dirty: return  # Already marked
+        self.vs_path_dirty = True
+        self.vs_path_status_label.configure(text="Status: Path changed (unapplied)", text_color=COLORS["warning"])
+        self.apply_vs_path_button.configure(border_color=COLORS["warning"], border_width=2)
+        # Disable run grading button when VS path is dirty
+        self.run_button.configure(state="disabled")
+        log("Visual Studio path changed, please Apply.", "info")
+        self.update_dependent_button_states()
+    
+    def mark_winrar_path_dirty(self):
+        """Updates UI to show WinRAR path needs applying."""
+        if self.winrar_path_dirty: return  # Already marked
+        self.winrar_path_dirty = True
+        self.winrar_path_status_label.configure(text="Status: Path changed (unapplied)", text_color=COLORS["warning"])
+        self.apply_winrar_path_button.configure(border_color=COLORS["warning"], border_width=2)
+        
+        # Disable preprocess button when WinRAR path is dirty AND RAR support is enabled
+        if self.rar_support_var.get():
+            self.preprocess_button.configure(state="disabled")
+            log("RAR support enabled but WinRAR path is not applied. Please Apply the WinRAR path.", "info")
+        else:
+            log("RAR support disabled, preprocessor will not use WinRAR path.", "info")
+        
+        self.update_dependent_button_states()
+    
+    def apply_vs_path(self):
+        """Validates and applies the VS path."""
+        vs_path = self.vs_path_var.get().strip()
+        if not vs_path:
+            messagebox.showerror("Error", "Visual Studio path cannot be empty.")
+            self.vs_path_status_label.configure(text="Status: Invalid (empty path)", text_color=COLORS["danger"])
+            return
+        
+        # Check if path has the correct extension
+        if not vs_path.lower().endswith('.bat'):
+            messagebox.showerror("Error", "Visual Studio path must be a .bat file.")
+            self.vs_path_status_label.configure(text="Status: Invalid (not a .bat file)", text_color=COLORS["danger"])
+            return
+        
+        # Check if file exists
+        if not os.path.exists(vs_path):
+            messagebox.showerror("Error", f"Visual Studio path does not exist: {vs_path}")
+            self.vs_path_status_label.configure(text="Status: Invalid (file not found)", text_color=COLORS["danger"])
+            return
+        
+        # Update status to show we're validating
+        self.vs_path_status_label.configure(text="Status: Validating...", text_color=COLORS["warning"])
+        self.apply_vs_path_button.configure(state="disabled")
+        
+        # Run validation in a background thread
+        threading.Thread(target=self._validate_vs_path_thread, args=(vs_path,), daemon=True).start()
+
+    def _validate_vs_path_thread(self, vs_path):
+        """Background thread for VS path validation"""
+        try:
+            # Basic test - just check if the file can be executed
+            test_cmd = f'cmd /c ""{vs_path}" && echo Success"'
+            result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+            
+            # Schedule UI updates on the main thread
+            if result.returncode != 0:
+                self.after(0, lambda: self._handle_vs_validation_failure(vs_path, f"Failed to execute batch file:\n{result.stderr}"))
+                return
+            
+            # Check if "cl.exe" is in the path after running vcvars64.bat
+            test_cmd = f'cmd /c ""{vs_path}" && where cl.exe"'
+            result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+            
+            if result.returncode != 0:
+                self.after(0, lambda: self._handle_vs_validation_warning(vs_path, "Visual Studio environment doesn't include cl.exe compiler.\nMake sure Visual C++ build tools are installed."))
+            else:
+                self.after(0, lambda: self._handle_vs_validation_success(vs_path))
+                
+        except Exception as e:
+            self.after(0, lambda: self._handle_vs_validation_failure(vs_path, f"Validation error: {str(e)}"))
+
+    def _handle_vs_validation_success(self, vs_path):
+        """Handle successful VS path validation (runs on main thread)"""
+        self.gui_vs_path = vs_path
+        self.vs_path_dirty = False
+        self.vs_path_status_label.configure(text="Status: Valid ✓", text_color=COLORS["secondary"])
+        self.apply_vs_path_button.configure(border_color=self._default_border_color, border_width=1, state="normal")
+        log(f"Visual Studio path applied and validated: {vs_path}", "success")
+        self.update_dependent_button_states()
+
+    def _handle_vs_validation_warning(self, vs_path, message):
+        """Handle VS path validation with warnings (runs on main thread)"""
+        messagebox.showwarning("Warning", message)
+        self.gui_vs_path = vs_path
+        self.vs_path_dirty = False
+        self.vs_path_status_label.configure(text="Status: Applied with warnings", text_color=COLORS["warning"])
+        self.apply_vs_path_button.configure(border_color=self._default_border_color, border_width=1, state="normal")
+        log(f"Visual Studio path applied with warnings: {vs_path}", "warning")
+        self.update_dependent_button_states()
+
+    def _handle_vs_validation_failure(self, vs_path, error_message):
+        """Handle VS path validation failure (runs on main thread)"""
+        messagebox.showerror("Error", error_message)
+        self.vs_path_status_label.configure(text="Status: Validation failed", text_color=COLORS["danger"])
+        self.apply_vs_path_button.configure(state="normal")
+
+    def apply_winrar_path(self):
+        """Validates and applies the WinRAR path."""
+        winrar_path = self.winrar_path_var.get().strip()
+        if not winrar_path:
+            messagebox.showerror("Error", "WinRAR path cannot be empty.")
+            self.winrar_path_status_label.configure(text="Status: Invalid (empty path)", text_color=COLORS["danger"])
+            return
+        
+        # Check if path has the correct extension
+        if not winrar_path.lower().endswith('.exe'):
+            messagebox.showerror("Error", "WinRAR path must be an .exe file.")
+            self.winrar_path_status_label.configure(text="Status: Invalid (not an .exe file)", text_color=COLORS["danger"])
+            return
+        
+        # Check if file exists
+        if not os.path.exists(winrar_path):
+            messagebox.showerror("Error", f"WinRAR path does not exist: {winrar_path}")
+            self.winrar_path_status_label.configure(text="Status: Invalid (file not found)", text_color=COLORS["danger"])
+            return
+        
+        # Check if it contains 'rar' in the path to ensure it's likely a WinRAR executable
+        if 'rar' not in winrar_path.lower():
+            if not messagebox.askyesno("Warning", f"Path doesn't appear to be a RAR executable: {winrar_path}\n\nContinue anyway?"):
+                self.winrar_path_status_label.configure(text="Status: Warning (not RAR-related)", text_color=COLORS["warning"])
+                return
+        
+        # Basic test - just check if the file can be executed
+        try:
+            # For UnRAR.exe, try to get version info
+            if 'unrar.exe' in winrar_path.lower():
+                test_cmd = f'"{winrar_path}" -v'
+            # For WinRAR.exe, try with /? parameter
+            else:
+                test_cmd = f'"{winrar_path}" /?'
+                
+            result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+            if result.returncode != 0 and 'unrar.exe' in winrar_path.lower():
+                messagebox.showerror("Error", f"Failed to execute UnRAR executable:\n{result.stderr}")
+                self.winrar_path_status_label.configure(text="Status: Invalid (execution failed)", text_color=COLORS["danger"])
+                return
+                
+            # Success!
+            self.gui_winrar_path = winrar_path
+            self.winrar_path_dirty = False
+            self.winrar_path_status_label.configure(text="Status: Valid ✓", text_color=COLORS["secondary"])
+            self.apply_winrar_path_button.configure(border_color=self._default_border_color, border_width=1)
+            log(f"WinRAR path applied and validated: {winrar_path}", "success")
+            self.update_dependent_button_states()
+            
+        except Exception as e:
+            messagebox.showwarning("Warning", f"Cannot verify WinRAR executable:\n{str(e)}\n\nPath will be applied but might not work correctly.")
+            self.winrar_path_status_label.configure(text="Status: Applied with warnings", text_color=COLORS["warning"])
+            self.gui_winrar_path = winrar_path
+            self.winrar_path_dirty = False
+            self.apply_winrar_path_button.configure(border_color=self._default_border_color, border_width=1)
+            log(f"WinRAR path applied with warnings: {winrar_path}", "warning")
+            self.update_dependent_button_states()
+
+    def update_rar_dependency_state(self):
+        """Updates button states when RAR support is toggled"""
+        # Update preprocess button state
+        self.check_preprocess_button_state()
+        
+        # Log appropriate message
+        if self.rar_support_var.get() and self.winrar_path_dirty:
+            log("RAR support enabled but WinRAR path is not validated. Please Apply the WinRAR path.", "info")
+        elif not self.rar_support_var.get() and self.winrar_path_dirty:
+            log("RAR support disabled, preprocessor will not use WinRAR path.", "info")
+
+    def validate_initial_paths(self):
+        """Validate VS and WinRAR paths when the GUI first opens."""
+        log("Performing initial dependency validation...", "info")
+        
+        # Validate VS path
+        vs_path = self.vs_path_var.get().strip()
+        if vs_path and os.path.exists(vs_path) and vs_path.lower().endswith('.bat'):
+            # Start validation in background thread
+            self.vs_path_status_label.configure(text="Status: Validating...", text_color=COLORS["warning"])
+            self.vs_path_dirty = True  # Mark as dirty until validation completes
+            self.run_button.configure(state="disabled")  # Disable Run Grading until validation is successful
+            threading.Thread(target=self._validate_initial_vs_path, args=(vs_path,), daemon=True).start()
+        else:
+            # VS path is invalid, disable Run Grading button
+            self.vs_path_dirty = True
+            self.vs_path_status_label.configure(text="Status: Not validated", text_color=COLORS["warning"])
+            self.run_button.configure(state="disabled")
+            log("Initial VS path validation failed. Please validate VS path before running grading.", "warning")
+        
+        # Validate WinRAR path regardless of RAR support setting
+        winrar_path = self.winrar_path_var.get().strip()
+        if winrar_path and os.path.exists(winrar_path) and winrar_path.lower().endswith('.exe'):
+            # Start validation in background thread
+            self.winrar_path_status_label.configure(text="Status: Validating...", text_color=COLORS["warning"])
+            self.winrar_path_dirty = True  # Mark as dirty until validation completes
+            threading.Thread(target=self._validate_initial_winrar_path, args=(winrar_path,), daemon=True).start()
+        else:
+            # WinRAR path is invalid
+            self.winrar_path_dirty = True
+            self.winrar_path_status_label.configure(text="Status: Not validated", text_color=COLORS["warning"])
+            log("Initial WinRAR path validation failed.", "warning")
+            
+            # Only disable Preprocess button if RAR support is enabled
+            if self.rar_support_var.get():
+                self.preprocess_button.configure(state="disabled")
+                log("RAR support is enabled but WinRAR path is invalid. Preprocess button disabled.", "warning")
+        
+        # Update button states
+        self.update_dependent_button_states()
+
+    def _validate_initial_vs_path(self, vs_path):
+        """Background thread for initial VS path validation"""
+        try:
+            # Basic test - just check if the file can be executed
+            test_cmd = f'cmd /c ""{vs_path}" && echo Success"'
+            result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+            
+            if result.returncode != 0:
+                self.after(0, lambda: self._handle_initial_vs_validation_failure())
+                return
+            
+            # Check if "cl.exe" is in the path after running vcvars64.bat
+            test_cmd = f'cmd /c ""{vs_path}" && where cl.exe"'
+            result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+            
+            if result.returncode != 0:
+                self.after(0, lambda: self._handle_initial_vs_validation_warning())
+            else:
+                self.after(0, lambda: self._handle_initial_vs_validation_success())
+                
+        except Exception as e:
+            self.after(0, lambda: self._handle_initial_vs_validation_failure())
+
+    def _handle_initial_vs_validation_success(self):
+        """Handle successful initial VS path validation (runs on main thread)"""
+        self.gui_vs_path = self.vs_path_var.get().strip()
+        self.vs_path_dirty = False
+        self.vs_path_status_label.configure(text="Status: Valid ✓", text_color=COLORS["secondary"])
+        log("Visual Studio path initially validated successfully.", "success")
+        self.update_dependent_button_states()
+
+    def _handle_initial_vs_validation_warning(self):
+        """Handle initial VS path validation with warnings (runs on main thread)"""
+        self.gui_vs_path = self.vs_path_var.get().strip()
+        self.vs_path_dirty = False
+        self.vs_path_status_label.configure(text="Status: Valid with warnings", text_color=COLORS["warning"])
+        log("Visual Studio path initially validated with warnings. cl.exe not found.", "warning")
+        self.update_dependent_button_states()
+
+    def _handle_initial_vs_validation_failure(self):
+        """Handle initial VS path validation failure (runs on main thread)"""
+        self.vs_path_dirty = True
+        self.vs_path_status_label.configure(text="Status: Invalid", text_color=COLORS["danger"])
+        log("Initial Visual Studio path validation failed. Run Grading will be disabled.", "error")
+        self.run_button.configure(state="disabled")
+
+    def _validate_initial_winrar_path(self, winrar_path):
+        """Background thread for initial WinRAR path validation"""
+        try:
+            # For UnRAR.exe, try to get version info
+            if 'unrar.exe' in winrar_path.lower():
+                test_cmd = f'"{winrar_path}" -v'
+            # For WinRAR.exe, try with /? parameter
+            else:
+                test_cmd = f'"{winrar_path}" /?'
+                
+            result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+            if result.returncode != 0 and 'unrar.exe' in winrar_path.lower():
+                self.after(0, lambda: self._handle_initial_winrar_validation_failure())
+                return
+            
+            # Success
+            self.after(0, lambda: self._handle_initial_winrar_validation_success())
+        except Exception as e:
+            self.after(0, lambda: self._handle_initial_winrar_validation_failure())
+
+    def _handle_initial_winrar_validation_success(self):
+        """Handle successful initial WinRAR path validation (runs on main thread)"""
+        self.gui_winrar_path = self.winrar_path_var.get().strip()
+        self.winrar_path_dirty = False
+        self.winrar_path_status_label.configure(text="Status: Valid ✓", text_color=COLORS["secondary"])
+        log("WinRAR path initially validated successfully.", "success")
+        self.update_dependent_button_states()
+
+    def _handle_initial_winrar_validation_failure(self):
+        """Handle initial WinRAR path validation failure (runs on main thread)"""
+        self.winrar_path_dirty = True
+        self.winrar_path_status_label.configure(text="Status: Invalid", text_color=COLORS["danger"])
+        log("Initial WinRAR path validation failed. RAR support will be disabled.", "error")
+        if self.rar_support_var.get():
+            self.preprocess_button.configure(state="disabled")
 
 if __name__ == "__main__":
     app = App()
