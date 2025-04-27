@@ -28,8 +28,24 @@ from clear_utils import (
 )
 from Utils import log # For direct logging if needed, though most comes via redirect
 
-ctk.set_appearance_mode("System") # Modes: "System" (default), "Dark", "Light"
-ctk.set_default_color_theme("blue") # Themes: "blue" (default), "green", "dark-blue"
+# Set a modern theme
+ctk.set_appearance_mode("System")  # Modes: "System" (default), "Dark", "Light"
+ctk.set_default_color_theme("blue")  # Themes: "blue" (default), "green", "dark-blue"
+
+# Define custom colors
+COLORS = {
+    "primary": "#3498db",       # Blue for primary elements
+    "secondary": "#2ecc71",     # Green for success elements
+    "accent": "#9b59b6",        # Purple for accent elements
+    "warning": "#f39c12",       # Orange for warnings
+    "danger": "#e74c3c",        # Red for danger/errors
+    "light_bg": "#f5f5f5",      # Light background
+    "dark_bg": "#2c3e50",       # Dark background
+    "text_light": "#ecf0f1",    # Light text
+    "text_dark": "#34495e",     # Dark text
+    "border": "#bdc3c7",        # Border color
+    "hover": "#2980b9",         # Hover color for buttons
+}
 
 class GuiStream(io.StringIO):
     """A custom stream to redirect stdout/stderr to a CTkTextbox."""
@@ -84,170 +100,437 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("C Auto Grader GUI")
-        self.geometry("1000x750") # Increased width/height
+        self.title("C Auto Grader")
+        self.geometry("1200x800")  # Increased width from 1100 to 1200
+        self.minsize(1300, 700)     # Increased minimum width from 900 to 1000
+        
+        # Add application icon (if available)
+        try:
+            self.iconbitmap("app_icon.ico")  # You'd need to create this icon file
+        except:
+            pass  # Silently fail if icon not found
 
         # Configure grid layout
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=0) # Progress/Cancel
-        self.grid_rowconfigure(2, weight=1) # Logs
+        self.grid_rowconfigure(1, weight=0)  # Progress/Cancel
+        self.grid_rowconfigure(2, weight=1)  # Logs
 
         # --- App State (Initialize with defaults) --- 
-        self.gui_questions = default_questions[:] # Make copies
+        self.gui_questions = default_questions[:]  # Make copies
         self.gui_weights = default_weights.copy()
-        self.gui_penalty = default_penalty # Initialize GUI penalty
-        self.gui_per_error_penalty = default_per_error_penalty # Initialize per-error penalty flag
-        self.slim_output_var = tk.BooleanVar(value=False) # Variable for slim checkbox
-        self.per_error_penalty_var = tk.BooleanVar(value=default_per_error_penalty) # Variable for per-error penalty checkbox
+        self.gui_penalty = default_penalty  # Initialize GUI penalty
+        self.gui_per_error_penalty = default_per_error_penalty  # Initialize per-error penalty flag
+        self.gui_rar_support = False  # New RAR support variable
+        self.slim_output_var = tk.BooleanVar(value=False)  # Variable for slim checkbox
+        self.per_error_penalty_var = tk.BooleanVar(value=default_per_error_penalty)  # Variable for per-error penalty checkbox
         self.config_valid = False
-        self.config_dirty = False # Track unapplied changes
+        self.config_dirty = False  # Track unapplied changes
         self.current_task_thread = None
         self.cancel_event = None
-        self.config_rows = [] # To store row widgets [q_entry, w_entry]
+        self.config_rows = []  # To store row widgets [q_entry, w_entry]
 
-        # --- Frames --- 
-        self.top_frame = ctk.CTkFrame(self, corner_radius=0)
-        self.top_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 0))
+        # --- Frames with enhanced styling --- 
+        # Top frame with a subtle header background
+        self.top_frame = ctk.CTkFrame(self, corner_radius=10, fg_color=("gray90", "gray20"))
+        self.top_frame.grid(row=0, column=0, sticky="nsew", padx=15, pady=(15, 5))
         self.top_frame.grid_columnconfigure(0, weight=1)
 
-        self.progress_cancel_frame = ctk.CTkFrame(self)
-        self.progress_cancel_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        self.progress_cancel_frame.grid_columnconfigure(1, weight=1) # Progress bar takes space
+        # Progress bar in its own frame with refined styling
+        self.progress_cancel_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.progress_cancel_frame.grid(row=1, column=0, sticky="ew", padx=15, pady=10)
+        self.progress_cancel_frame.grid_columnconfigure(1, weight=1)  # Progress bar takes space
 
-        self.log_frame = ctk.CTkFrame(self)
-        self.log_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        # Log frame with increased padding and rounded corners
+        self.log_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.log_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=(5, 15))
         self.log_frame.grid_rowconfigure(0, weight=1)
         self.log_frame.grid_columnconfigure(0, weight=1)
 
         # --- Top Frame Content (Controls) ---
-        self.controls_frame = ctk.CTkFrame(self.top_frame)
+        self.controls_frame = ctk.CTkFrame(self.top_frame, fg_color="transparent")
         self.controls_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-         # Adjust column weights: Config, Preprocess, Grading, Clear
-        self.controls_frame.grid_columnconfigure((0, 1, 2, 3), weight=1) 
+        # Adjust column weights to provide more space for config which needs more width
+        self.controls_frame.grid_columnconfigure(0, weight=3)  # Config gets more space
+        self.controls_frame.grid_columnconfigure((1, 2, 3), weight=2)  # Other sections
 
         # Section 0: Configuration
-        self.config_frame = ctk.CTkFrame(self.controls_frame)
+        self.config_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.config_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-        self.config_frame.grid_columnconfigure((0, 1), weight=1) # Columns for table
+        self.config_frame.grid_columnconfigure((0, 1), weight=1)  # Columns for table
         # Row 1 for headers, Row 2 for table frame (expands), Row 3 for penalty, Row 4 for buttons, Row 5 for status
-        self.config_frame.grid_rowconfigure(2, weight=1) 
+        self.config_frame.grid_rowconfigure(2, weight=1)
 
-        self.config_label = ctk.CTkLabel(self.config_frame, text="Configuration", font=ctk.CTkFont(size=14, weight="bold"))
-        self.config_label.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 0), sticky="ew")
+        # Section title with icon-like emoji and better font
+        self.config_label = ctk.CTkLabel(
+            self.config_frame, 
+            text="⚙️ Configuration", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["primary"]
+        )
+        self.config_label.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
         
-        # Table Headers
-        ctk.CTkLabel(self.config_frame, text="Question Folder", anchor="w").grid(row=1, column=0, padx=10, pady=2, sticky="w")
-        ctk.CTkLabel(self.config_frame, text="Weight (%)", anchor="w").grid(row=1, column=1, padx=10, pady=2, sticky="w")
+        # Table Headers with improved styling
+        header_font = ctk.CTkFont(size=12, weight="bold")
+        ctk.CTkLabel(self.config_frame, text="Question Folder", anchor="w", font=header_font).grid(
+            row=1, column=0, padx=10, pady=5, sticky="w"
+        )
+        ctk.CTkLabel(self.config_frame, text="Weight (%)", anchor="w", font=header_font).grid(
+            row=1, column=1, padx=10, pady=5, sticky="w"
+        )
         
-        # Frame for the scrollable rows (if needed, or just grid directly)
-        self.config_table_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent") # Frame to hold rows
-        self.config_table_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=0, sticky="nsew")
-        self.config_table_frame.grid_columnconfigure((0, 1), weight=1) # Columns expand
+        # Frame for the scrollable rows with subtle background
+        self.config_table_frame = ctk.CTkFrame(self.config_frame, fg_color=("gray95", "gray17"))
+        self.config_table_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        self.config_table_frame.grid_columnconfigure((0, 1), weight=1)  # Columns expand
         
-        # Penalty Input
+        # Penalty Input with cleaner layout
         self.penalty_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.penalty_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+        self.penalty_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky="w")
         self.penalty_label = ctk.CTkLabel(self.penalty_frame, text="Submission Error Penalty (%):", anchor="w")
-        self.penalty_label.pack(side=tk.LEFT, padx=(0,5))
-        self.penalty_entry = ctk.CTkEntry(self.penalty_frame, width=50)
+        self.penalty_label.pack(side=tk.LEFT, padx=(0,10))
+        self.penalty_entry = ctk.CTkEntry(self.penalty_frame, width=60, border_width=1)
         self.penalty_entry.pack(side=tk.LEFT)
         self.penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty()) 
         
-        # Add Per-Error Penalty Checkbox
+        # Add Per-Error Penalty Checkbox with improved spacing
         self.per_error_penalty_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
         self.per_error_penalty_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="w")
-        self.per_error_penalty_checkbox = ctk.CTkCheckBox(self.per_error_penalty_frame, 
-                                                   text="Apply penalty per error (cumulative)",
-                                                   variable=self.per_error_penalty_var,
-                                                   onvalue=True, offvalue=False,
-                                                   command=self.mark_config_dirty)
-        self.per_error_penalty_checkbox.pack(side=tk.LEFT)
+        self.per_error_penalty_checkbox = ctk.CTkCheckBox(
+            self.per_error_penalty_frame, 
+            text="Apply penalty per error (cumulative)",
+            variable=self.per_error_penalty_var,
+            onvalue=True, offvalue=False,
+            command=self.mark_config_dirty,
+            border_width=2,
+            hover=True,
+            width=250  # Ensure enough width for the text
+        )
+        self.per_error_penalty_checkbox.pack(side=tk.LEFT, padx=(0, 15))
         
-        # Buttons below table
+        # Buttons with improved styling and spacing
         self.config_buttons_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.config_buttons_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=5)
-        self.add_row_button = ctk.CTkButton(self.config_buttons_frame, text="Add Question", command=self.add_new_config_row_action, width=120)
+        self.config_buttons_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=10)
+        self.add_row_button = ctk.CTkButton(
+            self.config_buttons_frame, 
+            text="➕ Add Question", 
+            command=self.add_new_config_row_action,
+            width=130,
+            height=32,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
         self.add_row_button.pack(side=tk.LEFT, padx=5)
-        self.remove_row_button = ctk.CTkButton(self.config_buttons_frame, text="Remove Last", command=self.remove_last_config_row_action, width=100)
+        
+        self.remove_row_button = ctk.CTkButton(
+            self.config_buttons_frame, 
+            text="➖ Remove Last", 
+            command=self.remove_last_config_row_action,
+            width=130,
+            height=32,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
         self.remove_row_button.pack(side=tk.LEFT, padx=5)
-        self.apply_config_button = ctk.CTkButton(self.config_buttons_frame, text="Apply Config", command=self.apply_gui_configuration, width=120)
+        
+        # Apply button
+        self.apply_config_button = ctk.CTkButton(
+            self.config_buttons_frame, 
+            text="Apply Config", 
+            command=self.apply_gui_configuration,
+            width=140,
+            height=32,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
         self.apply_config_button.pack(side=tk.LEFT, padx=5)
-        self._default_apply_button_color = self.apply_config_button.cget("border_color") # Store default border
+        
+        # Store the default border color - fixed to avoid AttributeError
+        self._default_border_color = self.apply_config_button.cget("border_color")
 
-        self.config_status_label = ctk.CTkLabel(self.config_frame, text="Status: Unknown", anchor="w", text_color="gray")
-        self.config_status_label.grid(row=6, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+        # Status label with better formatting
+        self.config_status_label = ctk.CTkLabel(
+            self.config_frame, 
+            text="Status: Unknown", 
+            anchor="w", 
+            text_color="gray",
+            height=25
+        )
+        self.config_status_label.grid(row=6, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="ew")
 
         # Section 1: Preprocessing
-        self.preprocess_frame = ctk.CTkFrame(self.controls_frame)
+        self.preprocess_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.preprocess_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
         self.preprocess_frame.grid_columnconfigure(0, weight=1)
-        self.preprocess_label = ctk.CTkLabel(self.preprocess_frame, text="Preprocessing", font=ctk.CTkFont(size=14, weight="bold"))
-        self.preprocess_label.grid(row=0, column=0, padx=10, pady=(10, 5))
+        
+        self.preprocess_label = ctk.CTkLabel(
+            self.preprocess_frame, 
+            text="📂 Preprocessing", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["primary"]
+        )
+        self.preprocess_label.grid(row=0, column=0, padx=10, pady=(10, 15))
+        
+        # Zip file selection with improved styling and more width
         self.zip_path_var = tk.StringVar()
-        self.zip_entry = ctk.CTkEntry(self.preprocess_frame, textvariable=self.zip_path_var, placeholder_text="Path to submissions zip", width=200)
-        self.zip_entry.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
-        self.browse_button = ctk.CTkButton(self.preprocess_frame, text="Browse", command=self.browse_zip)
-        self.browse_button.grid(row=2, column=0, padx=10, pady=5)
-        self.preprocess_button = ctk.CTkButton(self.preprocess_frame, text="Run Preprocess", command=lambda: self.run_task(self.task_preprocess_internal))
-        self.preprocess_button.grid(row=3, column=0, padx=10, pady=(5, 10))
+        zip_entry_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
+        zip_entry_frame.grid(row=1, column=0, padx=15, pady=(5, 10), sticky="ew")
+        zip_entry_frame.grid_columnconfigure(0, weight=1)
+        
+        self.zip_entry = ctk.CTkEntry(
+            zip_entry_frame, 
+            textvariable=self.zip_path_var, 
+            placeholder_text="Path to submissions zip",
+            height=32,
+            border_width=1
+        )
+        self.zip_entry.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        
+        # Browse button with icon
+        self.browse_button = ctk.CTkButton(
+            self.preprocess_frame, 
+            text="📁 Browse", 
+            command=self.browse_zip,
+            height=32,
+            width=200,  # Make button wider
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
+        self.browse_button.grid(row=2, column=0, padx=15, pady=(0, 15))
+        
+        # Run preprocess button with improved styling
+        self.preprocess_button = ctk.CTkButton(
+            self.preprocess_frame, 
+            text="▶️ Run Preprocess", 
+            command=lambda: self.run_task(self.task_preprocess_internal),
+            height=36,
+            width=200,  # Make button wider
+            corner_radius=6,
+            hover=True,
+            border_spacing=6,
+            fg_color=COLORS["secondary"],
+            hover_color=("#2aa65a", "#216e3d")  # Darker green on hover
+        )
+        self.preprocess_button.grid(row=3, column=0, padx=15, pady=(0, 15))
+        
+        # Add RAR support checkbox to preprocessing section where it belongs logically
+        self.rar_support_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
+        self.rar_support_frame.grid(row=4, column=0, padx=15, pady=(0, 10), sticky="w")
+        
+        self.rar_support_var = tk.BooleanVar(value=False)
+        self.rar_support_checkbox = ctk.CTkCheckBox(
+            self.rar_support_frame, 
+            text="Enable RAR file support",
+            variable=self.rar_support_var,
+            border_width=2,
+            hover=True,
+            width=200  # Ensure enough width for the text
+        )
+        self.rar_support_checkbox.pack(side=tk.LEFT)
+        
+        # Add help note for RAR support with improved styling
+        self.rar_help_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
+        self.rar_help_frame.grid(row=5, column=0, padx=15, pady=(0, 5), sticky="w")
+        self.rar_help_label = ctk.CTkLabel(
+            self.rar_help_frame, 
+            text="requires rarfile package and WinRAR installed",
+            font=("", 10),
+            text_color="gray"
+        )
+        self.rar_help_label.pack(side=tk.LEFT)
 
         # Section 2: Grading
-        self.grading_frame = ctk.CTkFrame(self.controls_frame)
+        self.grading_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.grading_frame.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
         self.grading_frame.grid_columnconfigure(0, weight=1)
-        self.grading_label = ctk.CTkLabel(self.grading_frame, text="Grading", font=ctk.CTkFont(size=14, weight="bold"))
-        self.grading_label.grid(row=0, column=0, padx=10, pady=(10, 5))
-        self.run_button = ctk.CTkButton(self.grading_frame, text="Run Grading", command=lambda: self.run_task(self.task_run_grading_internal))
-        self.run_button.grid(row=1, column=0, padx=10, pady=(5, 5))
-        # Add Slim Output Checkbox
-        self.slim_checkbox = ctk.CTkCheckBox(self.grading_frame, 
-                                           text="Slim Output (ID & Final Grade Only)",
-                                           variable=self.slim_output_var,
-                                           onvalue=True, offvalue=False)
-        self.slim_checkbox.grid(row=2, column=0, padx=10, pady=(5, 10), sticky="w")
+        
+        self.grading_label = ctk.CTkLabel(
+            self.grading_frame, 
+            text="📊 Grading", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["primary"]
+        )
+        self.grading_label.grid(row=0, column=0, padx=10, pady=(10, 15))
+        
+        # Run grading button with improved styling
+        self.run_button = ctk.CTkButton(
+            self.grading_frame, 
+            text="📝 Run Grading", 
+            command=lambda: self.run_task(self.task_run_grading_internal),
+            height=36,
+            width=200,  # Make button wider
+            corner_radius=6,
+            hover=True,
+            border_spacing=6,
+            fg_color=COLORS["accent"],
+            hover_color=("#8649a3", "#61347a")  # Darker purple on hover
+        )
+        self.run_button.grid(row=1, column=0, padx=15, pady=(5, 15))
+        
+        # Add Slim Output Checkbox with improved styling
+        self.slim_checkbox_frame = ctk.CTkFrame(self.grading_frame, fg_color="transparent")
+        self.slim_checkbox_frame.grid(row=2, column=0, padx=15, pady=(0, 15), sticky="w")
+        
+        self.slim_checkbox = ctk.CTkCheckBox(
+            self.slim_checkbox_frame, 
+            text="Slim Output (ID & Grade Only)",  # Shortened text slightly
+            variable=self.slim_output_var,
+            onvalue=True, 
+            offvalue=False,
+            border_width=2,
+            hover=True,
+            width=250  # Adjusted width
+        )
+        self.slim_checkbox.pack(side=tk.LEFT)
 
         # Section 3: Clear Actions
-        self.clear_frame = ctk.CTkFrame(self.controls_frame)
+        self.clear_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.clear_frame.grid(row=0, column=3, padx=10, pady=10, sticky="nsew")
         self.clear_frame.grid_columnconfigure((0,1), weight=1)
-        self.clear_label = ctk.CTkLabel(self.clear_frame, text="Clear Actions", font=ctk.CTkFont(size=14, weight="bold"))
-        self.clear_label.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5))
-        self.clear_grades_button = ctk.CTkButton(self.clear_frame, text="Clear Grades", command=lambda: self.run_task(lambda: clear_grades(self.gui_questions)))
+        
+        self.clear_label = ctk.CTkLabel(
+            self.clear_frame, 
+            text="🧹 Clear Actions", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["primary"]
+        )
+        self.clear_label.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 15))
+        
+        button_height = 32
+        button_corner = 6
+        button_width = 120  # Explicit width for clear buttons
+        
+        # Clear buttons with improved styling and icons
+        self.clear_grades_button = ctk.CTkButton(
+            self.clear_frame, 
+            text="Clear Grades", 
+            command=lambda: self.run_task(lambda: clear_grades(self.gui_questions)),
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
         self.clear_grades_button.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
-        self.clear_output_button = ctk.CTkButton(self.clear_frame, text="Clear Output", command=lambda: self.run_task(lambda: clear_output(self.gui_questions)))
+        
+        self.clear_output_button = ctk.CTkButton(
+            self.clear_frame, 
+            text="Clear Output", 
+            command=lambda: self.run_task(lambda: clear_output(self.gui_questions)),
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
         self.clear_output_button.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self.clear_c_button = ctk.CTkButton(self.clear_frame, text="Clear C Files", command=lambda: self.run_task(lambda: clear_c_files(self.gui_questions)))
+        
+        self.clear_c_button = ctk.CTkButton(
+            self.clear_frame, 
+            text="Clear C Files", 
+            command=lambda: self.run_task(lambda: clear_c_files(self.gui_questions)),
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
         self.clear_c_button.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
-        self.clear_excels_button = ctk.CTkButton(self.clear_frame, text="Clear Excels", command=lambda: self.run_task(clear_excels))
+        
+        self.clear_excels_button = ctk.CTkButton(
+            self.clear_frame, 
+            text="Clear Excels", 
+            command=lambda: self.run_task(clear_excels),
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
         self.clear_excels_button.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-        self.clear_build_button = ctk.CTkButton(self.clear_frame, text="Clear Build Files", command=lambda: self.run_task(clear_build_files))
+        
+        self.clear_build_button = ctk.CTkButton(
+            self.clear_frame, 
+            text="Clear Build Files", 
+            command=lambda: self.run_task(clear_build_files),
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
         self.clear_build_button.grid(row=3, column=0, padx=5, pady=5, sticky="ew")
-        self.clear_all_button = ctk.CTkButton(self.clear_frame, text="Clear All", command=lambda: self.run_task(lambda: clear_all(self.gui_questions)), fg_color="#D32F2F", hover_color="#B71C1C") # Danger color
+        
+        self.clear_all_button = ctk.CTkButton(
+            self.clear_frame, 
+            text="Clear All", 
+            command=lambda: self.run_task(lambda: clear_all(self.gui_questions)), 
+            fg_color=COLORS["danger"],
+            hover_color=("#c0392b", "#922b21"),  # Darker red on hover
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
         self.clear_all_button.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
 
         # --- Progress/Cancel Frame Content ---
-        self.progress_desc_label = ctk.CTkLabel(self.progress_cancel_frame, text="Idle", anchor="w")
-        self.progress_desc_label.grid(row=0, column=0, padx=(10, 5), pady=5, sticky="w")
+        self.progress_desc_label = ctk.CTkLabel(
+            self.progress_cancel_frame, 
+            text="Idle", 
+            anchor="w",
+            font=ctk.CTkFont(size=12)
+        )
+        self.progress_desc_label.grid(row=0, column=0, padx=(15, 5), pady=10, sticky="w")
 
-        self.progress_bar = ctk.CTkProgressBar(self.progress_cancel_frame, orientation="horizontal", mode="determinate")
-        self.progress_bar.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.progress_bar = ctk.CTkProgressBar(
+            self.progress_cancel_frame, 
+            orientation="horizontal", 
+            mode="determinate",
+            height=15,
+            progress_color=COLORS["secondary"]
+        )
+        self.progress_bar.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         self.progress_bar.set(0)
 
-        self.cancel_button = ctk.CTkButton(self.progress_cancel_frame, text="Cancel Task", command=self.cancel_current_task, state="disabled", fg_color="#E53935", hover_color="#C62828")
-        self.cancel_button.grid(row=0, column=2, padx=(5, 10), pady=5, sticky="e")
+        self.cancel_button = ctk.CTkButton(
+            self.progress_cancel_frame, 
+            text="Cancel Task", 
+            command=self.cancel_current_task, 
+            state="disabled", 
+            fg_color=COLORS["danger"],
+            hover_color=("#c0392b", "#922b21"),  # Darker red on hover
+            height=30,
+            width=120,
+            corner_radius=6
+        )
+        self.cancel_button.grid(row=0, column=2, padx=(5, 15), pady=10, sticky="e")
 
         # --- Log Frame Content ---
-        self.log_textbox = ctk.CTkTextbox(self.log_frame, state="disabled", wrap="word", font=("Consolas", 11))
-        self.log_textbox.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        # Add a header label for the log section
+        self.log_header = ctk.CTkLabel(
+            self.log_frame,
+            text="📋 Console Output",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        self.log_header.grid(row=0, column=0, sticky="w", padx=15, pady=(10, 5))
+        
+        # The main log text box with improved styling
+        self.log_textbox = ctk.CTkTextbox(
+            self.log_frame, 
+            state="disabled", 
+            wrap="word", 
+            font=("Consolas", 11),
+            corner_radius=6,
+            border_width=1,
+            border_color=COLORS["border"]
+        )
+        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
 
-        # Configure tags for log levels
-        # Using standard color names, could be themed later if needed
-        self.log_textbox.tag_config("info_tag", foreground="#1E88E5") # Blue
-        self.log_textbox.tag_config("success_tag", foreground="#4CAF50") # Green
-        self.log_textbox.tag_config("warning_tag", foreground="#FF9800") # Orange
-        self.log_textbox.tag_config("error_tag", foreground="#F44336") # Red
-        # Default tag uses the textbox's default text color (no explicit config needed unless overriding)
-        # self.log_textbox.tag_config("default_tag", foreground=self.log_textbox.cget("text_color"))
+        # Configure tags for log levels with enhanced colors
+        self.log_textbox.tag_config("info_tag", foreground=COLORS["primary"])       # Blue
+        self.log_textbox.tag_config("success_tag", foreground=COLORS["secondary"])  # Green
+        self.log_textbox.tag_config("warning_tag", foreground=COLORS["warning"])    # Orange
+        self.log_textbox.tag_config("error_tag", foreground=COLORS["danger"])       # Red
 
         # Store active buttons to disable during tasks
         self.active_buttons = [
@@ -282,8 +565,9 @@ class App(ctk.CTk):
 
     def update_progress(self, current_step, total_steps, description="Processing..."):
         """Callback function to update the progress bar and description label."""
-        # Update label
-        progress_text = f"{description}: {current_step}/{total_steps}"
+        # Update label with emoji for visual indicator
+        progress_percent = int((current_step / total_steps) * 100) if total_steps > 0 else 0
+        progress_text = f"{description}: {current_step}/{total_steps} ({progress_percent}%)"
         self.progress_desc_label.configure(text=progress_text)
 
         # Update progress bar
@@ -303,7 +587,7 @@ class App(ctk.CTk):
         if self.cancel_event:
             log("--- Cancel request sent --- ", "warning")
             self.cancel_event.set()
-            self.cancel_button.configure(state="disabled", text="Cancelling...") # Indicate cancellation
+            self.cancel_button.configure(state="disabled", text="Cancelling...")  # Indicate cancellation
 
     def task_wrapper(self, task_func, cancel_event):
         """Wraps the target function for threading, stdio redirect, progress, cancel."""
@@ -381,9 +665,13 @@ class App(ctk.CTk):
              if not messagebox.askyesno("Potential Issue", f"The selected file doesn't end with .zip:\n{zip_path}\n\nContinue anyway?"):
                  return
 
-        log(f"Starting preprocessing task for: {zip_path}", level="info")
+        # Get current RAR support setting from checkbox
+        rar_support = self.rar_support_var.get()
+        self.gui_rar_support = rar_support
+        
+        log(f"Starting preprocessing task for: {zip_path} (RAR support: {'enabled' if rar_support else 'disabled'})", level="info")
         # Pass the CURRENT GUI config
-        preprocess_submissions(zip_path, self.gui_questions, progress_callback, cancel_event)
+        preprocess_submissions(zip_path, self.gui_questions, rar_support, progress_callback, cancel_event)
 
     def task_run_grading_internal(self, progress_callback=None, cancel_event=None):
         log("Starting grading task...", level="info")
@@ -400,8 +688,8 @@ class App(ctk.CTk):
             self.config_valid = False 
             self.config_dirty = True # Force user to re-apply
             self.after(10, self.update_dependent_button_states) # Update UI after returning
-            self.after(10, lambda: self.config_status_label.configure(text="Status: INVALID", text_color="#F44336")) 
-            self.after(10, lambda: self.apply_config_button.configure(border_color="#F44336", border_width=2))
+            self.after(10, lambda: self.config_status_label.configure(text="Status: INVALID", text_color=COLORS["danger"])) 
+            self.after(10, lambda: self.apply_config_button.configure(border_color=COLORS["danger"], border_width=2))
             return # Stop the task
         else:
             log("Configuration validated successfully.", "info")
@@ -442,13 +730,13 @@ class App(ctk.CTk):
     def _add_config_row(self, question_name="", weight=""):
         """Adds a row of entry widgets and binds KeyRelease event."""
         row_index = len(self.config_rows)
-        q_entry = ctk.CTkEntry(self.config_table_frame)
-        q_entry.grid(row=row_index, column=0, padx=5, pady=2, sticky="ew")
+        q_entry = ctk.CTkEntry(self.config_table_frame, border_width=1)
+        q_entry.grid(row=row_index, column=0, padx=5, pady=3, sticky="ew")
         q_entry.insert(0, question_name)
         q_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
 
-        w_entry = ctk.CTkEntry(self.config_table_frame, width=80) # Fixed width for weight
-        w_entry.grid(row=row_index, column=1, padx=5, pady=2, sticky="ew")
+        w_entry = ctk.CTkEntry(self.config_table_frame, width=80, border_width=1)  # Fixed width for weight
+        w_entry.grid(row=row_index, column=1, padx=5, pady=3, sticky="ew")
         w_entry.insert(0, str(weight))
         w_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
 
@@ -467,11 +755,11 @@ class App(ctk.CTk):
         
     def mark_config_dirty(self):
         """Updates UI to show configuration needs applying."""
-        if self.config_dirty: return # Already marked
+        if self.config_dirty: return  # Already marked
         self.config_dirty = True
-        self.config_status_label.configure(text="Status: Unapplied changes", text_color="#FFA000") # Orange
+        self.config_status_label.configure(text="Status: Unapplied changes", text_color=COLORS["warning"])
         # Highlight Apply button (e.g., border color)
-        self.apply_config_button.configure(border_color="#FFA000", border_width=2) 
+        self.apply_config_button.configure(border_color=COLORS["warning"], border_width=2) 
         # Disable run buttons when dirty
         self.preprocess_button.configure(state="disabled")
         self.run_button.configure(state="disabled")
@@ -498,6 +786,8 @@ class App(ctk.CTk):
         self.penalty_entry.insert(0, str(self.gui_penalty))
         # Set per-error penalty checkbox
         self.per_error_penalty_var.set(self.gui_per_error_penalty)
+        # Set RAR support checkbox
+        self.rar_support_var.set(self.gui_rar_support)
 
     def apply_gui_configuration(self):
         """Parses, validates, updates state, resets dirty flag and UI."""
@@ -511,11 +801,11 @@ class App(ctk.CTk):
             weight_str = w_entry.get().strip()
 
             if not q_name and not weight_str:
-                continue # Skip completely empty rows
+                continue  # Skip completely empty rows
             
             if not q_name:
                  parse_errors.append(f"Row {i+1}: Question folder name cannot be empty.")
-                 continue # Skip this row for weight processing
+                 continue  # Skip this row for weight processing
             
             parsed_questions.append(q_name)
             
@@ -532,47 +822,51 @@ class App(ctk.CTk):
             parsed_penalty = int(penalty_str)
             if parsed_penalty < 0:
                  parse_errors.append("Penalty value cannot be negative.")
-                 parsed_penalty = None # Mark as invalid
+                 parsed_penalty = None  # Mark as invalid
         except ValueError:
             parse_errors.append(f"Invalid numeric value for Penalty: '{penalty_str}'.")
             
         # Get per-error penalty value
         parsed_per_error_penalty = self.per_error_penalty_var.get()
+        
+        # Get RAR support value
+        parsed_rar_support = self.rar_support_var.get()
 
         if parse_errors:
             messagebox.showerror("Configuration Parse Error", "\n".join(parse_errors))
-            self.config_status_label.configure(text="Status: Invalid Input", text_color="#F44336")
+            self.config_status_label.configure(text="Status: Invalid Input", text_color=COLORS["danger"])
             self.config_valid = False
-            self.config_dirty = True # Still dirty, needs fixing
-            self.apply_config_button.configure(border_color="#F44336", border_width=2) # Error border
+            self.config_dirty = True  # Still dirty, needs fixing
+            self.apply_config_button.configure(border_color=COLORS["danger"], border_width=2)  # Error border
             self.update_dependent_button_states()
             return
 
         validation_errors = validate_config(parsed_questions, parsed_weights)
         status_text = ""
         status_color = "gray"
-        apply_border_color = self._default_apply_button_color
-        apply_border_width = 1 # Default maybe?
-        if hasattr(self.apply_config_button, "_apply_configure_kwargs"): # Get default width
+        apply_border_color = self._default_border_color
+        apply_border_width = 1  # Default maybe?
+        if hasattr(self.apply_config_button, "_apply_configure_kwargs"):  # Get default width
              apply_border_width = self.apply_config_button._apply_configure_kwargs.get("border_width", 1)
 
         if validation_errors:
              self.config_valid = False
-             self.config_dirty = True # Still dirty, needs fixing
+             self.config_dirty = True  # Still dirty, needs fixing
              status_text = "Status: INVALID"
-             status_color = "#F44336" # Red
-             apply_border_color = "#F44336" # Error border
+             status_color = COLORS["danger"]
+             apply_border_color = COLORS["danger"]  # Error border
              apply_border_width = 2
              messagebox.showwarning("Configuration Validation Error", "\n".join(validation_errors))
         else:
              self.config_valid = True
-             self.config_dirty = False # Applied successfully
+             self.config_dirty = False  # Applied successfully
              self.gui_questions = parsed_questions
              self.gui_weights = parsed_weights
              self.gui_penalty = parsed_penalty
              self.gui_per_error_penalty = parsed_per_error_penalty
-             status_text = "Status: Valid"
-             status_color = "#4CAF50" # Green
+             self.gui_rar_support = parsed_rar_support
+             status_text = "Status: Valid ✓"
+             status_color = COLORS["secondary"]  # Green
              # apply_border_color remains default
              log("GUI Configuration Applied and Validated.", "info")
 
@@ -582,20 +876,51 @@ class App(ctk.CTk):
         self.update_dependent_button_states()
 
     def update_dependent_button_states(self):
-        """Enable/disable buttons based on config validity."""
-        state = "normal" if self.config_valid else "disabled"
-        self.preprocess_button.configure(state=state)
-        self.run_button.configure(state=state)
-        # Clear buttons might also depend on questions, enable/disable accordingly
-        clear_state = "normal" if self.gui_questions else "disabled"
-        self.clear_grades_button.configure(state=clear_state)
-        self.clear_output_button.configure(state=clear_state)
-        self.clear_c_button.configure(state=clear_state)
-        # clear_all depends on questions
-        self.clear_all_button.configure(state=clear_state)
-        # Excels/Build don't strictly depend on questions list, keep enabled?
-        # self.clear_excels_button.configure(state="normal")
-        # self.clear_build_button.configure(state="normal")
+        """Enable/disable buttons based on config validity with enhanced visual feedback."""
+        if self.config_valid:
+            # Enable buttons with normal styling
+            self.preprocess_button.configure(
+                state="normal",
+                fg_color=COLORS["secondary"],
+                hover_color=("#2aa65a", "#216e3d")
+            )
+            self.run_button.configure(
+                state="normal",
+                fg_color=COLORS["accent"],
+                hover_color=("#8649a3", "#61347a")
+            )
+            
+            # Enable clear buttons if questions exist
+            if self.gui_questions:
+                clear_state = "normal"
+                self.clear_grades_button.configure(state=clear_state)
+                self.clear_output_button.configure(state=clear_state)
+                self.clear_c_button.configure(state=clear_state)
+                self.clear_all_button.configure(state=clear_state)
+            else:
+                clear_state = "disabled"
+                self.clear_grades_button.configure(state=clear_state)
+                self.clear_output_button.configure(state=clear_state)
+                self.clear_c_button.configure(state=clear_state)
+                self.clear_all_button.configure(state=clear_state)
+        else:
+            # Disable buttons with visually muted appearance
+            disabled_color = ("gray80", "gray30")
+            self.preprocess_button.configure(
+                state="disabled",
+                fg_color=disabled_color
+            )
+            self.run_button.configure(
+                state="disabled",
+                fg_color=disabled_color
+            )
+            
+            # Also disable question-dependent clear buttons
+            clear_state = "disabled"
+            self.clear_grades_button.configure(state=clear_state)
+            self.clear_output_button.configure(state=clear_state)
+            self.clear_c_button.configure(state=clear_state)
+            self.clear_all_button.configure(state=clear_state)
 
 if __name__ == "__main__":
     app = App()

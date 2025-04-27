@@ -25,6 +25,7 @@ except ImportError:
             pass
 
 from Utils import log
+from configuration import winrar_path  # Import winrar_path and isRarSupportActive from configuration
 
 def extract_main_zip(zip_filename):
     log(f"Extracting main zip file: {zip_filename}", "info")
@@ -382,6 +383,7 @@ def find_and_process_c_files(
 def preprocess_submissions(
     zip_path: str,
     questions_list: list,
+    rar_support: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     cancel_event: Optional[threading.Event] = None
 ):
@@ -445,11 +447,16 @@ def preprocess_submissions(
     inner_zip_pattern = os.path.join(base_extract_folder, '*.zip')
     inner_zips = glob.glob(inner_zip_pattern)
 
-    if not inner_zips:
-        log(f"No inner zip files (*.zip) found directly in '{base_extract_folder}'. Make sure the main zip contains individual student submission zips.", level="warning")
-        # No inner zips found, maybe the structure is different? We'll proceed to cleanup.
+    # Find and add RAR files
+    inner_rar_pattern = os.path.join(base_extract_folder, '*.rar')
+    inner_rars = glob.glob(inner_rar_pattern)
+
+
+    if not inner_zips and not inner_rars:
+        log(f"No inner archive files (*.zip, *.rar) found directly in '{base_extract_folder}'. Make sure the main zip contains individual student submission archives (ZIP or RAR).", level="warning")
+        # No inner archives found, maybe the structure is different? We'll proceed to cleanup.
     else:
-         log(f"Found {len(inner_zips)} inner zip files. Extracting...", level="info")
+         log(f"Found {len(inner_zips) + len(inner_rars)} inner archive files. Extracting...", level="info")
 
     # Dictionary to store issues per submission: submission_name -> list of (priority, message)
     # This change allows tracking multiple issues per submission
@@ -467,51 +474,55 @@ def preprocess_submissions(
         "RAR_FILE": 7  # New priority for RAR files
     }
 
-    total_zips = len(inner_zips)
+    total_archives = len(inner_zips) + len(inner_rars)
     processed_zip_count = 0
-    description = "Processing student zips"
+    description = "Processing student archives"
 
     # Determine iterator
     use_tqdm = TQDM_AVAILABLE and progress_callback is None
     iterator_factory = tqdm if use_tqdm else lambda iterable, **kwargs: iterable
 
+    inner_archives = inner_zips + inner_rars
+
     progress_iterator = iterator_factory(
-        inner_zips,
-        total=total_zips,
+        inner_archives,
+        total=total_archives,
         desc=description if use_tqdm else None,
-        unit="zip"
+        unit="archive"
         # No color codes needed here for tqdm format
     )
 
-    for inner_zip in progress_iterator:
+    for inner_archive in progress_iterator:
         if cancel_event and cancel_event.is_set(): break
-        zip_filename = os.path.basename(inner_zip)
-        submission_name = os.path.splitext(zip_filename)[0]
+        archive_filename = os.path.basename(inner_archive)
+        submission_name = os.path.splitext(archive_filename)[0]
         submission_folder_path = os.path.join(base_extract_folder, submission_name)
         
         # Initialize list to collect issues for this submission
         current_issues = []
-
-        # Check if it's a RAR file misnamed as ZIP
-        if zip_filename.endswith('.zip'):
-            try:
-                with open(inner_zip, 'rb') as f:
-                    header = f.read(4)
-                    if header.startswith(b'Rar!'):
-                        current_issues.append((PRIORITY["RAR_FILE"], f"Found RAR file misnamed as ZIP"))
-                        log(f"Warning: {zip_filename} is a RAR file with .zip extension", level="warning")
-            except Exception as e:
-                log(f"Error checking file type of {zip_filename}: {e}", level="warning")
-
-        # Extract inner zip
-        if extract_zip(inner_zip, submission_folder_path):
+        if inner_archive.endswith('.zip'):
+            zip_extract_success = extract_zip(inner_archive, submission_folder_path)
+            extract_success = zip_extract_success
+        elif inner_archive.endswith('.rar') and rar_support:
+            rar_extract_success = extract_rar(inner_archive, submission_folder_path)
+            if rar_extract_success:
+                current_issues.append((PRIORITY["RAR_FILE"], "Archive of type RAR, not zip"))
+            extract_success = rar_extract_success
+        else:
+            # Unsupported archive type
+            log(f"Unsupported archive type for file: {inner_archive}", level="warning")
+            current_issues.append((PRIORITY["EXTRACT_FAIL"], "Unsupported archive type"))
+            extract_success = False
+            
+        # Process the extracted archive if successful
+        if extract_success:
             # 4. Delete the inner zip file after successful extraction
             try:
-                os.remove(inner_zip)
-                log(f"Deleted inner zip file: '{inner_zip}'", level="info")
+                os.remove(inner_archive)
+                log(f"Deleted inner archive file: '{inner_archive}'", level="info")
             except Exception as e:
-                log(f"Could not delete inner zip '{inner_zip}': {e}", level="warning") # Non-fatal
-                current_issues.append((PRIORITY["EXTRACT_FAIL"], f"Could not delete inner zip: {e}"))
+                log(f"Could not delete inner archive '{inner_archive}': {e}", level="warning") # Non-fatal
+                current_issues.append((PRIORITY["EXTRACT_FAIL"], f"Could not delete inner archive: {e}"))
 
             # 5, 6, 7. Process the extracted submission folder
             # Extract student ID - assuming format "..._ID" where ID is numeric at the end
@@ -595,7 +606,7 @@ def preprocess_submissions(
                             log(f"Unknown status '{status_code}' returned for {submission_name}", level="error")
         else:
              current_issues.append((PRIORITY["EXTRACT_FAIL"], "Extraction failed"))
-             log(f"Failed to extract inner zip '{inner_zip}'. Skipping processing for this submission.", level="error")
+             log(f"Failed to extract archive '{inner_archive}'. Skipping processing for this submission.", level="error")
 
         # Add all issues to the submission's issue list
         if current_issues:
@@ -603,7 +614,7 @@ def preprocess_submissions(
         
         processed_zip_count += 1
         if progress_callback:
-            progress_callback(processed_zip_count, total_zips, description)
+            progress_callback(processed_zip_count, total_archives, description)
 
     # --- Cancellation Point 4 (Before Reporting/Cleanup) --- 
     # Report only if not cancelled? Or report partial results?
@@ -654,5 +665,61 @@ def preprocess_submissions(
             log(f"Error during final cleanup of '{base_extract_folder}': {e}", level="error")
 
     log("Preprocessing finished.", level="success")
+
+def extract_rar(rar_path, dest_path):
+    """
+    Extracts a RAR file to the specified destination.
+    
+    Args:
+        rar_path (str): Path to the RAR file
+        dest_path (str): Destination folder to extract to
+    
+    Returns:
+        bool: True if extraction was successful, False otherwise
+    """
+    try:
+        import rarfile
+        # Set the path to the WinRAR executable from configuration
+        rarfile.UNRAR_TOOL = winrar_path
+        
+        # Check if the tool exists
+        if not os.path.exists(rarfile.UNRAR_TOOL):
+            log(f"WinRAR executable not found at: {rarfile.UNRAR_TOOL}", level="error")
+            # Try to fallback to WinRAR.exe if UnRAR.exe was specified
+            if rarfile.UNRAR_TOOL.lower().endswith('unrar.exe'):
+                alternative_path = rarfile.UNRAR_TOOL.replace('UnRAR.exe', 'WinRAR.exe')
+                if os.path.exists(alternative_path):
+                    rarfile.UNRAR_TOOL = alternative_path
+                    log(f"Using alternative WinRAR path: {rarfile.UNRAR_TOOL}", level="info")
+                else:
+                    log(f"Alternative WinRAR path also not found: {alternative_path}", level="error")
+                    return False
+            else:
+                return False
+                
+        log(f"Extracting RAR archive: {rar_path} to {dest_path}", level="info", verbosity=2)
+        
+        # Create destination directory if it doesn't exist
+        if not os.path.exists(dest_path):
+            os.makedirs(dest_path)
+            
+        with rarfile.RarFile(rar_path) as rf:
+            rf.extractall(path=dest_path)
+            
+        log(f"Successfully extracted RAR: {rar_path}", level="success", verbosity=2)
+        return True
+        
+    except ImportError:
+        log("RAR extraction failed: rarfile module not installed. Install with 'pip install rarfile'", level="error")
+        return False
+    except rarfile.RarCannotExec:
+        log("RAR extraction failed: UnRAR executable not found. Install UnRAR or WinRAR and ensure it's in your PATH.", level="error")
+        return False
+    except rarfile.BadRarFile:
+        log(f"RAR extraction failed: {rar_path} is not a valid RAR file", level="error")
+        return False
+    except Exception as e:
+        log(f"RAR extraction failed for {rar_path}: {str(e)}", level="error")
+        return False
 
 # End of file, ensure no __main__ block remains

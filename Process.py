@@ -354,7 +354,7 @@ def cleanup_folders(base_folder):
                         shutil.rmtree(item_path) # Remove subdirectories if any
                         log(f"Cleaned subdirectory: {item_path}", "success", verbosity=3)
                 except Exception as e:
-                    log(f"Error cleaning item {item_path}: {e}", "error", verbosity=1)
+                    log(f"Error cleaning item {item_path}: {e}", "error")
         # else: Folder didn't exist, nothing to clean
 
 
@@ -530,7 +530,7 @@ def process_all_questions(
     else:
         # Original summary logic
         all_success = all(status == "success" for _, status in results)
-        any_success = any(status == "success" for _, status in results)
+        any_success = any(status == "success" or status == "warning" for _, status in results)
         if all_success:
             final_status = "success"
             msg = "All Questions processed successfully."

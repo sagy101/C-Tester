@@ -13,9 +13,24 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ---
 
+## 🆕 Recent Updates
+
+### GUI Enhancements (May 2023)
+- **Modernized Interface**: A completely redesigned UI with a more intuitive and visually appealing layout
+- **Enhanced Visuals**: Improved color scheme, button styling, and visual feedback for actions
+- **Better Layout**: Reorganized controls into logical sections with improved spacing and readability
+- **Emoji Icons**: Added visual indicators to make sections easier to identify
+- **RAR Support Integration**: Moved RAR support settings to preprocessing section for better usability
+- **Progress Indicators**: Enhanced progress reporting with percentage display
+- **Responsive Design**: Better minimum window size constraints to prevent text cutoff
+- **Error Feedback**: Clearer visual feedback for configuration validation and error states
+
+---
+
 ## ✨ Features
 
 *   **Preprocessing:** Extracts student submissions from nested zip files, organizes C files (`*_qN.c`) into question folders (`QN/C/`), and renames them based on student ID. Reports processing issues.
+    *   **New:** Now supports RAR archives in addition to ZIP files.
 *   **Automated Grading:**
     *   Sets up the Visual Studio C++ build environment (`vcvars64.bat`).
     *   Compiles student C code and a provided `original_sol.c` using `cl.exe`.
@@ -56,6 +71,10 @@ This project automates the batch grading of multiple C programs. It sets up the 
 *   **Visual Studio 2022:** Community or higher, with C++ build tools installed.
     *   Ensure the path to `vcvars64.bat` in `Process.py` is correct for your installation (default checked: `C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat`).
 *   **Python 3:** Tested with Python 3.10+. Tcl/Tk support required for the GUI (usually included with standard python.org installations - select "tcl/tk and IDLE" during setup/modify).
+*   **For RAR support:** 
+    *   The `rarfile` Python package (included in requirements.txt)
+    *   WinRAR or UnRAR executable installed
+    *   Path to WinRAR configured in `configuration.py` (default: `C:\Program Files\WinRAR\UnRAR.exe`)
 *   **Dependencies:** Listed in `requirements.txt`.
 
 ---
@@ -120,9 +139,9 @@ For the **Preprocessing** step (via GUI or CLI) to work correctly, the input zip
 <details>
   <summary>View Expected Input Zip Structure</summary>
   
-  1.  The main zip file should contain **individual zip files** for each student submission.
-  2.  Each inner zip file's name **must end with the student's ID number**, preceded by an underscore (e.g., `Student Name_Assign1_123456789.zip`). The part before the underscore and ID is not used by default but helps organization.
-  3.  When an inner zip (e.g., `Student Name_Assign1_123456789.zip`) is extracted, it creates a folder (`Student Name_Assign1_123456789/`).
+  1.  The main zip file should contain **individual zip or RAR files** for each student submission.
+  2.  Each inner archive's name **must end with the student's ID number**, preceded by an underscore (e.g., `Student Name_Assign1_123456789.zip` or `Student Name_Assign1_123456789.rar`). The part before the underscore and ID is not used by default but helps organization.
+  3.  When an inner archive (e.g., `Student Name_Assign1_123456789.zip`) is extracted, it creates a folder (`Student Name_Assign1_123456789/`).
   4.  Inside this folder, the script looks for C files named in the format `some_filename_qN.c`, where `N` is the question number (e.g., `main_program_q1.c`, `my_solution_q2.c`).
   5.  **Alternatively**, if no matching C files are found directly inside the student's folder, the script will look for them inside **exactly one subdirectory** within the student's folder (e.g., `Student Name_Assign1_123456789/Submission/main_program_q1.c`). It will not search deeper than one subfolder level.
       
@@ -135,7 +154,7 @@ For the **Preprocessing** step (via GUI or CLI) to work correctly, the input zip
   │   └── main_code_q1.c
   │   └── helper_functions_q2.c
   │
-  ├── Another_Student_Assign1_987654321.zip
+  ├── Another_Student_Assign1_987654321.rar   <-- Now supports RAR files
   │   │ # Extracted to folder Another_Student_Assign1_987654321/
   │   └── SubmittedFiles/          <-- Single subfolder is OK
   │       ├── program_q1.c
@@ -147,7 +166,7 @@ For the **Preprocessing** step (via GUI or CLI) to work correctly, the input zip
       └── source.c                <-- File doesn't match _qN.c pattern, will cause error in submit_error.txt
   ```
   
-  Submissions that don't follow this structure (e.g., missing ID in zip name, C files not matching `_qN.c` pattern, C files nested too deep, no C files found) **will not be processed correctly** and will be reported with errors in `submit_error.txt`.
+  Submissions that don't follow this structure (e.g., missing ID in archive name, C files not matching `_qN.c` pattern, C files nested too deep, no C files found) **will not be processed correctly** and will be reported with errors in `submit_error.txt`.
 </details>
 
 ### Question Folders (`Q*`)
@@ -191,7 +210,12 @@ Recommended for interactive use.
 
 Suitable for scripting or users preferring the command line. Uses the static configuration set in `configuration.py`.
 
-1.  **Configure:** Edit `configuration.py` to define `questions`, `folder_weights`, `penalty`, and `per_error_penalty`.
+1.  **Configure:** Edit `configuration.py` to define:
+    * `questions`: List of question folder names
+    * `folder_weights`: Dictionary mapping question folders to their weight percentages
+    * `penalty`: Points to deduct for submission errors
+    * `per_error_penalty`: Boolean flag to determine if penalties apply once per student or accumulate per error
+    * `winrar_path`: Path to WinRAR executable for RAR file extraction
 2.  **Run** `main.py` with commands:
 
 <details>
@@ -297,6 +321,17 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   **Error: `ModuleNotFoundError: No module named 'tkinter'`:** Your base Python installation is missing Tcl/Tk support.
         *   **Solution:** Run your Python installer again, choose "Modify", ensure "tcl/tk and IDLE" is checked. Then, **recreate your virtual environment** (`.venv`) by deleting the old folder, creating a new one (`python -m venv .venv`), activating it, and reinstalling dependencies (`pip install -r requirements.txt`). Test with `python -m tkinter`.
     *   **Network Errors during `pip install`:** Check firewalls, proxies, or antivirus settings that might block connections to PyPI (pypi.org).
+
+*   **RAR Extraction Issues:**
+    *   **Error: `rarfile module not installed`:** Run `pip install rarfile` to install the required package.
+    *   **Error: `UnRAR executable not found`:** Update the `winrar_path` in `configuration.py` to point to your WinRAR installation:
+        ```python
+        # For UnRAR.exe (command-line utility)
+        winrar_path = r"C:\Program Files\WinRAR\UnRAR.exe"
+        # Or for WinRAR.exe (GUI application)
+        winrar_path = r"C:\Program Files\WinRAR\WinRAR.exe"
+        ```
+    *   If using a non-standard installation path, locate your WinRAR installation and update the configuration accordingly.
 
 </details>
 

@@ -10,6 +10,15 @@ penalty = 5
 # When False: only apply penalty once per student regardless of number of errors
 per_error_penalty = False
 
+# Flag to enable RAR file extraction support
+isRarSupportActive = False
+
+# Path to WinRAR executable for RAR extraction
+# Change this to match your WinRAR installation path
+winrar_path = r"C:\Program Files\WinRAR\UnRAR.exe"
+# If UnRAR.exe is not available, use WinRAR.exe instead:
+# winrar_path = r"C:\Program Files\WinRAR\WinRAR.exe"
+
 # List of question folder names (must match actual folder names in the project root)
 questions = ["Q1", "Q2"]
 
