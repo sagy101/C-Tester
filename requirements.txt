@@ -5,6 +5,7 @@ openpyxl
 pandas
 python-dateutil
 pytz
+rarfile
 six
 tqdm
 tzdata

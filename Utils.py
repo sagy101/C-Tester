@@ -1,7 +1,7 @@
 VERBOSITY_LEVEL = 1  # Adjust verbosity (0=minimal, 1=normal, 2=verbose)
 
 def log(message, level="info", verbosity=2):
-    if verbosity <= VERBOSITY_LEVEL:
+    if verbosity <= VERBOSITY_LEVEL or level == "error":
         colors = {
             "info": "\033[94m",
             "success": "\033[92m",

@@ -8,7 +8,7 @@ from clear_utils import clear_grades, clear_output, clear_excels, clear_c_files,
 from Utils import log
 from preprocess import preprocess_submissions
 # Import configuration from the new file
-from configuration import questions, folder_weights, penalty, per_error_penalty, validate_config
+from configuration import questions, folder_weights, penalty, validate_config
 
 # Define your parent folders here - REMOVED, now in configuration.py
 # questions = ["Q1", "Q2"]
@@ -59,6 +59,7 @@ if __name__ == "__main__":
     # Preprocess command
     parser_preprocess = subparsers.add_parser('preprocess', help='Preprocess submissions from a zip file.')
     parser_preprocess.add_argument('--zip-path', required=True, help='Path to the main zip file containing student submissions.')
+    parser_preprocess.add_argument('--rar-support', action='store_true', help='Enable support for RAR submission files.')
 
     # Clear commands
     parser_clear = subparsers.add_parser('clear', help='Clear generated files.')
@@ -88,7 +89,7 @@ if __name__ == "__main__":
              log(f"Error: Provided file is not a valid zip file: {args.zip_path}", level="error")
              sys.exit(1)
         # Pass imported questions list
-        preprocess_submissions(args.zip_path, questions)
+        preprocess_submissions(args.zip_path, questions, rar_support=args.rar_support)
     elif args.command == 'clear':
         # Pass imported questions list
         if args.clear_command == 'grades':
