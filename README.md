@@ -15,6 +15,11 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ## 🆕 Recent Updates
 
+### Configuration Improvements (August 2023)
+- **Centralized Configuration**: Visual Studio path (`vs_path`) moved from `Process.py` to `configuration.py` for easier setup
+- **Default Configuration**: Questions list and folder weights expanded to include five questions (Q1-Q5) with equal 20% weights
+- **Improved Error Handling**: Enhanced submission error parsing with better logging for troubleshooting
+
 ### GUI Enhancements (May 2023)
 - **Modernized Interface**: A completely redesigned UI with a more intuitive and visually appealing layout
 - **Enhanced Visuals**: Improved color scheme, button styling, and visual feedback for actions
@@ -69,7 +74,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 *   **Operating System:** Windows (uses `cmd` and Visual Studio's C++ compiler)
 *   **Visual Studio 2022:** Community or higher, with C++ build tools installed.
-    *   Ensure the path to `vcvars64.bat` in `Process.py` is correct for your installation (default checked: `C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat`).
+    *   The path to `vcvars64.bat` is now configured in `configuration.py` (default: `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`).
 *   **Python 3:** Tested with Python 3.10+. Tcl/Tk support required for the GUI (usually included with standard python.org installations - select "tcl/tk and IDLE" during setup/modify).
 *   **For RAR support:** 
     *   The `rarfile` Python package (included in requirements.txt)
@@ -101,11 +106,12 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ## 📁 Project Structure
 
-*   `configuration.py`: Defines questions, weights, penalty, and per-error penalty flag. **Edit this for CLI configuration.**
+*   `configuration.py`: Defines questions, weights, penalty, and per-error penalty flag. Also contains Visual Studio path (`vs_path`) and WinRAR path configuration. **Edit this for CLI configuration.**
 *   `gui.py`: Entry point for the Graphical User Interface.
 *   `main.py`: Entry point for the Command Line Interface.
 *   `preprocess.py`: Logic for extracting and organizing student submissions.
 *   `Process.py`: Handles VS environment setup, compilation, execution, and output comparison.
+    *   Uses `vs_path` from `configuration.py` for Visual Studio environment setup.
     *   Includes robust timeout handling for student code execution.
     *   Aggressively terminates hung processes on Windows.
 *   `CreateExcel.py`: Logic for generating individual and final Excel reports.
