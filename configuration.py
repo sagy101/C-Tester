@@ -19,6 +19,9 @@ winrar_path = r"C:\Program Files\WinRAR\UnRAR.exe"
 # If UnRAR.exe is not available, use WinRAR.exe instead:
 # winrar_path = r"C:\Program Files\WinRAR\WinRAR.exe"
 
+# Path to Visual Studio environment batch file
+vs_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+
 # List of question folder names (must match actual folder names in the project root)
 questions = ["Q1", "Q2"]
 
