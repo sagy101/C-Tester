@@ -29,11 +29,11 @@ except ImportError:
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from Utils import log
 from Utils import VERBOSITY_LEVEL
+from configuration import vs_path  # Import vs_path from configuration
 
 
 def setup_visual_studio_environment():
     log("Setting up Visual Studio environment...", "info", verbosity=1)
-    vs_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
     command = f'cmd /c ""{vs_path}" && set"'
     try:
         result = subprocess.run(command, capture_output=True, text=True, shell=True)
