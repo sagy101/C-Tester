@@ -25,7 +25,6 @@ except ImportError:
             pass
 
 from Utils import log
-from configuration import winrar_path  # Import winrar_path and isRarSupportActive from configuration
 
 def extract_main_zip(zip_filename):
     log(f"Extracting main zip file: {zip_filename}", "info")
@@ -385,7 +384,8 @@ def preprocess_submissions(
     questions_list: list,
     rar_support: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    cancel_event: Optional[threading.Event] = None
+    cancel_event: Optional[threading.Event] = None,
+    winrar_path: str = None  # New parameter to override the default winrar_path from configuration
 ):
     """
     Main function to preprocess submissions:
@@ -394,6 +394,14 @@ def preprocess_submissions(
     3. Finds, renames, and moves C files.
     4. Cleans up intermediate files/folders.
     5. Reports submissions with issues.
+    
+    Args:
+        zip_path: Path to the main submissions zip file
+        questions_list: List of question folder names
+        rar_support: Whether to enable RAR extraction support
+        progress_callback: Optional callback for progress reporting
+        cancel_event: Optional event to signal cancellation
+        winrar_path: Optional path to WinRAR/UnRAR executable, overrides the configuration default
     """
     log(f"Starting preprocessing for '{zip_path}'...", level="info")
 
@@ -504,7 +512,7 @@ def preprocess_submissions(
             zip_extract_success = extract_zip(inner_archive, submission_folder_path)
             extract_success = zip_extract_success
         elif inner_archive.endswith('.rar') and rar_support:
-            rar_extract_success = extract_rar(inner_archive, submission_folder_path)
+            rar_extract_success = extract_rar(inner_archive, submission_folder_path, winrar_path)
             if rar_extract_success:
                 current_issues.append((PRIORITY["RAR_FILE"], "Archive of type RAR, not zip"))
             extract_success = rar_extract_success
@@ -666,20 +674,21 @@ def preprocess_submissions(
 
     log("Preprocessing finished.", level="success")
 
-def extract_rar(rar_path, dest_path):
+def extract_rar(rar_path, dest_path, winrar_path=None):
     """
     Extracts a RAR file to the specified destination.
     
     Args:
         rar_path (str): Path to the RAR file
         dest_path (str): Destination folder to extract to
+        custom_winrar_path (str): Optional custom path to WinRAR/UnRAR executable
     
     Returns:
         bool: True if extraction was successful, False otherwise
     """
     try:
         import rarfile
-        # Set the path to the WinRAR executable from configuration
+        # Set the path to the WinRAR executable - use custom path if provided
         rarfile.UNRAR_TOOL = winrar_path
         
         # Check if the tool exists

@@ -15,6 +15,14 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ## 🆕 Recent Updates
 
+### Enhanced Validation Features (September 2023)
+- **Improved Path Validation**: Added automatic validation of Visual Studio and WinRAR paths before operations begin
+- **Automatic Button Disabling**: 
+  - Run Grading is disabled until the VS path is validated
+  - Preprocess is disabled if no ZIP file is selected or if RAR support is enabled with an invalid WinRAR path
+- **CLI Validation**: Added VS path and WinRAR path validation to command-line operations
+- **Better Error Messages**: More informative error messages with clear guidance when validation fails
+
 ### Configuration Improvements (August 2023)
 - **Centralized Configuration**: Visual Studio path (`vs_path`) moved from `Process.py` to `configuration.py` for easier setup
 - **Default Configuration**: Questions list and folder weights expanded to include five questions (Q1-Q5) with equal 20% weights
@@ -53,6 +61,10 @@ This project automates the batch grading of multiple C programs. It sets up the 
 *   **Dual Interface:**
     *   Modern GUI (`gui.py`) for interactive use with progress display and cancellation.
     *   Robust CLI (`main.py`) for scripting and automation.
+*   **Advanced Validation:**
+    *   Automatically validates Visual Studio and WinRAR paths before operations.
+    *   Input validation for ZIP file selection and configuration settings.
+    *   Clear status messages and button state management based on validation.
 *   **Flexible Configuration:** Define questions, weights, penalties, and penalty modes in `configuration.py` or override via the GUI.
 *   **Cleanup Utilities:** Easily clear generated files (grades, output, C copies, build files, excels) via GUI or CLI.
 
@@ -99,7 +111,9 @@ This project automates the batch grading of multiple C programs. It sets up the 
     # Install dependencies
     pip install -r requirements.txt
     ```
-3.  **Verify** Visual Studio path in `Process.py` (if not default).
+3.  **Configure** paths in `configuration.py`:
+    * Visual Studio path (`vs_path`): Point to your Visual Studio's vcvars64.bat file
+    * WinRAR path (`winrar_path`): Point to your UnRAR.exe or WinRAR.exe (only needed for RAR support)
 4.  **Prepare** Question Folders (see Structure below).
 
 ---
@@ -206,9 +220,21 @@ Recommended for interactive use.
         *   The **Status** label below the buttons will indicate if the current configuration is "Valid", "INVALID" (with details in a popup), or if there are "Unapplied changes".
         *   The "Apply Config" button will be highlighted if changes are unapplied.
         *   The "Run Preprocess" and "Run Grading" buttons are **disabled** if the configuration is invalid or has unapplied changes.
-3.  **Use the Actions:**
-    *   **Preprocessing:** Click "Browse" to select the main submissions zip file (containing individual student zips), then click "Run Preprocess" (requires valid applied config).
-    *   **Grading:** Check the "Slim Output" box if you only want the final `final_grades.xlsx` to contain `ID_number` and `Final_Grade` columns. Click "Run Grading" to start the compilation, execution, and report generation using the *currently applied GUI configuration*.
+3.  **Set Dependencies:**
+    *   The "Dependencies" section allows you to configure paths to required executables:
+        *   **Visual Studio Path**: Path to your Visual Studio environment's vcvars64.bat file (required for grading).
+        *   **WinRAR Path**: Path to your WinRAR.exe or UnRAR.exe (only required if RAR support is enabled).
+    *   After setting or changing paths, click the corresponding "Apply" button to validate the path.
+    *   The "Run Grading" button will be disabled until a valid VS path is applied.
+    *   The "Run Preprocess" button will be disabled if RAR support is enabled but no valid WinRAR path is applied.
+4.  **Use the Actions:**
+    *   **Preprocessing:** 
+        *   Click "Browse" to select the main submissions zip file (containing individual student zips).
+        *   Optionally check "Enable RAR file support" if student submissions include RAR files.
+        *   Click "Run Preprocess" to begin processing (button will be disabled if no zip file is selected or if RAR support is enabled without a valid WinRAR path).
+    *   **Grading:** 
+        *   Check the "Slim Output" box if you only want the final `final_grades.xlsx` to contain `ID_number` and `Final_Grade` columns.
+        *   Click "Run Grading" to start the compilation, execution, and report generation (button will be disabled until VS path is validated).
     *   **Clear Actions:** Click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, All) use the *currently applied GUI question list*.
     *   **Output:** Logs, progress descriptions, and the progress bar appear at the bottom. Long tasks can be cancelled.
 
@@ -221,6 +247,7 @@ Suitable for scripting or users preferring the command line. Uses the static con
     * `folder_weights`: Dictionary mapping question folders to their weight percentages
     * `penalty`: Points to deduct for submission errors
     * `per_error_penalty`: Boolean flag to determine if penalties apply once per student or accumulate per error
+    * `vs_path`: Path to Visual Studio environment batch file
     * `winrar_path`: Path to WinRAR executable for RAR file extraction
 2.  **Run** `main.py` with commands:
 
@@ -229,9 +256,15 @@ Suitable for scripting or users preferring the command line. Uses the static con
   
   *   **Preprocess submissions:**
       ```bash
+      # Without RAR support
       python main.py preprocess --zip-path <path_to_your_zip_file.zip>
+      
+      # With RAR support (requires valid WinRAR path in configuration.py)
+      python main.py preprocess --zip-path <path_to_your_zip_file.zip> --rar-support
       ```
       Extracts nested zips, organizes C files into `QN/C/`, renames them to `ID.c`, and generates `submit_error.txt`. Requires the input zip file to follow the structure detailed in the "Input Data Structure" section.
+      
+      When using `--rar-support`, the tool will automatically validate the WinRAR path before proceeding.
       
   *   **Run grading:**
       ```bash
@@ -244,6 +277,8 @@ Suitable for scripting or users preferring the command line. Uses the static con
       # Both options can be combined
       python main.py run --slim --per-error-penalty
       ```
+      The tool will automatically validate the Visual Studio path before proceeding with compilation and grading.
+      
       Compiles, executes, compares outputs, and generates grade files and Excel reports based on `configuration.py`. 
       * Use `--slim` for minimal final report.
       * Use `--per-error-penalty` to apply penalties for each error a student has (instead of just once).
@@ -271,12 +306,14 @@ Suitable for scripting or users preferring the command line. Uses the static con
 ## 📖 How It Works (Briefly)
 
 1.  **Preprocessing (`preprocess` command / GUI button):**
+    *   Validates WinRAR path if RAR support is enabled.
     *   Extracts main zip -> extracts inner student zips.
     *   Identifies student ID from folder name (`..._ID`).
     *   Finds `*_qN.c` files (directly or in one subfolder).
     *   Copies files to `QN/C/ID.c`.
     *   Logs errors to `submit_error.txt`.
 2.  **Grading (`run` command / GUI button):**
+    *   Validates Visual Studio path before proceeding.
     *   Sets up MSVC environment.
     *   For each question folder in config:
         *   Reads `input.txt`.
@@ -308,7 +345,7 @@ Suitable for scripting or users preferring the command line. Uses the static con
   <summary>View Troubleshooting Tips</summary>
 
 *   **Missing `cl.exe` or Build Tools:**
-    Verify that Visual Studio with C++ build tools is installed and the path to `vcvars64.bat` in `Process.py` is correct. Ensure you are running the script in a terminal where the VS environment can be activated (e.g., Developer Command Prompt or a standard terminal after `vcvars64.bat` has been sourced).
+    Verify that Visual Studio with C++ build tools is installed and the path to `vcvars64.bat` in `configuration.py` is correct. Ensure you are running the script in a terminal where the VS environment can be activated (e.g., Developer Command Prompt or a standard terminal after `vcvars64.bat` has been sourced).
 
 *   **Missing or Incorrect `input.txt` / `original_sol.c`:**
     Ensure each configured question folder (`Q1/`, etc.) contains these required files.
@@ -322,6 +359,11 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   `folder_weights` keys exactly match the `questions` list.
     *   Weight percentages sum *exactly* to 100.
     *   Penalty (GUI) is a non-negative integer.
+
+*   **Path Validation Errors:**
+    *   **Visual Studio Path**: Ensure the path to vcvars64.bat is correct and the file exists.
+    *   **WinRAR Path**: If RAR support is enabled, ensure the path to UnRAR.exe or WinRAR.exe is correct.
+    *   Both paths are validated before operations begin to prevent runtime errors.
 
 *   **GUI / Tkinter Issues:**
     *   **Error: `ModuleNotFoundError: No module named 'tkinter'`:** Your base Python installation is missing Tcl/Tk support.

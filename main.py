@@ -2,13 +2,14 @@ import argparse
 import os
 import sys # Import sys for sys.exit
 import zipfile
+import subprocess
 from Process import run_tests
 from CreateExcel import create_excels
 from clear_utils import clear_grades, clear_output, clear_excels, clear_c_files, clear_all, clear_build_files
 from Utils import log
 from preprocess import preprocess_submissions
 # Import configuration from the new file
-from configuration import questions, folder_weights, penalty, validate_config
+from configuration import questions, folder_weights, penalty, validate_config, winrar_path, vs_path
 
 # Define your parent folders here - REMOVED, now in configuration.py
 # questions = ["Q1", "Q2"]
@@ -16,8 +17,89 @@ from configuration import questions, folder_weights, penalty, validate_config
 # Weight in percentage for each question - REMOVED, now in configuration.py
 # folder_weights = {questions[0]: 50, questions[1]: 50}
 
+def validate_vs_path(path):
+    """Validates the Visual Studio environment batch file path."""
+    if not path:
+        log("Error: Visual Studio path is empty", "error")
+        return False
+        
+    if not os.path.exists(path):
+        log(f"Error: Visual Studio path does not exist: {path}", "error")
+        return False
+        
+    if not path.lower().endswith('.bat'):
+        log(f"Error: Visual Studio path must be a .bat file: {path}", "error")
+        return False
+    
+    # Test if the batch file can be executed
+    try:
+        log(f"Validating Visual Studio path: {path}", "info")
+        test_cmd = f'cmd /c ""{path}" && echo Success"'
+        result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+        
+        if result.returncode != 0:
+            log(f"Error: Visual Studio batch file execution failed: {result.stderr}", "error")
+            return False
+            
+        # Check if cl.exe is in the path after running vcvars64.bat
+        test_cmd = f'cmd /c ""{path}" && where cl.exe"'
+        result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+        
+        if result.returncode != 0:
+            log("Warning: cl.exe compiler not found in the Visual Studio environment path.", "warning")
+            log("Grading may not work correctly. Ensure Visual C++ build tools are installed.", "warning")
+            # Return true with warning as this isn't a terminal issue
+            return True
+            
+        log("Visual Studio path validation successful", "success")
+        return True
+    except Exception as e:
+        log(f"Error validating Visual Studio path: {str(e)}", "error")
+        return False
+
+def validate_winrar_path(path):
+    """Validates the WinRAR executable path."""
+    if not path:
+        log("Error: WinRAR path is empty", "error")
+        return False
+        
+    if not os.path.exists(path):
+        log(f"Error: WinRAR path does not exist: {path}", "error")
+        return False
+        
+    if not path.lower().endswith('.exe'):
+        log(f"Error: WinRAR path must be an .exe file: {path}", "error")
+        return False
+    
+    # Test if the executable can be run
+    try:
+        log(f"Validating WinRAR path: {path}", "info")
+        
+        # For UnRAR.exe, try to get version info
+        if 'unrar.exe' in path.lower():
+            test_cmd = f'"{path}" -v'
+        # For WinRAR.exe, try with /? parameter
+        else:
+            test_cmd = f'"{path}" /?'
+            
+        result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
+        if result.returncode != 0 and 'unrar.exe' in path.lower():
+            log(f"Error: UnRAR executable execution failed: {result.stderr}", "error")
+            return False
+            
+        log("WinRAR path validation successful", "success")
+        return True
+    except Exception as e:
+        log(f"Error validating WinRAR path: {str(e)}", "error")
+        return False
+
 def run_grading(questions_to_run, slim_mode=False, per_error_penalty_mode=False):
     """Runs the test and creates the Excel files."""
+    # Validate Visual Studio path before grading
+    if not validate_vs_path(vs_path):
+        log("Cannot proceed with grading due to invalid Visual Studio environment path.", "error")
+        sys.exit(1)
+        
     log("Starting grading process...", level="info")
     # Pass the globally imported questions list from configuration
     run_tests(questions_to_run)
@@ -88,8 +170,14 @@ if __name__ == "__main__":
         if not zipfile.is_zipfile(args.zip_path):
              log(f"Error: Provided file is not a valid zip file: {args.zip_path}", level="error")
              sys.exit(1)
+             
+        # Validate WinRAR path if RAR support is enabled
+        if args.rar_support and not validate_winrar_path(winrar_path):
+            log("Cannot proceed with RAR support due to invalid WinRAR path.", "error")
+            sys.exit(1)
+             
         # Pass imported questions list
-        preprocess_submissions(args.zip_path, questions, rar_support=args.rar_support)
+        preprocess_submissions(args.zip_path, questions, rar_support=args.rar_support, winrar_path=winrar_path)
     elif args.command == 'clear':
         # Pass imported questions list
         if args.clear_command == 'grades':
