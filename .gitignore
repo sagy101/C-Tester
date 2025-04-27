@@ -13,6 +13,7 @@ __pycache__/
 *.zip
 *.exe
 *.obj
+*.csv
 
 # specific files
 submit_error.txt
