@@ -131,7 +131,7 @@ def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
                     
                     # Pattern 2: Look for submission ID patterns like 633190_assignsubmission_file_HW1_315406280
                     if not match:
-                        match = re.search(r'(\d{5,12})(?:\.(?:zip|rar))?$', submission_name)
+                        match = re.search(r'(\d{5,12})(?:\.(?:zip|rar|c))?$', submission_name)
                     
                     # Pattern 3: More aggressive - find any 5+ digit number that could be an ID
                     if not match:
