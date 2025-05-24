@@ -136,12 +136,14 @@ if __name__ == "__main__":
                           help='Generate final_grades.xlsx with only ID and Final_Grade columns.')
     parser_run.add_argument('--per-error-penalty', action='store_true',
                           help='Apply penalty for each submission error (can accumulate).')
+    # TODO: arg use simple naming from user command
     # Removed the --single-penalty option since it's now the default
 
     # Preprocess command
     parser_preprocess = subparsers.add_parser('preprocess', help='Preprocess submissions from a zip file.')
     parser_preprocess.add_argument('--zip-path', required=True, help='Path to the main zip file containing student submissions.')
     parser_preprocess.add_argument('--rar-support', action='store_true', help='Enable support for RAR submission files.')
+    parser_preprocess.add_argument('--simple-naming', action='store_true', help='Use simple naming pattern (hwN.c) instead of the default pattern (hwN_qN.c).')
 
     # Clear commands
     parser_clear = subparsers.add_parser('clear', help='Clear generated files.')
@@ -177,7 +179,7 @@ if __name__ == "__main__":
             sys.exit(1)
              
         # Pass imported questions list
-        preprocess_submissions(args.zip_path, questions, rar_support=args.rar_support, winrar_path=winrar_path)
+        preprocess_submissions(args.zip_path, questions, rar_support=args.rar_support, winrar_path=winrar_path, use_simple_naming=args.simple_naming)
     elif args.command == 'clear':
         # Pass imported questions list
         if args.clear_command == 'grades':

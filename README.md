@@ -44,6 +44,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 *   **Preprocessing:** Extracts student submissions from nested zip files, organizes C files (`*_qN.c`) into question folders (`QN/C/`), and renames them based on student ID. Reports processing issues.
     *   **New:** Now supports RAR archives in addition to ZIP files.
+    *   **New:** Supports simple naming pattern (`hwN.c`) as an alternative to the default pattern (`hwN_qN.c`).
 *   **Automated Grading:**
     *   Sets up the Visual Studio C++ build environment (`vcvars64.bat`).
     *   Compiles student C code and a provided `original_sol.c` using `cl.exe`.
@@ -162,7 +163,9 @@ For the **Preprocessing** step (via GUI or CLI) to work correctly, the input zip
   1.  The main zip file should contain **individual zip or RAR files** for each student submission.
   2.  Each inner archive's name **must end with the student's ID number**, preceded by an underscore (e.g., `Student Name_Assign1_123456789.zip` or `Student Name_Assign1_123456789.rar`). The part before the underscore and ID is not used by default but helps organization.
   3.  When an inner archive (e.g., `Student Name_Assign1_123456789.zip`) is extracted, it creates a folder (`Student Name_Assign1_123456789/`).
-  4.  Inside this folder, the script looks for C files named in the format `some_filename_qN.c`, where `N` is the question number (e.g., `main_program_q1.c`, `my_solution_q2.c`).
+  4.  Inside this folder, the script looks for C files named in one of two formats:
+      * **Default Pattern:** `some_filename_qN.c`, where `N` is the question number (e.g., `main_program_q1.c`, `my_solution_q2.c`).
+      * **Simple Pattern:** `hwN.c`, where `N` is the question number (e.g., `hw1.c`, `hw2.c`). Use this pattern by enabling the `--simple-naming` flag in CLI or the corresponding option in GUI.
   5.  **Alternatively**, if no matching C files are found directly inside the student's folder, the script will look for them inside **exactly one subdirectory** within the student's folder (e.g., `Student Name_Assign1_123456789/Submission/main_program_q1.c`). It will not search deeper than one subfolder level.
       
   **Example:**
