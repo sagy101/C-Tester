@@ -2,6 +2,11 @@
 
 import os # Needed for validate_config
 
+# Flag to control file naming pattern
+# When True: expects files named as "hw[0-9].c" and treats them as "hw[0-9]_q1.c"
+# When False: expects files named as "hw[0-9]_q[0-9].c" (default)
+use_simple_naming = True
+
 # Penalty points for submission errors reported in submit_error.txt
 penalty = 5
 
@@ -23,13 +28,12 @@ winrar_path = r"C:\Program Files\WinRAR\UnRAR.exe"
 vs_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 
 # List of question folder names (must match actual folder names in the project root)
-questions = ["Q1", "Q2"]
+questions = ["Q1"]
 
 # Dictionary mapping question folder names to their weight percentage for the final grade
 # Ensure keys match the 'questions' list and values sum to 100.
 folder_weights = {
-    questions[0]: 50,
-    questions[1]: 50
+    questions[0]: 100
 }
 
 def validate_config(questions_list, weights_dict):

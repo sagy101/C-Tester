@@ -18,6 +18,7 @@ from configuration import vs_path as default_vs_path # Import default VS path
 from configuration import winrar_path as default_winrar_path # Import default WinRAR path
 # Import validator from configuration now
 from configuration import validate_config
+import configuration
 from preprocess import preprocess_submissions
 from Process import run_tests
 from CreateExcel import create_excels
@@ -126,6 +127,7 @@ class App(ctk.CTk):
         self.gui_rar_support = False  # New RAR support variable
         self.gui_vs_path = default_vs_path  # Initialize VS path
         self.gui_winrar_path = default_winrar_path  # Initialize WinRAR path
+        self.gui_simple_naming = configuration.use_simple_naming  # Initialize simple naming flag
         self.slim_output_var = tk.BooleanVar(value=False)  # Variable for slim checkbox
         self.per_error_penalty_var = tk.BooleanVar(value=default_per_error_penalty)  # Variable for per-error penalty checkbox
         self.config_valid = False
@@ -353,6 +355,33 @@ class App(ctk.CTk):
             text_color="gray"
         )
         self.rar_help_label.pack(side=tk.LEFT)
+
+        # Add Simple Naming checkbox
+        self.simple_naming_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
+        self.simple_naming_frame.grid(row=6, column=0, padx=15, pady=(0, 10), sticky="w")
+        
+        self.simple_naming_var = tk.BooleanVar(value=configuration.use_simple_naming)
+        self.simple_naming_checkbox = ctk.CTkCheckBox(
+            self.simple_naming_frame, 
+            text="Use simple file naming (hw[0-9].c)",
+            variable=self.simple_naming_var,
+            command=self.update_simple_naming_state,
+            border_width=2,
+            hover=True,
+            width=250  # Ensure enough width for the text
+        )
+        self.simple_naming_checkbox.pack(side=tk.LEFT)
+        
+        # Add help note for Simple Naming
+        self.simple_naming_help_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
+        self.simple_naming_help_frame.grid(row=7, column=0, padx=15, pady=(0, 5), sticky="w")
+        self.simple_naming_help_label = ctk.CTkLabel(
+            self.simple_naming_help_frame, 
+            text="treats hw[0-9].c files as hw[0-9]_q1.c",
+            font=("", 10),
+            text_color="gray"
+        )
+        self.simple_naming_help_label.pack(side=tk.LEFT)
 
         # Section 2: Grading
         self.grading_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -845,7 +874,12 @@ class App(ctk.CTk):
         rar_support = self.rar_support_var.get()
         self.gui_rar_support = rar_support
         
-        log(f"Starting preprocessing task for: {zip_path} (RAR support: {'enabled' if rar_support else 'disabled'})", level="info")
+        # Get current simple naming setting
+        simple_naming = self.simple_naming_var.get()
+        self.gui_simple_naming = simple_naming
+        configuration.use_simple_naming = simple_naming
+        
+        log(f"Starting preprocessing task for: {zip_path} (RAR support: {'enabled' if rar_support else 'disabled'}, Simple naming: {'enabled' if simple_naming else 'disabled'})", level="info")
         # Pass the CURRENT GUI config including the WinRAR path
         preprocess_submissions(
             zip_path, 
@@ -971,6 +1005,8 @@ class App(ctk.CTk):
         self.per_error_penalty_var.set(self.gui_per_error_penalty)
         # Set RAR support checkbox
         self.rar_support_var.set(self.gui_rar_support)
+        # Set simple naming checkbox
+        self.simple_naming_var.set(self.gui_simple_naming)
 
     def apply_gui_configuration(self):
         """Parses, validates, updates state, resets dirty flag and UI."""
@@ -1071,6 +1107,7 @@ class App(ctk.CTk):
              self.gui_penalty = parsed_penalty
              self.gui_per_error_penalty = parsed_per_error_penalty
              self.gui_rar_support = parsed_rar_support
+             self.gui_simple_naming = self.simple_naming_var.get()
              status_text = "Status: Valid ✓"
              status_color = COLORS["secondary"]  # Green
              # apply_border_color remains default
@@ -1452,6 +1489,14 @@ class App(ctk.CTk):
         log("Initial WinRAR path validation failed. RAR support will be disabled.", "error")
         if self.rar_support_var.get():
             self.preprocess_button.configure(state="disabled")
+
+    def update_simple_naming_state(self):
+        """Updates the simple naming state and logs the change."""
+        new_state = self.simple_naming_var.get()
+        if new_state != self.gui_simple_naming:
+            self.gui_simple_naming = new_state
+            configuration.use_simple_naming = new_state
+            log(f"Simple naming mode {'enabled' if new_state else 'disabled'}. Files will be treated as {'hw[0-9].c' if new_state else 'hw[0-9]_q[0-9].c'}.", "info")
 
 if __name__ == "__main__":
     app = App()

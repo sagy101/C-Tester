@@ -331,7 +331,6 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                 log(f"Applied penalty ({penalty}% x {error_count} = {total_penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
             else:
                 # Traditional single penalty regardless of error count
-                total_penalty = penalty
                 penalized_grade = max(0, original_grade - penalty)
                 penalty_text = f"{reason} (-{penalty}%)"
                 log(f"Applied penalty ({penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
@@ -356,7 +355,6 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                 log(f"Applied penalty ({penalty}% x {error_count} = {total_penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
             else:
                 # Traditional single penalty regardless of error count
-                total_penalty = penalty
                 penalized_grade = max(0, original_grade - penalty)
                 penalty_text = f"{reason} (-{penalty}%)"
                 log(f"Applied penalty ({penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
@@ -388,6 +386,17 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                     failed_cases_list.append(f"{q_name}: {wrong_inputs_str}")
         if failed_cases_list:
             comments_parts.append("Failed Test Cases:\n" + "\n".join(failed_cases_list))
+        
+        # 1.5 Add Compilation Errors
+        compilation_errors_list = []
+        for col_name in compile_columns:
+            if row[col_name]:  # If there was a compilation error
+                q_name_match = re.match(r'Compilation_Error_(Q\d+)', col_name)
+                if q_name_match:
+                    q_name = q_name_match.group(1)
+                    compilation_errors_list.append(f"Compilation error on {q_name}")
+        if compilation_errors_list:
+            comments_parts.append("Compilation Errors:\n" + "\n".join(compilation_errors_list))
         
         # 2. Add Timeout Cases
         timeout_cases_list = []
