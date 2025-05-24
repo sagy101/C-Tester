@@ -5,7 +5,9 @@ import re
 import glob
 import threading
 from typing import Callable, Optional
-import json  # Add missing import for json
+import json
+
+import configuration  # Add missing import for json
 
 try:
     from tqdm import tqdm
@@ -213,7 +215,13 @@ def find_and_process_c_files(
 
     # 1. Search in the root submission folder
     log(f"Searching for C files in root: {submission_folder}", level="info")
-    root_c_file_pattern = os.path.join(submission_folder, 'hw[0-9]_q[0-9].c')
+    
+    # Use different pattern based on configuration
+    if configuration.use_simple_naming:
+        root_c_file_pattern = os.path.join(submission_folder, 'hw[0-9].c')
+    else:
+        root_c_file_pattern = os.path.join(submission_folder, 'hw[0-9]_q[0-9].c')
+    
     c_files_found_paths = glob.glob(root_c_file_pattern)
 
     if c_files_found_paths:
@@ -233,7 +241,11 @@ def find_and_process_c_files(
             log(f"Found {len(subdirs)} subfolder(s) to check.", level="info")
             for subdir in subdirs:
                 log(f"Searching for C files in subfolder: {subdir}", level="info")
-                subdir_c_file_pattern = os.path.join(subdir, 'hw[0-9]_q[0-9].c')
+                # Use different pattern based on configuration
+                if configuration.use_simple_naming:
+                    subdir_c_file_pattern = os.path.join(subdir, 'hw[0-9].c')
+                else:
+                    subdir_c_file_pattern = os.path.join(subdir, 'hw[0-9]_q[0-9].c')
                 files_in_subdir = glob.glob(subdir_c_file_pattern)
                 if files_in_subdir:
                     log(f"Found {len(files_in_subdir)} C file(s) in {subdir}", level="info")
@@ -277,15 +289,22 @@ def find_and_process_c_files(
         if new_c_files:
             log(f"Found {len(new_c_files)} additional C files that might be incorrectly named", level="info")
             
-            # Filter for files containing 'q' followed by a number
+            # Filter for files containing 'q' followed by a number or just hw followed by number
             wrong_named_files = []
             for c_file in new_c_files:
                 filename = os.path.basename(c_file)
-                # Check both patterns: 'q' followed by number anywhere, or exact 'q<number>.c'
-                if re.search(r'^q\d+\.c$|_q\d+(?:_.*)?\.c$|hw\d+.*\.c$', filename, re.IGNORECASE):
+                # Check patterns based on configuration
+                pattern_matched = False
+                if configuration.use_simple_naming:
                     wrong_named_files.append(c_file)
                     log(f"Found incorrectly named file: {filename}", level="info")
                 else:
+                    if re.search(r'^q\d+\.c$|_q\d+(?:_.*)?\.c$|hw\d+.*\.c$', filename, re.IGNORECASE):
+                        wrong_named_files.append(c_file)
+                        log(f"Found incorrectly named file: {filename}", level="info")
+                        pattern_matched = True
+                
+                if not pattern_matched:
                     log(f"File did not match pattern: {filename}", level="info")
             
             if wrong_named_files:
@@ -327,35 +346,43 @@ def find_and_process_c_files(
             break # Exit loop
 
         filename = os.path.basename(c_file_path)
-        # Extract question number: matches any filename containing q<digits> and ending with .c
-        match = re.search(r'q(\d+).*\.c$', filename, re.IGNORECASE)
-        if match:
-            # Use the first matching group that isn't None
-            q_number_str = next((g for g in match.groups() if g is not None), None)
-            try:
-                q_number = int(q_number_str)
-                target_folder = os.path.join(questions_base_path, f"Q{q_number}", "C")
-                target_filename = f"{student_id}.c"
-                target_path = os.path.join(target_folder, target_filename)
-
-                try:
-                    os.makedirs(target_folder, exist_ok=True)
-                    shutil.copy2(c_file_path, target_path) # Use copy2 to preserve metadata
-                    log(f"Copied and renamed '{filename}' to '{target_path}'", level="success")
-                    processed_q_numbers.add(q_number)
-                except Exception as e:
-                    log(f"Error copying '{c_file_path}' to '{target_path}': {e}", level="error")
-                    # If copy fails, don't add to processed set
-                    if 'error_copying' not in statuses:
-                        statuses.append('error_copying')
-            except ValueError:
-                 log(f"Could not convert question number '{q_number_str}' to integer in '{filename}'. Skipping.", level="warning")
-                 if 'invalid_q_number' not in statuses:
-                     statuses.append('invalid_q_number')
+        # Extract question number based on configuration
+        if configuration.use_simple_naming:
+            # For simple naming, treat all files as q1
+            q_number = 1
         else:
-            log(f"Could not extract question number from filename '{filename}' (path: {c_file_path}). Skipping.", level="warning")
-            if 'cant_extract_q_number' not in statuses:
-                statuses.append('cant_extract_q_number')
+            # Extract question number: matches any filename containing q<digits> and ending with .c
+            match = re.search(r'q(\d+).*\.c$', filename, re.IGNORECASE)
+            if match:
+                # Use the first matching group that isn't None
+                q_number_str = next((g for g in match.groups() if g is not None), None)
+                try:
+                    q_number = int(q_number_str)
+                except ValueError:
+                    log(f"Could not convert question number '{q_number_str}' to integer in '{filename}'. Skipping.", level="warning")
+                    if 'invalid_q_number' not in statuses:
+                        statuses.append('invalid_q_number')
+                    continue
+            else:
+                log(f"Could not extract question number from filename '{filename}' (path: {c_file_path}). Skipping.", level="warning")
+                if 'cant_extract_q_number' not in statuses:
+                    statuses.append('cant_extract_q_number')
+                continue
+
+        target_folder = os.path.join(questions_base_path, f"Q{q_number}", "C")
+        target_filename = f"{student_id}.c"
+        target_path = os.path.join(target_folder, target_filename)
+
+        try:
+            os.makedirs(target_folder, exist_ok=True)
+            shutil.copy2(c_file_path, target_path) # Use copy2 to preserve metadata
+            log(f"Copied and renamed '{filename}' to '{target_path}'", level="success")
+            processed_q_numbers.add(q_number)
+        except Exception as e:
+            log(f"Error copying '{c_file_path}' to '{target_path}': {e}", level="error")
+            # If copy fails, don't add to processed set
+            if 'error_copying' not in statuses:
+                statuses.append('error_copying')
 
     # Final status checks
     if "cancelled" in statuses:
@@ -521,7 +548,7 @@ def preprocess_submissions(
             log(f"Unsupported archive type for file: {inner_archive}", level="warning")
             current_issues.append((PRIORITY["EXTRACT_FAIL"], "Unsupported archive type"))
             extract_success = False
-            
+        
         # Process the extracted archive if successful
         if extract_success:
             # 4. Delete the inner zip file after successful extraction
@@ -540,22 +567,34 @@ def preprocess_submissions(
             
             if not id_match:
                 # If not found, try pattern with .zip at the end
-                id_match = re.search(r'_(\d+)\.zip$', submission_name)
-                if id_match:
+                id_match_zip = re.search(r'_(\d+)\.zip$', submission_name)
+                if id_match_zip:
                     # Add to issues list that the file had incorrect naming
                     current_issues.append((PRIORITY["ID_FAIL"], f"ID found but has .zip suffix"))
-                else:
-                    id_match = re.search(r'_(\d+)\.$', submission_name)
-                    if id_match:
-                        # Add to issues list that the file had incorrect naming
-                        current_issues.append((PRIORITY["ID_FAIL"], f"ID found but has . suffix"))
-                    else:
-                        id_found = False
-                        current_issues.append((PRIORITY["ID_FAIL"], f"ID extraction failed"))
-                        log(f"Could not extract numeric student ID from folder name '{submission_name}'. Skipping processing.", level="warning")
+                id_match_c = re.search(r'_(\d+)\.c$', submission_name)
+                if id_match_c:
+                    # Add to issues list that the file had incorrect naming
+                    current_issues.append((PRIORITY["ID_FAIL"], f"ID found but has .c suffix"))
+                id_match_dot = re.search(r'_(\d+)\.$', submission_name)
+                if id_match_dot:
+                    # Add to issues list that the file had incorrect naming
+                    current_issues.append((PRIORITY["ID_FAIL"], f"ID found but has . suffix"))
+                if not id_match_zip and not id_match_c and not id_match_dot:
+                    id_found = False
+                    current_issues.append((PRIORITY["ID_FAIL"], f"ID extraction failed"))
+                    log(f"Could not extract numeric student ID from folder name '{submission_name}'. Skipping processing.", level="warning")
 
             if id_found:
-                student_id = id_match.group(1)
+                
+                if id_match:
+                    student_id = id_match.group(1)
+                elif id_match_zip:
+                    student_id = id_match_zip.group(1)
+                elif id_match_c:
+                    student_id = id_match_c.group(1)
+                elif id_match_dot:
+                    student_id = id_match_dot.group(1)
+                    
                 log(f"Processing submission folder: '{submission_folder_path}' for student ID: {student_id}", level="info")
 
                 status, processed_qs = find_and_process_c_files(
