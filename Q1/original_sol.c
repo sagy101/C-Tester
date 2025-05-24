@@ -47,22 +47,28 @@ int q_1(int num)
     }
     // Recursive step: Get the binary representation of n / 2
     int result = q_1(num / 2);
-    
+
     // Append the current bit (n % 2) to the result
     // Shift result left by 1 and add the current bit (n % 2)
     return result * 10 + (num % 2);
-    
+
 }
 
 int q_2(int num)
 {
-    // Base case: if num is a single digit, return it
+    // Handle negative inputs (optional)
+    if (num < 0) num = -num;
+
+    // Base case: already a single digit
     if (num < 10) {
         return num;
     }
 
-    // Recursive case: sum digits by extracting the last digit
-    return (num % 10) + q_2(num / 10);  // Add last digit to the sum of the rest
+    // Sum this level’s digits
+    int sum = (num % 10) + q_2(num / 10);
+
+    // If that sum is still more than one digit, recurse again
+    return q_2(sum);
 }
 
 int q_3_helper(int num, int sign) {
@@ -74,7 +80,7 @@ int q_3_helper(int num, int sign) {
     // Recursive case: calculate the sum for n-1 and alternate the sign
     int currentTerm = sign * (num * num);
     // Recursive call, passing the opposite sign (-sign) to alternate the sign
-    return currentTerm + q_3_helper(num - 1, -1*sign);
+    return currentTerm + q_3_helper(num - 1, -1 * sign);
 }
 
 int q_3(int num)
