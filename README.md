@@ -14,6 +14,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ## ✨ Features
 
+
 *   **Preprocessing:** Extracts student submissions from nested zip files, organizes C files (`*_qN.c`) into question folders (`QN/C/`), and renames them based on student ID. Reports processing issues.
     *   **New:** Now supports RAR archives in addition to ZIP files.
     *   **New:** Supports simple naming pattern (`hwN.c`) as an alternative to the default pattern (`hwN_qN.c`).
