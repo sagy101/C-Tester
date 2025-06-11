@@ -11,34 +11,6 @@
 
 This project automates the batch grading of multiple C programs. It sets up the Visual Studio C++ build environment, compiles and executes student C source files against a known-correct solution, compares outputs, and produces grading reports. Additionally, it generates Excel files with detailed grade breakdowns for each question folder as well as a consolidated final grade file for easy uploading (e.g. Moodle). 
 
----
-
-## 🆕 Recent Updates
-
-### Enhanced Validation Features (September 2023)
-- **Improved Path Validation**: Added automatic validation of Visual Studio and WinRAR paths before operations begin
-- **Automatic Button Disabling**: 
-  - Run Grading is disabled until the VS path is validated
-  - Preprocess is disabled if no ZIP file is selected or if RAR support is enabled with an invalid WinRAR path
-- **CLI Validation**: Added VS path and WinRAR path validation to command-line operations
-- **Better Error Messages**: More informative error messages with clear guidance when validation fails
-
-### Configuration Improvements (August 2023)
-- **Centralized Configuration**: Visual Studio path (`vs_path`) moved from `Process.py` to `configuration.py` for easier setup
-- **Default Configuration**: Questions list and folder weights expanded to include five questions (Q1-Q5) with equal 20% weights
-- **Improved Error Handling**: Enhanced submission error parsing with better logging for troubleshooting
-
-### GUI Enhancements (May 2023)
-- **Modernized Interface**: A completely redesigned UI with a more intuitive and visually appealing layout
-- **Enhanced Visuals**: Improved color scheme, button styling, and visual feedback for actions
-- **Better Layout**: Reorganized controls into logical sections with improved spacing and readability
-- **Emoji Icons**: Added visual indicators to make sections easier to identify
-- **RAR Support Integration**: Moved RAR support settings to preprocessing section for better usability
-- **Progress Indicators**: Enhanced progress reporting with percentage display
-- **Responsive Design**: Better minimum window size constraints to prevent text cutoff
-- **Error Feedback**: Clearer visual feedback for configuration validation and error states
-
----
 
 ## ✨ Features
 
