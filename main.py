@@ -136,7 +136,6 @@ if __name__ == "__main__":
                           help='Generate final_grades.xlsx with only ID and Final_Grade columns.')
     parser_run.add_argument('--per-error-penalty', action='store_true',
                           help='Apply penalty for each submission error (can accumulate).')
-    # TODO: arg use simple naming from user command
     # Removed the --single-penalty option since it's now the default
 
     # Preprocess command
