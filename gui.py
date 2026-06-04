@@ -31,6 +31,7 @@ from checker_assistant import (
     available_checker_templates,
     build_audit_prompt,
     build_suggestion_prompt,
+    get_google_api_key,
     list_gemini_models,
     parse_assignment_file,
     run_checker_tests,
@@ -1675,7 +1676,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
         self.checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
         self.assignment_path_var = tk.StringVar(value="")
-        self.provider_var = tk.StringVar(value="Fake/Offline")
+        self.provider_var = tk.StringVar(value="Gemini")
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
         self.gemini_model_values = [self.gemini_model_var.get(), "gemini-2.0-flash", "gemini-1.5-flash"]
         self.audit_size_var = tk.StringVar(value="15")
@@ -1840,14 +1841,14 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
     @staticmethod
     def has_gemini_api_key():
-        return bool(os.getenv("GOOGLE_API_KEY"))
+        return bool(get_google_api_key())
 
     def update_gemini_key_status(self):
         has_key = self.has_gemini_api_key()
         using_gemini = self.provider_var.get() == "Gemini"
         if has_key:
             self.gemini_key_status_label.configure(
-                text="Gemini key detected in GOOGLE_API_KEY. Refresh Models to load models available for this key.",
+                text="Gemini key detected. Click Refresh Models to load the models available for this key.",
                 text_color=COLORS["secondary"],
             )
             self.copy_gemini_setup_button.configure(state="disabled")
@@ -1862,8 +1863,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 text_color=COLORS["warning"],
             )
             self.copy_gemini_setup_button.configure(state="normal")
-            self.refresh_models_button.configure(state="disabled")
-            self.gemini_model_menu.configure(state="disabled")
+            self.refresh_models_button.configure(state="normal")
+            self.gemini_model_menu.configure(state="normal")
 
         llm_action_state = "disabled" if using_gemini and not has_key else "normal"
         self.suggest_checker_button.configure(state=llm_action_state)

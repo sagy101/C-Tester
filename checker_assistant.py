@@ -21,6 +21,34 @@ from semantic_grading import available_checker_templates, compare_output_with_co
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
 
+def get_google_api_key() -> str | None:
+    key = os.getenv("GOOGLE_API_KEY")
+    if key:
+        return key
+    if os.name != "nt":
+        return None
+
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    locations = (
+        (winreg.HKEY_CURRENT_USER, "Environment"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    )
+    for root, subkey in locations:
+        try:
+            with winreg.OpenKey(root, subkey) as env_key:
+                key, _ = winreg.QueryValueEx(env_key, "GOOGLE_API_KEY")
+                if key:
+                    os.environ["GOOGLE_API_KEY"] = key
+                    return key
+        except OSError:
+            continue
+    return None
+
+
 @dataclass(frozen=True)
 class SuggestionResult:
     status: str
@@ -61,7 +89,7 @@ class GeminiProvider:
     """Small Gemini REST client using GOOGLE_API_KEY by default."""
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.api_key = api_key or get_google_api_key()
         self.model = model or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
         if not self.api_key:
             raise ValueError("GOOGLE_API_KEY is not set")
@@ -92,7 +120,7 @@ class GeminiProvider:
 
 
 def list_gemini_models(api_key: str | None = None) -> list[str]:
-    key = api_key or os.getenv("GOOGLE_API_KEY")
+    key = api_key or get_google_api_key()
     if not key:
         raise ValueError("GOOGLE_API_KEY is not set")
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
