@@ -86,6 +86,19 @@ def normalize_id(id_str):
     return digits_only.lstrip('0') if digits_only else ''
 
 
+def write_text_columns(worksheet, df, columns):
+    """Force selected columns to Excel text cells to preserve IDs and input lists."""
+    for column_name in columns:
+        if column_name not in df.columns:
+            continue
+        column_index = df.columns.get_loc(column_name)
+        for row_index, value in enumerate(df[column_name], start=1):
+            if pd.isna(value) or value == "":
+                worksheet.write_blank(row_index, column_index, None)
+            else:
+                worksheet.write_string(row_index, column_index, str(value))
+
+
 def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
     """
     Reads the submit_error.txt file and returns a dict mapping student ID to error reason.
@@ -98,7 +111,7 @@ def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
         return errors
 
     try:
-        with open(error_file, 'r') as f:
+        with open(error_file, 'r', encoding="utf-8") as f:
             lines = f.readlines()
             
             # Skip the header line
@@ -115,7 +128,7 @@ def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
                 # Lines starting with "- " are submission entries
                 if line.startswith("- "):
                     # Split the line into submission name and issues
-                    parts = line[2:].split(":")  # Remove "- " and split at colon
+                    parts = line[2:].split(":", 1)  # Remove "- " and split at the submission/issues separator
                     
                     if len(parts) < 2:
                         log(f"Invalid line format (missing colon): {line}", "warning")
@@ -216,7 +229,10 @@ def create_excel_for_grades(parent_folders):
 
         # Write the per-question Excel
         output_excel = os.path.join(parent, f"{parent}_grades_to_upload.xlsx")
-        df.to_excel(output_excel, index=False)
+        with pd.ExcelWriter(output_excel, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False)
+            worksheet = writer.sheets['Sheet1']
+            write_text_columns(worksheet, df, ["ID_number", "Wrong_Inputs", "Timeout_Inputs"])
         log(f"Created file: {output_excel} with {len(df)} records.", level="success")
 
         folder_data[parent] = df
@@ -483,6 +499,15 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_er
             # Set each column width to 20 (adjust this value as needed)
             for i, col in enumerate(final_grades_df.columns):
                 worksheet.set_column(i, i, 20)
+
+            text_columns = [
+                col for col in final_grades_df.columns
+                if col == "ID_number"
+                or col in ("Comments", "Penalty Applied")
+                or col.startswith("Wrong_Inputs_")
+                or col.startswith("Timeout_Inputs_")
+            ]
+            write_text_columns(worksheet, final_grades_df, text_columns)
 
             # Define a header format with a light blue background
             header_format = workbook.add_format({

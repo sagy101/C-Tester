@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from Utils import log
 from Utils import VERBOSITY_LEVEL
 from configuration import vs_path  # Import vs_path from configuration
+from semantic_grading import compare_output
 
 
 def setup_visual_studio_environment():
@@ -241,6 +242,17 @@ def get_ground_truth(
     return ground_truth
 
 
+def write_discrepancy_details(grade_file, discrepancy):
+    input_value, expected, actual = discrepancy[:3]
+    comparison = discrepancy[3] if len(discrepancy) > 3 else None
+    grade_file.write(f"Input: {input_value}\nExpected: {expected}\nActual: {actual}\n")
+    if comparison:
+        grade_file.write(f"Semantic Reason: {comparison.reason}\n")
+        grade_file.write(f"Expected Canonical: {comparison.expected_canonical}\n")
+        grade_file.write(f"Actual Canonical: {comparison.actual_canonical}\n")
+    grade_file.write("\n")
+
+
 def write_grade(grade_path, correct_count, total, discrepancies, compile_error, timeout_count=0):
     try:
         with open(grade_path, "w", encoding="utf-8") as grade_file:
@@ -274,27 +286,29 @@ def write_grade(grade_path, correct_count, total, discrepancies, compile_error, 
                 # Write discrepancies AFTER the summary lines
                 if discrepancies:
                     grade_file.write("\nDiscrepancies:\n")
-                    for input_value, expected, actual in discrepancies:
-                        grade_file.write(f"Input: {input_value}\nExpected: {expected}\nActual: {actual}\n\n")
+                    for discrepancy in discrepancies:
+                        write_discrepancy_details(grade_file, discrepancy)
         log(f"Grade file created: {grade_path}", "success", verbosity=2)
     except Exception as e:
         log(f"Error writing grade file {grade_path}: {str(e)}", "error")
 
 
-def compare_outputs(ground_truth, actual_outputs):
+def compare_outputs(ground_truth, actual_outputs, question_name=None):
     total = len(ground_truth)
-    correct_count = sum(
-        1 for i in range(total) if ground_truth[i][1] == actual_outputs[i][1]
-    )
-    discrepancies = [
-        (ground_truth[i][0], ground_truth[i][1], actual_outputs[i][1])
-        for i in range(total)
-        if ground_truth[i][1] != actual_outputs[i][1]
-    ]
+    correct_count = 0
+    discrepancies = []
+    for i in range(total):
+        input_value, expected_output = ground_truth[i]
+        _, actual_output = actual_outputs[i]
+        comparison = compare_output(question_name, input_value, expected_output, actual_output)
+        if comparison.passed:
+            correct_count += 1
+        else:
+            discrepancies.append((input_value, expected_output, actual_output, comparison))
     return correct_count, discrepancies, total
 
 
-def execute_and_grade(file, executable, inputs, ground_truth, output_folder, grade_folder):
+def execute_and_grade(file, executable, inputs, ground_truth, output_folder, grade_folder, question_name):
     grade_path = os.path.join(grade_folder, file.replace(".c", ".txt"))
     output_path = os.path.join(output_folder, file.replace(".c", ".txt"))
 
@@ -312,7 +326,7 @@ def execute_and_grade(file, executable, inputs, ground_truth, output_folder, gra
     with open(output_path, "w", encoding="utf-8") as sol_file:
         sol_file.writelines(lines_to_write)
 
-    correct_count, discrepancies, total = compare_outputs(ground_truth, actual_outputs)
+    correct_count, discrepancies, total = compare_outputs(ground_truth, actual_outputs, question_name)
     write_grade(grade_path, correct_count, total, discrepancies, None, timeout_count)
 
     return executable
@@ -461,7 +475,7 @@ def process_folder(
     iterator_factory = tqdm if use_tqdm else lambda iterable, **kwargs: iterable
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = { executor.submit(execute_and_grade, file, exe, inputs, ground_truth, output_folder, grade_folder): file
+        futures = { executor.submit(execute_and_grade, file, exe, inputs, ground_truth, output_folder, grade_folder, folder_name): file
                     for file, exe in compiled.items() }
 
         progress_iterator = iterator_factory(

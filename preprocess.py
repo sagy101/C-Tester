@@ -687,7 +687,7 @@ def preprocess_submissions(
             # Sort by highest priority (primary) and submission_name (secondary)
             sorted_entries.sort()
             
-            with open(error_file, 'w') as f:
+            with open(error_file, 'w', encoding="utf-8") as f:
                 f.write(f"Submissions with processing errors/warnings: {len(submissions_issues)} submissions with a total of {total_issues_count} issues (sorted by issue type):\n")
                 for _, submission_name, issues in sorted_entries:
                     f.write(f"- {submission_name}: ")
