@@ -20,7 +20,7 @@ from configuration import winrar_path as default_winrar_path # Import default Wi
 # Import validator from configuration now
 from configuration import validate_config
 import configuration
-from preprocess import preprocess_submissions
+from preprocess import detect_submission_naming, preprocess_submissions
 from Process import run_tests, setup_visual_studio_environment, read_inputs_from_file, get_ground_truth
 from CreateExcel import create_excels
 from checker_assistant import (
@@ -393,11 +393,22 @@ class App(ctk.CTk):
         self.simple_naming_help_frame.grid(row=7, column=0, padx=15, pady=(0, 5), sticky="w")
         self.simple_naming_help_label = ctk.CTkLabel(
             self.simple_naming_help_frame, 
-            text="treats hw[0-9].c files as hw[0-9]_q1.c",
+            text="auto-detected from the selected zip; plain hw123.c is treated as Q1",
             font=("", 10),
             text_color="gray"
         )
         self.simple_naming_help_label.pack(side=tk.LEFT)
+
+        self.naming_detection_label = ctk.CTkLabel(
+            self.preprocess_frame,
+            text="Select a submissions zip to auto-detect file naming.",
+            font=("", 10),
+            text_color="gray",
+            anchor="w",
+            justify="left",
+            wraplength=260,
+        )
+        self.naming_detection_label.grid(row=8, column=0, padx=15, pady=(0, 10), sticky="ew")
 
         # Section 2: Grading
         self.grading_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -789,11 +800,62 @@ class App(ctk.CTk):
         )
         if filepath:
             self.zip_path_var.set(filepath)
+            self.detect_and_apply_naming(show_dialog=True)
             # Enable the preprocess button now that a file is selected
             self.check_preprocess_button_state()
         else:
             # If user cancelled the dialog and no file was previously selected
             self.check_preprocess_button_state()
+
+    def detect_and_apply_naming(self, show_dialog=False):
+        zip_path = self.zip_path_var.get().strip()
+        if not zip_path or not os.path.exists(zip_path) or not zip_path.lower().endswith(".zip"):
+            self.naming_detection_label.configure(
+                text="Select a submissions zip to auto-detect file naming.",
+                text_color="gray",
+            )
+            return None
+
+        try:
+            detection = detect_submission_naming(zip_path)
+        except Exception as exc:
+            self.naming_detection_label.configure(
+                text=f"Could not auto-detect naming: {exc}",
+                text_color=COLORS["warning"],
+            )
+            return None
+
+        recommendation = detection["recommendation"]
+        counts = detection["counts"]
+        if recommendation == "simple":
+            self.simple_naming_var.set(True)
+            self.naming_detection_label.configure(
+                text=f"Detected simple naming: {counts['simple']} file(s). Plain hw123.c files will be mapped to Q1.",
+                text_color=COLORS["secondary"],
+            )
+        elif recommendation == "standard":
+            self.simple_naming_var.set(False)
+            self.naming_detection_label.configure(
+                text=f"Detected standard naming: {counts['standard']} file(s), e.g. hw123_q1.c.",
+                text_color=COLORS["secondary"],
+            )
+        elif recommendation == "mixed":
+            self.simple_naming_var.set(False)
+            message = (
+                f"Mixed naming detected: {counts['standard']} standard file(s) and {counts['simple']} simple file(s). "
+                "Preprocess will handle both: hw123_qN.c goes to QN, plain hw123.c goes to Q1. "
+                "If a plain file was meant for Q2 or another question, rename it to include _qN before preprocessing."
+            )
+            self.naming_detection_label.configure(text=message, text_color=COLORS["warning"])
+            if show_dialog:
+                messagebox.showinfo("Mixed File Naming Detected", message)
+        else:
+            self.naming_detection_label.configure(
+                text="Could not detect supported C filenames yet. Preprocess will still report exact filename issues.",
+                text_color=COLORS["warning"],
+            )
+        self.update_simple_naming_state()
+        return detection
 
     def check_preprocess_button_state(self):
         """Check if preprocess button should be enabled based on zip file selection and WinRAR validation."""
@@ -953,6 +1015,8 @@ class App(ctk.CTk):
              log(f"Error: Provided file does not appear to be a zip file: {zip_path}", level="warning")
              if not messagebox.askyesno("Potential Issue", f"The selected file doesn't end with .zip:\n{zip_path}\n\nContinue anyway?"):
                  return
+
+        self.detect_and_apply_naming(show_dialog=True)
 
         # Get current RAR support setting from checkbox
         rar_support = self.rar_support_var.get()

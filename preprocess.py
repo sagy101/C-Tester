@@ -4,6 +4,7 @@ import shutil
 import re
 import glob
 import threading
+import io
 from typing import Callable, Optional
 import json
 
@@ -27,6 +28,71 @@ except ImportError:
             pass
 
 from Utils import log
+
+STANDARD_C_RE = re.compile(r'q(\d+).*\.c$', re.IGNORECASE)
+SIMPLE_C_RE = re.compile(r'^hw\d+\.c$', re.IGNORECASE)
+
+def classify_c_filename(filename: str) -> str:
+    """Classify supported submission C filename styles."""
+    basename = os.path.basename(filename)
+    if basename == "example_student.c":
+        return "example"
+    if STANDARD_C_RE.search(basename):
+        return "standard"
+    if SIMPLE_C_RE.match(basename):
+        return "simple"
+    return "other"
+
+def record_detected_c_file(name: str, counts: dict, examples: dict):
+    kind = classify_c_filename(name)
+    if kind == "example":
+        return
+    counts[kind] += 1
+    if len(examples[kind]) < 5:
+        examples[kind].append(os.path.basename(name))
+
+def detect_inner_zip_naming(outer_zip, outer_name: str, counts: dict, examples: dict):
+    try:
+        with outer_zip.open(outer_name) as inner_file:
+            with zipfile.ZipFile(io.BytesIO(inner_file.read())) as inner_zip:
+                for inner_name in inner_zip.namelist():
+                    if inner_name.lower().endswith(".c"):
+                        record_detected_c_file(inner_name, counts, examples)
+    except zipfile.BadZipFile:
+        counts["other"] += 1
+        if len(examples["other"]) < 5:
+            examples["other"].append(os.path.basename(outer_name))
+
+def choose_naming_recommendation(counts: dict) -> str:
+    if counts["standard"] and counts["simple"]:
+        return "mixed"
+    if counts["simple"]:
+        return "simple"
+    if counts["standard"]:
+        return "standard"
+    return "unknown"
+
+def detect_submission_naming(zip_path: str) -> dict:
+    """Inspect a submissions zip and recommend standard/simple/mixed naming."""
+    counts = {"standard": 0, "simple": 0, "other": 0}
+    examples = {"standard": [], "simple": [], "other": []}
+    inner_archives = 0
+
+    with zipfile.ZipFile(zip_path, "r") as outer_zip:
+        for outer_name in outer_zip.namelist():
+            lower_name = outer_name.lower()
+            if lower_name.endswith(".c"):
+                record_detected_c_file(outer_name, counts, examples)
+            elif lower_name.endswith(".zip"):
+                inner_archives += 1
+                detect_inner_zip_naming(outer_zip, outer_name, counts, examples)
+
+    return {
+        "recommendation": choose_naming_recommendation(counts),
+        "counts": counts,
+        "examples": examples,
+        "inner_archives": inner_archives,
+    }
 
 def extract_main_zip(zip_filename):
     log(f"Extracting main zip file: {zip_filename}", "info")
@@ -352,7 +418,7 @@ def find_and_process_c_files(
             q_number = 1
         else:
             # Extract question number: matches any filename containing q<digits> and ending with .c
-            match = re.search(r'q(\d+).*\.c$', filename, re.IGNORECASE)
+            match = STANDARD_C_RE.search(filename)
             if match:
                 # Use the first matching group that isn't None
                 q_number_str = next((g for g in match.groups() if g is not None), None)
@@ -363,6 +429,11 @@ def find_and_process_c_files(
                     if 'invalid_q_number' not in statuses:
                         statuses.append('invalid_q_number')
                     continue
+            elif SIMPLE_C_RE.match(filename):
+                q_number = 1
+                if 'simple_naming_autodetected' not in statuses:
+                    statuses.append('simple_naming_autodetected')
+                log(f"Auto-detected simple filename '{filename}' and mapped it to Q1.", level="info")
             else:
                 log(f"Could not extract question number from filename '{filename}' (path: {c_file_path}). Skipping.", level="warning")
                 if 'cant_extract_q_number' not in statuses:
