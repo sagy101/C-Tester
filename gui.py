@@ -1639,8 +1639,10 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         ).grid(row=0, column=0, padx=8, pady=(8, 0), sticky="w")
         self.audit_progress_label = ctk.CTkLabel(audit_tab, text="Audit not run yet", anchor="w")
         self.audit_progress_label.grid(row=1, column=0, padx=8, pady=8, sticky="ew")
-        self.audit_textbox = ctk.CTkTextbox(audit_tab, wrap="word")
-        self.audit_textbox.grid(row=2, column=0, padx=8, pady=8, sticky="nsew")
+        self.audit_table_frame = ctk.CTkScrollableFrame(audit_tab, corner_radius=6)
+        self.audit_table_frame.grid(row=2, column=0, padx=8, pady=8, sticky="nsew")
+        self.audit_table_frame.grid_columnconfigure(4, weight=1)
+        self.audit_row_index = 0
 
         raw_tab = self.tabview.tab("Prompt / Response")
         raw_tab.grid_columnconfigure((0, 1), weight=1)
@@ -1842,17 +1844,56 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.tabview.set("Test Results")
 
     def start_audit_display(self, cases):
-        self.audit_textbox.delete("1.0", tk.END)
-        self.audit_textbox.insert("1.0", "student | question | score | status | reason\n" + "-" * 90 + "\n")
+        self.clear_audit_table()
+        self.add_audit_header()
         self.audit_progress_label.configure(text=f"Queued {len(cases)} audit cases...")
         self.tabview.set("Audit")
 
     def add_audit_result(self, result, done, total):
         self.audit_progress_label.configure(text=f"Reviewed {done}/{total} audit cases")
-        status = result.status.upper()
-        line = f"{result.student_id} | {result.question} | {status} | {result.risk} | {result.reason}\n"
-        self.audit_textbox.insert(tk.END, line)
-        self.audit_textbox.see(tk.END)
+        self.add_audit_row(result)
+
+    def clear_audit_table(self):
+        for child in self.audit_table_frame.winfo_children():
+            child.destroy()
+        self.audit_row_index = 0
+
+    def add_audit_header(self):
+        headers = ["Student", "Question", "Status", "Risk", "Reason"]
+        for column, header in enumerate(headers):
+            label = ctk.CTkLabel(
+                self.audit_table_frame,
+                text=header,
+                font=ctk.CTkFont(weight="bold"),
+                anchor="w",
+            )
+            label.grid(row=0, column=column, padx=6, pady=(4, 6), sticky="ew")
+        self.audit_row_index = 1
+
+    def add_audit_row(self, result):
+        status_color = {
+            "passed": COLORS["secondary"],
+            "flagged": COLORS["danger"],
+            "error": COLORS["danger"],
+        }.get(result.status, COLORS["warning"])
+        row_values = [
+            result.student_id,
+            result.question,
+            result.status.upper(),
+            result.risk,
+            result.reason,
+        ]
+        for column, value in enumerate(row_values):
+            label = ctk.CTkLabel(
+                self.audit_table_frame,
+                text=str(value),
+                text_color=status_color if column == 2 else None,
+                anchor="w",
+                justify="left",
+                wraplength=520 if column == 4 else 140,
+            )
+            label.grid(row=self.audit_row_index, column=column, padx=6, pady=3, sticky="ew")
+        self.audit_row_index += 1
 
     def show_error(self, title, exc):
         self.set_status(f"{title}: {exc}")
