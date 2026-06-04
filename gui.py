@@ -29,6 +29,8 @@ from checker_assistant import (
     GeminiProvider,
     audit_cases_with_llm,
     available_checker_templates,
+    build_audit_prompt,
+    build_suggestion_prompt,
     list_gemini_models,
     parse_assignment_file,
     run_checker_tests,
@@ -1546,6 +1548,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.provider_var = tk.StringVar(value="Fake/Offline")
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
         self.gemini_model_values = [self.gemini_model_var.get(), "gemini-2.0-flash", "gemini-1.5-flash"]
+        self.audit_size_var = tk.StringVar(value="15")
         self.question_var = tk.StringVar(value=parent.gui_questions[0] if parent.gui_questions else "Q1")
 
         top = ctk.CTkFrame(self, corner_radius=8)
@@ -1575,29 +1578,79 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.assignment_entry.grid(row=2, column=1, columnspan=2, padx=8, pady=8, sticky="ew")
         ctk.CTkButton(top, text="Browse", command=self.browse_assignment_file).grid(row=2, column=3, padx=8, pady=8)
 
+        ctk.CTkLabel(top, text="Audit sample size:").grid(row=3, column=0, padx=8, pady=8, sticky="w")
+        self.audit_size_entry = ctk.CTkEntry(top, textvariable=self.audit_size_var, width=80)
+        self.audit_size_entry.grid(row=3, column=1, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(top, text="Tip: use 3-5 for a cheap smoke audit, 10-15 for a stronger review.", text_color="gray").grid(row=3, column=2, columnspan=2, padx=8, pady=8, sticky="w")
+
         buttons = ctk.CTkFrame(self, corner_radius=8)
         buttons.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
         for idx in range(5):
             buttons.grid_columnconfigure(idx, weight=1)
-        ctk.CTkButton(buttons, text="Suggest with LLM", command=self.suggest_with_llm).grid(row=0, column=0, padx=8, pady=8, sticky="ew")
-        ctk.CTkButton(buttons, text="Test Checker", command=self.test_checker).grid(row=0, column=1, padx=8, pady=8, sticky="ew")
-        ctk.CTkButton(buttons, text="Save Checker", command=self.save_current_checker).grid(row=0, column=2, padx=8, pady=8, sticky="ew")
-        ctk.CTkButton(buttons, text="Run Audit", command=self.run_audit).grid(row=0, column=3, padx=8, pady=8, sticky="ew")
-        ctk.CTkButton(buttons, text="Reload", command=self.load_question_config).grid(row=0, column=4, padx=8, pady=8, sticky="ew")
+        self.suggest_checker_button = ctk.CTkButton(buttons, text="Suggest with LLM", command=self.suggest_with_llm)
+        self.suggest_checker_button.grid(row=0, column=0, padx=8, pady=8, sticky="ew")
+        self.test_checker_button = ctk.CTkButton(buttons, text="Test Checker", command=self.test_checker)
+        self.test_checker_button.grid(row=0, column=1, padx=8, pady=8, sticky="ew")
+        self.save_checker_button = ctk.CTkButton(buttons, text="Save Checker", command=self.save_current_checker)
+        self.save_checker_button.grid(row=0, column=2, padx=8, pady=8, sticky="ew")
+        self.run_audit_button = ctk.CTkButton(buttons, text="Run Audit", command=self.run_audit)
+        self.run_audit_button.grid(row=0, column=3, padx=8, pady=8, sticky="ew")
+        self.reload_checker_button = ctk.CTkButton(buttons, text="Reload", command=self.load_question_config)
+        self.reload_checker_button.grid(row=0, column=4, padx=8, pady=8, sticky="ew")
 
-        body = ctk.CTkFrame(self, corner_radius=8)
-        body.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
-        body.grid_columnconfigure((0, 1), weight=1)
-        body.grid_rowconfigure(1, weight=1)
+        self.tabview = ctk.CTkTabview(self, corner_radius=8)
+        self.tabview.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        for tab_name in ["Configure", "Test Results", "Audit", "Prompt / Response"]:
+            self.tabview.add(tab_name)
 
-        ctk.CTkLabel(body, text="Checker Config JSON", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=8, sticky="w")
-        ctk.CTkLabel(body, text="Available Checkers / Results", font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, padx=8, pady=8, sticky="w")
+        configure_tab = self.tabview.tab("Configure")
+        configure_tab.grid_columnconfigure((0, 1), weight=1)
+        configure_tab.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(
+            configure_tab,
+            text="Quick path: choose a question, click Suggest with LLM, review the config, then Save Checker.",
+            text_color="gray",
+        ).grid(row=0, column=0, columnspan=2, padx=8, pady=(8, 0), sticky="w")
+        ctk.CTkLabel(configure_tab, text="Checker Config JSON", font=ctk.CTkFont(weight="bold")).grid(row=1, column=0, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(configure_tab, text="Available Checker Templates", font=ctk.CTkFont(weight="bold")).grid(row=1, column=1, padx=8, pady=8, sticky="w")
+        self.config_textbox = ctk.CTkTextbox(configure_tab, wrap="word")
+        self.config_textbox.grid(row=2, column=0, padx=8, pady=8, sticky="nsew")
+        self.templates_textbox = ctk.CTkTextbox(configure_tab, wrap="word")
+        self.templates_textbox.grid(row=2, column=1, padx=8, pady=8, sticky="nsew")
 
-        self.config_textbox = ctk.CTkTextbox(body, wrap="word")
-        self.config_textbox.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+        test_tab = self.tabview.tab("Test Results")
+        test_tab.grid_columnconfigure(0, weight=1)
+        test_tab.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            test_tab,
+            text="Runs deterministic sanity checks before grading: exact output, prompted output, and clearly wrong output.",
+            text_color="gray",
+        ).grid(row=0, column=0, padx=8, pady=(8, 0), sticky="w")
+        self.test_textbox = ctk.CTkTextbox(test_tab, wrap="word")
+        self.test_textbox.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
 
-        self.results_textbox = ctk.CTkTextbox(body, wrap="word")
-        self.results_textbox.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
+        audit_tab = self.tabview.tab("Audit")
+        audit_tab.grid_columnconfigure(0, weight=1)
+        audit_tab.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(
+            audit_tab,
+            text="After grading, samples students across score/penalty/timeout buckets and asks the LLM to review the fields.",
+            text_color="gray",
+        ).grid(row=0, column=0, padx=8, pady=(8, 0), sticky="w")
+        self.audit_progress_label = ctk.CTkLabel(audit_tab, text="Audit not run yet", anchor="w")
+        self.audit_progress_label.grid(row=1, column=0, padx=8, pady=8, sticky="ew")
+        self.audit_textbox = ctk.CTkTextbox(audit_tab, wrap="word")
+        self.audit_textbox.grid(row=2, column=0, padx=8, pady=8, sticky="nsew")
+
+        raw_tab = self.tabview.tab("Prompt / Response")
+        raw_tab.grid_columnconfigure((0, 1), weight=1)
+        raw_tab.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(raw_tab, text="Last Prompt Sent", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(raw_tab, text="Last Raw Response / Payload", font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, padx=8, pady=8, sticky="w")
+        self.prompt_textbox = ctk.CTkTextbox(raw_tab, wrap="word")
+        self.prompt_textbox.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+        self.response_textbox = ctk.CTkTextbox(raw_tab, wrap="word")
+        self.response_textbox.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
 
         self.status_label = ctk.CTkLabel(self, text="Ready", anchor="w")
         self.status_label.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
@@ -1683,6 +1736,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             question = self.question_var.get()
             original_code, inputs, expected_outputs = self.collect_question_context(question)
             assignment_text = parse_assignment_file(self.assignment_path_var.get().strip() or None)
+            prompt = build_suggestion_prompt(question, original_code, inputs, expected_outputs, assignment_text)
+            self.after(0, lambda: self.show_prompt(prompt))
             provider = self.make_provider()
             suggestion = suggest_checker(question, original_code, inputs, expected_outputs, provider, assignment_text)
             self.after(0, lambda: self.apply_suggestion(suggestion))
@@ -1695,7 +1750,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             question = self.question_var.get()
             _, _inputs, expected_outputs = self.collect_question_context(question)
             rows = run_checker_tests(question_config, expected_outputs)
-            self.after(0, lambda: self.show_json_result({"test_rows": rows}))
+            self.after(0, lambda: self.show_test_rows(rows))
             self.after(0, lambda: self.set_status(f"Checker test finished: {len(rows)} rows"))
         except Exception as exc:
             self.after(0, lambda: self.show_error("Checker Test Failed", exc))
@@ -1704,9 +1759,20 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         try:
             provider = self.make_provider()
             assignment_text = parse_assignment_file(self.assignment_path_var.get().strip() or None)
-            cases = select_audit_cases(self.parent.gui_questions, max_cases=15)
+            cases = select_audit_cases(self.parent.gui_questions, max_cases=self.get_audit_size())
             checker_configs = self.checker_config.get("questions", {})
-            results = audit_cases_with_llm(cases, checker_configs, provider, assignment_text, max_workers=4)
+            if cases:
+                sample_prompt = build_audit_prompt(cases[0], checker_configs.get(cases[0].question, {}), assignment_text)
+                self.after(0, lambda: self.show_prompt(sample_prompt))
+                self.after(0, lambda: self.start_audit_display(cases))
+            results = audit_cases_with_llm(
+                cases,
+                checker_configs,
+                provider,
+                assignment_text,
+                max_workers=4,
+                progress_callback=lambda result, done, total: self.after(0, lambda: self.add_audit_result(result, done, total)),
+            )
             overall = self.audit_overall_status(results)
             payload = {
                 "overall": overall,
@@ -1732,6 +1798,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             return GeminiProvider(model=self.gemini_model_var.get().strip() or None)
         return FakeLLMProvider()
 
+    def get_audit_size(self):
+        try:
+            return max(1, min(50, int(self.audit_size_var.get().strip())))
+        except ValueError:
+            return 15
+
     def apply_suggestion(self, suggestion):
         if suggestion.status != "supported" or not suggestion.checker:
             self.show_json_result(suggestion.__dict__)
@@ -1742,13 +1814,45 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.config_textbox.insert("1.0", json.dumps(question_config, indent=2, sort_keys=True))
         self.show_json_result(suggestion.__dict__)
         self.set_status(f"Suggested {suggestion.checker}; click Save Checker to apply")
+        self.tabview.set("Configure")
 
     def show_available_checkers(self):
-        self.show_json_result({"available_checkers": available_checker_templates()})
+        self.templates_textbox.delete("1.0", tk.END)
+        self.templates_textbox.insert("1.0", json.dumps(available_checker_templates(), indent=2, ensure_ascii=False))
 
     def show_json_result(self, payload):
-        self.results_textbox.delete("1.0", tk.END)
-        self.results_textbox.insert("1.0", json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        self.response_textbox.delete("1.0", tk.END)
+        self.response_textbox.insert("1.0", json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+    def show_prompt(self, prompt):
+        self.prompt_textbox.delete("1.0", tk.END)
+        self.prompt_textbox.insert("1.0", prompt)
+
+    def show_test_rows(self, rows):
+        lines = ["variant | input | pass | reason | parsed expected -> parsed actual", "-" * 90]
+        for row in rows:
+            icon = "PASS" if row["passed"] else "FAIL"
+            lines.append(
+                f"{row['variant']} | {row['input']} | {icon} | {row['reason']} | "
+                f"{row['expected_canonical']} -> {row['actual_canonical']}"
+            )
+        self.test_textbox.delete("1.0", tk.END)
+        self.test_textbox.insert("1.0", "\n".join(lines))
+        self.show_json_result({"test_rows": rows})
+        self.tabview.set("Test Results")
+
+    def start_audit_display(self, cases):
+        self.audit_textbox.delete("1.0", tk.END)
+        self.audit_textbox.insert("1.0", "student | question | score | status | reason\n" + "-" * 90 + "\n")
+        self.audit_progress_label.configure(text=f"Queued {len(cases)} audit cases...")
+        self.tabview.set("Audit")
+
+    def add_audit_result(self, result, done, total):
+        self.audit_progress_label.configure(text=f"Reviewed {done}/{total} audit cases")
+        status = result.status.upper()
+        line = f"{result.student_id} | {result.question} | {status} | {result.risk} | {result.reason}\n"
+        self.audit_textbox.insert(tk.END, line)
+        self.audit_textbox.see(tk.END)
 
     def show_error(self, title, exc):
         self.set_status(f"{title}: {exc}")

@@ -201,6 +201,7 @@ def build_suggestion_prompt(
 ) -> str:
     payload = {
         "task": "suggest_checker",
+        "role": "You are configuring a deterministic C homework output checker. You do not grade students and you do not write code.",
         "question": question,
         "available_checkers": available_checker_templates(),
         "original_solution_c": original_code,
@@ -208,15 +209,27 @@ def build_suggestion_prompt(
         "expected_outputs": [{"input": value, "output": output} for value, output in expected_outputs],
         "assignment_text_optional": assignment_text,
         "instructions": (
-            "Select and configure one available checker, or return status no_supported_checker. "
-            "Do not invent code or unsupported options."
+            "Infer the intended answer and output format from the assignment text when present, the reference C code, "
+            "the test inputs, and the reference outputs. Select exactly one available checker template and only supported "
+            "configuration options. Prefer the simplest checker that validates the semantic answer while ignoring harmless "
+            "prompts/labels/spacing. Do not invent code, regular expressions, checker names, or unsupported options. "
+            "If no available checker can safely validate the task, return status no_supported_checker. When uncertain, "
+            "lower confidence and explain what manual review is needed."
         ),
+        "decision_guidance": {
+            "exact": "Use only when exact output format is required.",
+            "normalized_text": "Use for mostly textual answers where case/punctuation are irrelevant.",
+            "last_integer": "Use for tasks with one numeric answer at the end, such as factorial, sum, max, count, gcd, or lcm.",
+            "integer_list": "Use for sequences/lists like Fibonacci, primes, sorted arrays, or printed array values.",
+            "divisors": "Use only for divisor-list tasks.",
+            "reverse_integer": "Use only for reversing integer digits.",
+        },
         "response_schema": {
             "status": "supported | no_supported_checker",
             "checker": "checker name or null",
             "config": "object",
             "confidence": "0.0-1.0",
-            "reason": "short explanation",
+            "reason": "short explanation of why this checker is safe and what output it validates",
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -329,6 +342,7 @@ def audit_cases_with_llm(
     provider: LLMProvider,
     assignment_text: str = "",
     max_workers: int = 4,
+    progress_callback=None,
 ) -> list[AuditResult]:
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -336,31 +350,17 @@ def audit_cases_with_llm(
             executor.submit(_audit_one_case, case, checker_configs.get(case.question, {}), provider, assignment_text): case
             for case in cases
         }
+        total = len(futures)
         for future in as_completed(futures):
-            results.append(future.result())
+            result = future.result()
+            results.append(result)
+            if progress_callback:
+                progress_callback(result, len(results), total)
     return sorted(results, key=lambda item: (item.question, item.student_id))
 
 
 def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider, assignment_text: str) -> AuditResult:
-    prompt = json.dumps(
-        {
-            "task": "audit_score",
-            "student_id": case.student_id,
-            "question": case.question,
-            "assignment_text_optional": assignment_text,
-            "checker_config": checker_config,
-            "score": case.score,
-            "grade_text": case.grade_text[:12000],
-            "student_output": case.output_text[:12000],
-            "per_question_excel_fields": case.excel_fields,
-            "final_excel_fields": case.final_fields,
-            "instructions": "Return whether the deterministic score and Excel fields look correct.",
-            "response_schema": {"verdict": "looks_correct | flagged | uncertain", "risk": "low | medium | high", "reason": "text"},
-        },
-        ensure_ascii=False,
-        indent=2,
-        default=str,
-    )
+    prompt = build_audit_prompt(case, checker_config, assignment_text)
     try:
         response = provider.complete_json(prompt)
         verdict = str(response.get("verdict", "uncertain"))
@@ -373,6 +373,40 @@ def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider
         reason = str(exc)
         status = "error"
     return AuditResult(case.student_id, case.question, status, verdict, risk, reason)
+
+
+def build_audit_prompt(case: AuditCase, checker_config: dict, assignment_text: str = "") -> str:
+    return json.dumps(
+        {
+            "task": "audit_score",
+            "role": "You are auditing deterministic C homework grading results. You do not assign a new grade.",
+            "student_id": case.student_id,
+            "question": case.question,
+            "assignment_text_optional": assignment_text,
+            "checker_config": checker_config,
+            "assigned_score": case.score,
+            "grade_text": case.grade_text[:12000],
+            "student_output": case.output_text[:12000],
+            "per_question_excel_fields": case.excel_fields,
+            "final_excel_fields": case.final_fields,
+            "instructions": (
+                "Check whether the assigned score and Excel fields are consistent with the grade text, student output, "
+                "checker configuration, and assignment intent. Verify comments, penalties, compile-error flags, timeout "
+                "fields, wrong-input fields, and final weighted grade fields when present. Do not change the grade. "
+                "Return looks_correct only when the fields are internally consistent and the grading decision appears "
+                "reasonable. Return flagged for likely scoring/Excel mistakes. Return uncertain when more human review "
+                "is needed."
+            ),
+            "response_schema": {
+                "verdict": "looks_correct | flagged | uncertain",
+                "risk": "low | medium | high",
+                "reason": "specific reason grounded in the provided fields",
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
 
 
 def _read_excel_if_exists(path: str) -> pd.DataFrame:
