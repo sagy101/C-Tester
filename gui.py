@@ -5,6 +5,7 @@ import threading
 import sys
 import io
 import os
+import json
 import re # Import regex module
 import subprocess
 
@@ -20,8 +21,21 @@ from configuration import winrar_path as default_winrar_path # Import default Wi
 from configuration import validate_config
 import configuration
 from preprocess import preprocess_submissions
-from Process import run_tests
+from Process import run_tests, setup_visual_studio_environment, read_inputs_from_file, get_ground_truth
 from CreateExcel import create_excels
+from checker_assistant import (
+    DEFAULT_GEMINI_MODEL,
+    FakeLLMProvider,
+    GeminiProvider,
+    audit_cases_with_llm,
+    available_checker_templates,
+    list_gemini_models,
+    parse_assignment_file,
+    run_checker_tests,
+    select_audit_cases,
+    suggest_checker,
+)
+from semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config
 from clear_utils import (
     clear_grades,
     clear_output,
@@ -427,6 +441,20 @@ class App(ctk.CTk):
         )
         self.slim_checkbox.pack(side=tk.LEFT)
 
+        self.checker_manager_button = ctk.CTkButton(
+            self.grading_frame,
+            text="🧪 Checker Manager",
+            command=self.open_checker_manager,
+            height=36,
+            width=200,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6,
+            fg_color=COLORS["primary"],
+            hover_color=COLORS["hover"]
+        )
+        self.checker_manager_button.grid(row=3, column=0, padx=15, pady=(0, 15))
+
         # Section 3: Clear Actions
         self.clear_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.clear_frame.grid(row=0, column=3, padx=10, pady=10, sticky="nsew")
@@ -711,7 +739,7 @@ class App(ctk.CTk):
 
         # Store active buttons to disable during tasks
         self.active_buttons = [
-            self.browse_button, self.preprocess_button, self.run_button,
+            self.browse_button, self.preprocess_button, self.run_button, self.checker_manager_button,
             self.clear_grades_button, self.clear_output_button, self.clear_c_button,
             self.clear_excels_button, self.clear_build_button, self.clear_all_button
         ]
@@ -936,6 +964,7 @@ class App(ctk.CTk):
         self.preprocess_button.configure(command=lambda: self.run_task(self.task_preprocess_internal))
         # Section 2: Grading
         self.run_button.configure(command=lambda: self.run_task(self.task_run_grading_internal))
+        self.checker_manager_button.configure(command=self.open_checker_manager)
         # Section 3: Clear Actions
         self.clear_grades_button.configure(command=lambda: self.run_task(lambda: clear_grades(self.gui_questions)))
         self.clear_output_button.configure(command=lambda: self.run_task(lambda: clear_output(self.gui_questions)))
@@ -943,6 +972,9 @@ class App(ctk.CTk):
         self.clear_excels_button.configure(command=lambda: self.run_task(clear_excels))
         self.clear_build_button.configure(command=lambda: self.run_task(clear_build_files))
         self.clear_all_button.configure(command=lambda: self.run_task(lambda: clear_all(self.gui_questions)))
+
+    def open_checker_manager(self):
+        CheckerManagerWindow(self)
 
     def _add_config_row(self, question_name="", weight=""):
         """Adds a row of entry widgets and binds KeyRelease event."""
@@ -1497,6 +1529,244 @@ class App(ctk.CTk):
             self.gui_simple_naming = new_state
             configuration.use_simple_naming = new_state
             log(f"Simple naming mode {'enabled' if new_state else 'disabled'}. Files will be treated as {'hw[0-9].c' if new_state else 'hw[0-9]_q[0-9].c'}.", "info")
+
+
+class CheckerManagerWindow(ctk.CTkToplevel):
+    def __init__(self, parent: App):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("Checker Manager")
+        self.geometry("1100x780")
+        self.minsize(950, 650)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+
+        self.checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
+        self.assignment_path_var = tk.StringVar(value="")
+        self.provider_var = tk.StringVar(value="Fake/Offline")
+        self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+        self.gemini_model_values = [self.gemini_model_var.get(), "gemini-2.0-flash", "gemini-1.5-flash"]
+        self.question_var = tk.StringVar(value=parent.gui_questions[0] if parent.gui_questions else "Q1")
+
+        top = ctk.CTkFrame(self, corner_radius=8)
+        top.grid(row=0, column=0, padx=12, pady=12, sticky="ew")
+        top.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(top, text="Question:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.question_menu = ctk.CTkOptionMenu(
+            top,
+            values=parent.gui_questions or ["Q1"],
+            variable=self.question_var,
+            command=lambda _value: self.load_question_config(),
+        )
+        self.question_menu.grid(row=0, column=1, padx=8, pady=8, sticky="w")
+
+        ctk.CTkLabel(top, text="LLM Provider:").grid(row=0, column=2, padx=8, pady=8, sticky="w")
+        self.provider_menu = ctk.CTkOptionMenu(top, values=["Fake/Offline", "Gemini"], variable=self.provider_var)
+        self.provider_menu.grid(row=0, column=3, padx=8, pady=8, sticky="w")
+
+        ctk.CTkLabel(top, text="Gemini model:").grid(row=1, column=0, padx=8, pady=8, sticky="w")
+        self.gemini_model_menu = ctk.CTkOptionMenu(top, values=self.gemini_model_values, variable=self.gemini_model_var)
+        self.gemini_model_menu.grid(row=1, column=1, columnspan=2, padx=8, pady=8, sticky="ew")
+        ctk.CTkButton(top, text="Refresh Models", command=self.refresh_gemini_models).grid(row=1, column=3, padx=8, pady=8)
+
+        ctk.CTkLabel(top, text="Assignment file (optional):").grid(row=2, column=0, padx=8, pady=8, sticky="w")
+        self.assignment_entry = ctk.CTkEntry(top, textvariable=self.assignment_path_var)
+        self.assignment_entry.grid(row=2, column=1, columnspan=2, padx=8, pady=8, sticky="ew")
+        ctk.CTkButton(top, text="Browse", command=self.browse_assignment_file).grid(row=2, column=3, padx=8, pady=8)
+
+        buttons = ctk.CTkFrame(self, corner_radius=8)
+        buttons.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
+        for idx in range(5):
+            buttons.grid_columnconfigure(idx, weight=1)
+        ctk.CTkButton(buttons, text="Suggest with LLM", command=self.suggest_with_llm).grid(row=0, column=0, padx=8, pady=8, sticky="ew")
+        ctk.CTkButton(buttons, text="Test Checker", command=self.test_checker).grid(row=0, column=1, padx=8, pady=8, sticky="ew")
+        ctk.CTkButton(buttons, text="Save Checker", command=self.save_current_checker).grid(row=0, column=2, padx=8, pady=8, sticky="ew")
+        ctk.CTkButton(buttons, text="Run Audit", command=self.run_audit).grid(row=0, column=3, padx=8, pady=8, sticky="ew")
+        ctk.CTkButton(buttons, text="Reload", command=self.load_question_config).grid(row=0, column=4, padx=8, pady=8, sticky="ew")
+
+        body = ctk.CTkFrame(self, corner_radius=8)
+        body.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        body.grid_columnconfigure((0, 1), weight=1)
+        body.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(body, text="Checker Config JSON", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(body, text="Available Checkers / Results", font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, padx=8, pady=8, sticky="w")
+
+        self.config_textbox = ctk.CTkTextbox(body, wrap="word")
+        self.config_textbox.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+
+        self.results_textbox = ctk.CTkTextbox(body, wrap="word")
+        self.results_textbox.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
+
+        self.status_label = ctk.CTkLabel(self, text="Ready", anchor="w")
+        self.status_label.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
+
+        self.load_question_config()
+        self.show_available_checkers()
+
+    def browse_assignment_file(self):
+        path = filedialog.askopenfilename(
+            title="Select Assignment Description",
+            filetypes=(
+                ("Assignment files", "*.pdf *.docx *.txt *.md"),
+                ("All files", "*.*"),
+            ),
+        )
+        if path:
+            self.assignment_path_var.set(path)
+
+    def refresh_gemini_models(self):
+        self.set_status("Loading Gemini models from GOOGLE_API_KEY...")
+        threading.Thread(target=self._refresh_gemini_models_worker, daemon=True).start()
+
+    def _refresh_gemini_models_worker(self):
+        try:
+            models = list_gemini_models()
+            if not models:
+                raise RuntimeError("No generateContent-capable Gemini models returned for this key.")
+            self.after(0, lambda: self.apply_gemini_models(models))
+        except Exception as exc:
+            self.after(0, lambda: self.show_error("Gemini Model Load Failed", exc))
+
+    def apply_gemini_models(self, models):
+        current = self.gemini_model_var.get()
+        self.gemini_model_values = models
+        self.gemini_model_menu.configure(values=models)
+        if current in models:
+            self.gemini_model_var.set(current)
+        elif DEFAULT_GEMINI_MODEL in models:
+            self.gemini_model_var.set(DEFAULT_GEMINI_MODEL)
+        else:
+            flash_models = [model for model in models if "flash" in model.lower()]
+            self.gemini_model_var.set(flash_models[0] if flash_models else models[0])
+        self.set_status(f"Loaded {len(models)} Gemini models")
+
+    def load_question_config(self):
+        question = self.question_var.get()
+        question_config = self.checker_config.get("questions", {}).get(question, {"checker": "exact", "config": {}})
+        self.config_textbox.delete("1.0", tk.END)
+        self.config_textbox.insert("1.0", json.dumps(question_config, indent=2, sort_keys=True))
+        self.set_status(f"Loaded checker config for {question}")
+
+    def save_current_checker(self):
+        try:
+            question_config = json.loads(self.config_textbox.get("1.0", tk.END).strip())
+        except json.JSONDecodeError as exc:
+            messagebox.showerror("Invalid JSON", str(exc))
+            return
+        checker_name = question_config.get("checker")
+        if checker_name not in available_checker_templates():
+            messagebox.showerror("Unknown Checker", f"Checker '{checker_name}' is not available.")
+            return
+        question = self.question_var.get()
+        self.checker_config.setdefault("questions", {})[question] = question_config
+        save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+        self.set_status(f"Saved checker for {question}")
+        messagebox.showinfo("Checker Saved", f"Saved checker config for {question}.")
+
+    def suggest_with_llm(self):
+        self.run_background("Suggesting checker...", self._suggest_with_llm_worker)
+
+    def test_checker(self):
+        self.run_background("Testing checker...", self._test_checker_worker)
+
+    def run_audit(self):
+        self.run_background("Running sampled LLM audit...", self._run_audit_worker)
+
+    def run_background(self, status, worker):
+        self.set_status(status)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _suggest_with_llm_worker(self):
+        try:
+            question = self.question_var.get()
+            original_code, inputs, expected_outputs = self.collect_question_context(question)
+            assignment_text = parse_assignment_file(self.assignment_path_var.get().strip() or None)
+            provider = self.make_provider()
+            suggestion = suggest_checker(question, original_code, inputs, expected_outputs, provider, assignment_text)
+            self.after(0, lambda: self.apply_suggestion(suggestion))
+        except Exception as exc:
+            self.after(0, lambda: self.show_error("Checker Suggestion Failed", exc))
+
+    def _test_checker_worker(self):
+        try:
+            question_config = json.loads(self.config_textbox.get("1.0", tk.END).strip())
+            question = self.question_var.get()
+            _, _inputs, expected_outputs = self.collect_question_context(question)
+            rows = run_checker_tests(question_config, expected_outputs)
+            self.after(0, lambda: self.show_json_result({"test_rows": rows}))
+            self.after(0, lambda: self.set_status(f"Checker test finished: {len(rows)} rows"))
+        except Exception as exc:
+            self.after(0, lambda: self.show_error("Checker Test Failed", exc))
+
+    def _run_audit_worker(self):
+        try:
+            provider = self.make_provider()
+            assignment_text = parse_assignment_file(self.assignment_path_var.get().strip() or None)
+            cases = select_audit_cases(self.parent.gui_questions, max_cases=15)
+            checker_configs = self.checker_config.get("questions", {})
+            results = audit_cases_with_llm(cases, checker_configs, provider, assignment_text, max_workers=4)
+            overall = self.audit_overall_status(results)
+            payload = {
+                "overall": overall,
+                "reviewed": len(results),
+                "results": [result.__dict__ for result in results],
+            }
+            self.after(0, lambda: self.show_json_result(payload))
+            self.after(0, lambda: self.set_status(f"Audit finished: {overall}"))
+        except Exception as exc:
+            self.after(0, lambda: self.show_error("Audit Failed", exc))
+
+    def collect_question_context(self, question):
+        original_path = os.path.join(question, "original_sol.c")
+        with open(original_path, "r", encoding="utf-8", errors="ignore") as original_file:
+            original_code = original_file.read()
+        inputs = read_inputs_from_file(question)[:8]
+        setup_visual_studio_environment()
+        expected_outputs = get_ground_truth(question, inputs)
+        return original_code, inputs, expected_outputs
+
+    def make_provider(self):
+        if self.provider_var.get() == "Gemini":
+            return GeminiProvider(model=self.gemini_model_var.get().strip() or None)
+        return FakeLLMProvider()
+
+    def apply_suggestion(self, suggestion):
+        if suggestion.status != "supported" or not suggestion.checker:
+            self.show_json_result(suggestion.__dict__)
+            self.set_status("LLM did not find a supported checker")
+            return
+        question_config = {"checker": suggestion.checker, "config": suggestion.config}
+        self.config_textbox.delete("1.0", tk.END)
+        self.config_textbox.insert("1.0", json.dumps(question_config, indent=2, sort_keys=True))
+        self.show_json_result(suggestion.__dict__)
+        self.set_status(f"Suggested {suggestion.checker}; click Save Checker to apply")
+
+    def show_available_checkers(self):
+        self.show_json_result({"available_checkers": available_checker_templates()})
+
+    def show_json_result(self, payload):
+        self.results_textbox.delete("1.0", tk.END)
+        self.results_textbox.insert("1.0", json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+    def show_error(self, title, exc):
+        self.set_status(f"{title}: {exc}")
+        messagebox.showerror(title, str(exc))
+
+    def set_status(self, message):
+        self.status_label.configure(text=message)
+
+    @staticmethod
+    def audit_overall_status(results):
+        if not results:
+            return "yellow: no audit cases found"
+        if any(result.status == "flagged" for result in results):
+            return "red: one or more reviews flagged"
+        if any(result.status == "error" for result in results):
+            return "yellow: one or more reviews errored"
+        return "green: all sampled reviews passed"
+
 
 if __name__ == "__main__":
     app = App()
