@@ -1624,13 +1624,19 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.question_menu.grid(row=0, column=1, padx=8, pady=8, sticky="w")
 
         ctk.CTkLabel(top, text="LLM Provider:").grid(row=0, column=2, padx=8, pady=8, sticky="w")
-        self.provider_menu = ctk.CTkOptionMenu(top, values=["Fake/Offline", "Gemini"], variable=self.provider_var)
+        self.provider_menu = ctk.CTkOptionMenu(
+            top,
+            values=["Fake/Offline", "Gemini"],
+            variable=self.provider_var,
+            command=lambda _value: self.update_gemini_key_status(),
+        )
         self.provider_menu.grid(row=0, column=3, padx=8, pady=8, sticky="w")
 
         ctk.CTkLabel(top, text="Gemini model:").grid(row=1, column=0, padx=8, pady=8, sticky="w")
         self.gemini_model_menu = ctk.CTkOptionMenu(top, values=self.gemini_model_values, variable=self.gemini_model_var)
         self.gemini_model_menu.grid(row=1, column=1, columnspan=2, padx=8, pady=8, sticky="ew")
-        ctk.CTkButton(top, text="Refresh Models", command=self.refresh_gemini_models).grid(row=1, column=3, padx=8, pady=8)
+        self.refresh_models_button = ctk.CTkButton(top, text="Refresh Models", command=self.refresh_gemini_models)
+        self.refresh_models_button.grid(row=1, column=3, padx=8, pady=8)
 
         ctk.CTkLabel(top, text="Assignment file (optional):").grid(row=2, column=0, padx=8, pady=8, sticky="w")
         self.assignment_entry = ctk.CTkEntry(top, textvariable=self.assignment_path_var)
@@ -1641,6 +1647,16 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.audit_size_entry = ctk.CTkEntry(top, textvariable=self.audit_size_var, width=80)
         self.audit_size_entry.grid(row=3, column=1, padx=8, pady=8, sticky="w")
         ctk.CTkLabel(top, text="Tip: use 3-5 for a cheap smoke audit, 10-15 for a stronger review.", text_color="gray").grid(row=3, column=2, columnspan=2, padx=8, pady=8, sticky="w")
+
+        self.gemini_key_status_label = ctk.CTkLabel(top, text="", anchor="w", justify="left")
+        self.gemini_key_status_label.grid(row=4, column=0, columnspan=3, padx=8, pady=(0, 8), sticky="ew")
+        self.copy_gemini_setup_button = ctk.CTkButton(
+            top,
+            text="Copy Setup Command",
+            command=self.copy_gemini_setup_command,
+            width=160,
+        )
+        self.copy_gemini_setup_button.grid(row=4, column=3, padx=8, pady=(0, 8), sticky="e")
 
         buttons = ctk.CTkFrame(self, corner_radius=8)
         buttons.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
@@ -1734,6 +1750,47 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
         self.load_question_config()
         self.show_available_checkers()
+        self.update_gemini_key_status()
+
+    @staticmethod
+    def gemini_setup_command():
+        return "[Environment]::SetEnvironmentVariable('GOOGLE_API_KEY', 'your_api_key_here', 'User')"
+
+    @staticmethod
+    def has_gemini_api_key():
+        return bool(os.getenv("GOOGLE_API_KEY"))
+
+    def update_gemini_key_status(self):
+        has_key = self.has_gemini_api_key()
+        using_gemini = self.provider_var.get() == "Gemini"
+        if has_key:
+            self.gemini_key_status_label.configure(
+                text="Gemini key detected in GOOGLE_API_KEY. Refresh Models to load models available for this key.",
+                text_color=COLORS["secondary"],
+            )
+            self.copy_gemini_setup_button.configure(state="disabled")
+            self.refresh_models_button.configure(state="normal")
+            self.gemini_model_menu.configure(state="normal")
+        else:
+            self.gemini_key_status_label.configure(
+                text=(
+                    "Gemini key is not configured. In PowerShell run: "
+                    f"{self.gemini_setup_command()} then restart the GUI."
+                ),
+                text_color=COLORS["warning"],
+            )
+            self.copy_gemini_setup_button.configure(state="normal")
+            self.refresh_models_button.configure(state="disabled")
+            self.gemini_model_menu.configure(state="disabled")
+
+        llm_action_state = "disabled" if using_gemini and not has_key else "normal"
+        self.suggest_checker_button.configure(state=llm_action_state)
+        self.run_audit_button.configure(state=llm_action_state)
+
+    def copy_gemini_setup_command(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.gemini_setup_command())
+        self.set_status("Copied GOOGLE_API_KEY setup command. Replace your_api_key_here, run it in PowerShell, then restart the GUI.")
 
     def browse_assignment_file(self):
         path = filedialog.askopenfilename(
@@ -1747,6 +1804,9 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.assignment_path_var.set(path)
 
     def refresh_gemini_models(self):
+        if not self.has_gemini_api_key():
+            self.show_gemini_key_missing()
+            return
         self.set_status("Loading Gemini models from GOOGLE_API_KEY...")
         threading.Thread(target=self._refresh_gemini_models_worker, daemon=True).start()
 
@@ -1872,8 +1932,23 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
     def make_provider(self):
         if self.provider_var.get() == "Gemini":
+            if not self.has_gemini_api_key():
+                raise ValueError(self.gemini_key_missing_message())
             return GeminiProvider(model=self.gemini_model_var.get().strip() or None)
         return FakeLLMProvider()
+
+    def gemini_key_missing_message(self):
+        return (
+            "GOOGLE_API_KEY is not set.\n\n"
+            "In PowerShell, run:\n"
+            f"{self.gemini_setup_command()}\n\n"
+            "Replace your_api_key_here with the real key, then restart the GUI so Python can read it."
+        )
+
+    def show_gemini_key_missing(self):
+        self.update_gemini_key_status()
+        messagebox.showinfo("Gemini Key Not Configured", self.gemini_key_missing_message())
+        self.set_status("Gemini key missing. Setup command is shown in the Checker Manager.")
 
     def get_audit_size(self):
         try:
