@@ -1,13 +1,95 @@
-import customtkinter as ctk
+import importlib.util
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox
+
+REQUIRED_IMPORTS = {
+    "colorama": "colorama",
+    "customtkinter": "customtkinter",
+    "dateutil": "python-dateutil",
+    "docx": "python-docx",
+    "et_xmlfile": "et_xmlfile",
+    "fitz": "pymupdf",
+    "lxml": "lxml",
+    "numpy": "numpy",
+    "openpyxl": "openpyxl",
+    "pandas": "pandas",
+    "pypdf": "pypdf",
+    "pytz": "pytz",
+    "rarfile": "rarfile",
+    "six": "six",
+    "tqdm": "tqdm",
+    "tzdata": "tzdata",
+    "xlsxwriter": "XlsxWriter",
+}
+
+
+def missing_required_packages():
+    return [
+        package_name
+        for import_name, package_name in REQUIRED_IMPORTS.items()
+        if importlib.util.find_spec(import_name) is None
+    ]
+
+
+def show_requirements_error(missing_packages):
+    install_command = f'"{sys.executable}" -m pip install -r requirements.txt'
+    root = tk.Tk()
+    root.title("Missing Python Requirements")
+    root.geometry("720x360")
+    root.minsize(620, 300)
+    root.grid_columnconfigure(0, weight=1)
+    root.grid_rowconfigure(2, weight=1)
+
+    tk.Label(
+        root,
+        text="Some Python packages required by the grader are missing.",
+        font=("Segoe UI", 13, "bold"),
+        anchor="w",
+    ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
+    tk.Label(
+        root,
+        text="Install them for this Python interpreter, then restart the GUI.",
+        anchor="w",
+    ).grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+
+    details = tk.Text(root, wrap="word", height=8)
+    details.grid(row=2, column=0, padx=16, pady=8, sticky="nsew")
+    details.insert(
+        "1.0",
+        "Missing packages:\n"
+        + "\n".join(f"- {package}" for package in sorted(set(missing_packages)))
+        + "\n\nRun this command from the project folder:\n"
+        + install_command,
+    )
+    details.configure(state="disabled")
+
+    button_frame = tk.Frame(root)
+    button_frame.grid(row=3, column=0, padx=16, pady=(8, 16), sticky="e")
+
+    def copy_command():
+        root.clipboard_clear()
+        root.clipboard_append(install_command)
+
+    tk.Button(button_frame, text="Copy Install Command", command=copy_command).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Button(button_frame, text="Close", command=root.destroy).pack(side=tk.LEFT)
+    root.mainloop()
+
+
+missing_packages = missing_required_packages()
+if missing_packages:
+    show_requirements_error(missing_packages)
+    sys.exit(1)
+
+
+import customtkinter as ctk
 import threading
-import sys
 import io
 import os
 import json
 import re # Import regex module
-import subprocess
+import time
 
 # Import backend functions & default config
 # Import defaults from configuration.py now
@@ -1673,7 +1755,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
         self.checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
         self.assignment_path_var = tk.StringVar(value="")
@@ -1757,8 +1839,21 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             wraplength=950,
         ).grid(row=1, column=0, columnspan=5, padx=8, pady=(0, 8), sticky="ew")
 
+        activity_frame = ctk.CTkFrame(self, corner_radius=8)
+        activity_frame.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
+        activity_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(activity_frame, text="LLM activity:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.llm_activity_label = ctk.CTkLabel(activity_frame, text="Idle", anchor="w")
+        self.llm_activity_label.grid(row=0, column=1, padx=8, pady=8, sticky="ew")
+        self.llm_activity_progress = ctk.CTkProgressBar(activity_frame, mode="indeterminate", height=8)
+        self.llm_activity_progress.grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+        self.llm_activity_progress.set(0)
+        self.llm_activity_running = False
+        self.llm_activity_started_at = None
+        self.llm_activity_step = "Idle"
+
         self.tabview = ctk.CTkTabview(self, corner_radius=8)
-        self.tabview.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self.tabview.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
         for tab_name in ["Configure", "Test Results", "Audit", "Prompt / Response"]:
             self.tabview.add(tab_name)
 
@@ -1832,7 +1927,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.response_textbox.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
 
         self.status_label = ctk.CTkLabel(self, text="Ready", anchor="w")
-        self.status_label.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self.status_label.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
 
         self.load_question_config()
         self.show_available_checkers()
@@ -1914,7 +2009,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 raise RuntimeError("No generateContent-capable Gemini models returned for this key.")
             self.after(0, lambda: self.apply_gemini_models(models))
         except Exception as exc:
-            self.after(0, lambda: self.show_error("Gemini Model Load Failed", exc))
+            self.after(0, lambda captured_exc=exc: self.show_error("Gemini Model Load Failed", captured_exc))
 
     def apply_gemini_models(self, models):
         current = self.gemini_model_var.get()
@@ -1953,24 +2048,65 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         messagebox.showinfo("Checker Saved", f"Saved checker config for {question}.")
 
     def suggest_with_llm(self):
-        self.run_background("Suggesting checker...", self._suggest_with_llm_worker)
+        self.run_background("Suggesting checker...", self._suggest_with_llm_worker, "Preparing LLM suggestion")
 
     def test_checker(self):
         self.run_background("Testing checker...", self._test_checker_worker)
 
     def run_audit(self):
-        self.run_background("Running sampled LLM audit...", self._run_audit_worker)
+        self.run_background("Running sampled LLM audit...", self._run_audit_worker, "Preparing LLM audit")
 
-    def run_background(self, status, worker):
+    def run_background(self, status, worker, activity_message=None):
         self.set_status(status)
-        threading.Thread(target=worker, daemon=True).start()
+        if activity_message:
+            self.start_llm_activity(activity_message)
+
+        def runner():
+            try:
+                worker()
+            finally:
+                if activity_message:
+                    self.after(0, self.stop_llm_activity)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def start_llm_activity(self, message):
+        self.llm_activity_running = True
+        self.llm_activity_started_at = time.monotonic()
+        self.llm_activity_step = message
+        self.llm_activity_progress.start()
+        self.update_llm_activity_label()
+
+    def set_llm_activity_step(self, message):
+        self.llm_activity_step = message
+        self.update_llm_activity_label()
+
+    def update_llm_activity_label(self):
+        if not self.llm_activity_running:
+            return
+        elapsed = int(time.monotonic() - self.llm_activity_started_at)
+        self.llm_activity_label.configure(text=f"{self.llm_activity_step}... {elapsed}s elapsed")
+        self.after(500, self.update_llm_activity_label)
+
+    def stop_llm_activity(self):
+        if not self.llm_activity_running:
+            return
+        elapsed = int(time.monotonic() - self.llm_activity_started_at)
+        self.llm_activity_running = False
+        self.llm_activity_progress.stop()
+        self.llm_activity_progress.set(0)
+        self.llm_activity_label.configure(text=f"Done in {elapsed}s")
 
     def _suggest_with_llm_worker(self):
         try:
             question = self.question_var.get()
+            self.after(0, lambda: self.set_llm_activity_step("Compiling reference solution and collecting examples"))
             original_code, inputs, expected_outputs = self.collect_question_context(question)
+            self.after(0, lambda: self.set_llm_activity_step("Parsing assignment PDF/DOCX text and images"))
             assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
             focused_context = assignment_context_for_question(assignment_context, question)
+            image_count = len(focused_context.images)
+            self.after(0, lambda: self.set_llm_activity_step(f"Building prompt with {image_count} assignment image(s)"))
             prompt = build_suggestion_prompt(
                 question,
                 original_code,
@@ -1981,6 +2117,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             )
             self.after(0, lambda: self.show_prompt(prompt))
             provider = self.make_provider()
+            self.after(0, lambda: self.set_llm_activity_step("Waiting for Gemini checker suggestion"))
             suggestion = suggest_checker(
                 question,
                 original_code,
@@ -1992,7 +2129,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             )
             self.after(0, lambda: self.apply_suggestion(suggestion))
         except Exception as exc:
-            self.after(0, lambda: self.show_error("Checker Suggestion Failed", exc))
+            self.after(0, lambda captured_exc=exc: self.show_error("Checker Suggestion Failed", captured_exc))
 
     def _test_checker_worker(self):
         try:
@@ -2003,12 +2140,14 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.after(0, lambda: self.show_test_rows(rows))
             self.after(0, lambda: self.set_status(f"Checker test finished: {len(rows)} rows"))
         except Exception as exc:
-            self.after(0, lambda: self.show_error("Checker Test Failed", exc))
+            self.after(0, lambda captured_exc=exc: self.show_error("Checker Test Failed", captured_exc))
 
     def _run_audit_worker(self):
         try:
             provider = self.make_provider()
+            self.after(0, lambda: self.set_llm_activity_step("Parsing assignment context for audit"))
             assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
+            self.after(0, lambda: self.set_llm_activity_step("Selecting representative graded students"))
             cases = select_audit_cases(self.parent.gui_questions, max_cases=self.get_audit_size())
             checker_configs = self.checker_config.get("questions", {})
             if cases:
@@ -2021,6 +2160,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 )
                 self.after(0, lambda: self.show_prompt(sample_prompt))
                 self.after(0, lambda: self.start_audit_display(cases))
+            self.after(0, lambda: self.set_llm_activity_step(f"Waiting for Gemini audit reviews ({len(cases)} call(s))"))
             results = audit_cases_with_llm(
                 cases,
                 checker_configs,
@@ -2038,7 +2178,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.after(0, lambda: self.show_json_result(payload))
             self.after(0, lambda: self.set_status(f"Audit finished: {overall}"))
         except Exception as exc:
-            self.after(0, lambda: self.show_error("Audit Failed", exc))
+            self.after(0, lambda captured_exc=exc: self.show_error("Audit Failed", captured_exc))
 
     def collect_question_context(self, question):
         original_path = os.path.join(question, "original_sol.c")
