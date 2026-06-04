@@ -3,6 +3,9 @@ et_xmlfile
 numpy
 openpyxl
 pandas
+pymupdf
+pypdf
+python-docx
 python-dateutil
 pytz
 rarfile

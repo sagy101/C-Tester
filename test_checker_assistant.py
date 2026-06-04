@@ -2,9 +2,34 @@ import os
 import tempfile
 import unittest
 
-from checker_assistant import FakeLLMProvider, audit_cases_with_llm, run_checker_tests, suggest_checker
+from checker_assistant import (
+    AssignmentContext,
+    AssignmentImage,
+    FakeLLMProvider,
+    assignment_context_for_question,
+    audit_cases_with_llm,
+    run_checker_tests,
+    suggest_checker,
+)
 from checker_assistant import AuditCase
 from semantic_grading import load_checker_config, save_checker_config
+
+
+class RecordingProvider:
+    def __init__(self):
+        self.prompt = ""
+        self.images = []
+
+    def complete_json(self, prompt, images=None):
+        self.prompt = prompt
+        self.images = list(images or [])
+        return {
+            "status": "supported",
+            "checker": "last_integer",
+            "config": {"answer_position": "last_integer"},
+            "confidence": 0.8,
+            "reason": "recorded",
+        }
 
 
 class TestCheckerAssistant(unittest.TestCase):
@@ -65,6 +90,39 @@ class TestCheckerAssistant(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, "passed")
+
+    def test_assignment_context_focuses_selected_question(self):
+        context = AssignmentContext(
+            text="Intro\nQuestion 1\nPrint divisors.\nQuestion 2\nReverse a number.",
+            images=(
+                AssignmentImage("page 1", "image/png", b"one", text="Question 1\nPrint divisors."),
+                AssignmentImage("page 2", "image/png", b"two", text="Question 2\nReverse a number."),
+            ),
+        )
+
+        focused = assignment_context_for_question(context, "Q2")
+
+        self.assertIn("Question 2", focused.text)
+        self.assertNotIn("Question 1", focused.text)
+        self.assertEqual([image.label for image in focused.images], ["page 2"])
+
+    def test_suggest_checker_passes_assignment_images_to_provider(self):
+        provider = RecordingProvider()
+        image = AssignmentImage("page 1", "image/png", b"image-bytes", text="Question 1")
+
+        suggestion = suggest_checker(
+            "Q1",
+            "int main(){ printf(\"42\"); }",
+            ["1"],
+            [("1", "42")],
+            provider,
+            assignment_text="Question 1\nPrint a number.",
+            assignment_images=[image],
+        )
+
+        self.assertEqual(suggestion.checker, "last_integer")
+        self.assertEqual(provider.images, [image])
+        self.assertIn("target_question_number", provider.prompt)
 
 
 if __name__ == "__main__":
