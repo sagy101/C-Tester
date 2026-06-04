@@ -1099,7 +1099,12 @@ class App(ctk.CTk):
         self.clear_all_button.configure(command=lambda: self.run_task(lambda: clear_all(self.gui_questions)))
 
     def open_checker_manager(self):
-        CheckerManagerWindow(self)
+        existing_window = getattr(self, "checker_manager_window", None)
+        if existing_window is not None and existing_window.winfo_exists():
+            existing_window.show_on_top()
+            return
+        self.checker_manager_window = CheckerManagerWindow(self)
+        self.checker_manager_window.show_on_top()
 
     def _add_config_row(self, question_name="", weight=""):
         """Adds a row of entry widgets and binds KeyRelease event."""
@@ -1663,6 +1668,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.title("Checker Manager")
         self.geometry("1100x780")
         self.minsize(950, 650)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
 
@@ -1815,6 +1822,17 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.load_question_config()
         self.show_available_checkers()
         self.update_gemini_key_status()
+
+    def show_on_top(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.attributes("-topmost", True)
+        self.after(250, lambda: self.attributes("-topmost", False))
+
+    def close_window(self):
+        self.parent.checker_manager_window = None
+        self.destroy()
 
     @staticmethod
     def gemini_setup_command():
