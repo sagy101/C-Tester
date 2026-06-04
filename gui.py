@@ -457,6 +457,31 @@ class App(ctk.CTk):
         )
         self.checker_manager_button.grid(row=3, column=0, padx=15, pady=(0, 15))
 
+        self.open_excel_button = ctk.CTkButton(
+            self.grading_frame,
+            text="📄 Open Final Excel",
+            command=self.open_final_excel,
+            height=32,
+            width=200,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6,
+            state="disabled"
+        )
+        self.open_excel_button.grid(row=4, column=0, padx=15, pady=(0, 8))
+
+        self.open_folder_button = ctk.CTkButton(
+            self.grading_frame,
+            text="📂 Open Output Folder",
+            command=self.open_output_folder,
+            height=32,
+            width=200,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6
+        )
+        self.open_folder_button.grid(row=5, column=0, padx=15, pady=(0, 15))
+
         # Section 3: Clear Actions
         self.clear_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.clear_frame.grid(row=0, column=3, padx=10, pady=10, sticky="nsew")
@@ -742,6 +767,7 @@ class App(ctk.CTk):
         # Store active buttons to disable during tasks
         self.active_buttons = [
             self.browse_button, self.preprocess_button, self.run_button, self.checker_manager_button,
+            self.open_excel_button, self.open_folder_button,
             self.clear_grades_button, self.clear_output_button, self.clear_c_button,
             self.clear_excels_button, self.clear_build_button, self.clear_all_button
         ]
@@ -793,10 +819,38 @@ class App(ctk.CTk):
         """Enable or disable all control buttons."""
         for button in self.active_buttons:
             button.configure(state=state)
+        if state == "normal":
+            self.update_excel_button_state()
         # Special handling for entry?
         # self.zip_entry.configure(state=state)
         # Enable/disable cancel button based on task running
         self.cancel_button.configure(state="normal" if state == "disabled" else "disabled")
+
+    def update_excel_button_state(self):
+        state = "normal" if os.path.exists("final_grades.xlsx") else "disabled"
+        self.open_excel_button.configure(state=state)
+
+    def open_final_excel(self):
+        excel_path = os.path.abspath("final_grades.xlsx")
+        if not os.path.exists(excel_path):
+            messagebox.showwarning("Excel Not Found", "final_grades.xlsx does not exist yet. Run grading first.")
+            self.update_excel_button_state()
+            return
+        self.open_path(excel_path)
+
+    def open_output_folder(self):
+        self.open_path(os.path.abspath("."))
+
+    def open_path(self, path):
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            messagebox.showerror("Open Failed", f"Could not open:\n{path}\n\n{exc}")
 
     def update_progress(self, current_step, total_steps, description="Processing..."):
         """Callback function to update the progress bar and description label."""
@@ -955,8 +1009,13 @@ class App(ctk.CTk):
              # Pass the per_error_penalty parameter
              create_excels(self.gui_questions, self.gui_weights, self.gui_penalty, slim=slim_mode, per_error_penalty=per_error_penalty_mode)
              log("Excel creation finished.", level="info")
+             self.after(10, self.update_excel_button_state)
         else:
              log("Skipping Excel creation due to cancellation.", "warning")
+
+    def task_clear_excels_internal(self):
+        clear_excels()
+        self.after(10, self.update_excel_button_state)
 
     # Update button commands to pass CURRENT GUI config where needed
     def setup_button_commands(self):
@@ -971,7 +1030,7 @@ class App(ctk.CTk):
         self.clear_grades_button.configure(command=lambda: self.run_task(lambda: clear_grades(self.gui_questions)))
         self.clear_output_button.configure(command=lambda: self.run_task(lambda: clear_output(self.gui_questions)))
         self.clear_c_button.configure(command=lambda: self.run_task(lambda: clear_c_files(self.gui_questions)))
-        self.clear_excels_button.configure(command=lambda: self.run_task(clear_excels))
+        self.clear_excels_button.configure(command=lambda: self.run_task(self.task_clear_excels_internal))
         self.clear_build_button.configure(command=lambda: self.run_task(clear_build_files))
         self.clear_all_button.configure(command=lambda: self.run_task(lambda: clear_all(self.gui_questions)))
 
@@ -1639,6 +1698,22 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         ).grid(row=0, column=0, padx=8, pady=(8, 0), sticky="w")
         self.audit_progress_label = ctk.CTkLabel(audit_tab, text="Audit not run yet", anchor="w")
         self.audit_progress_label.grid(row=1, column=0, padx=8, pady=8, sticky="ew")
+        audit_actions = ctk.CTkFrame(audit_tab, fg_color="transparent")
+        audit_actions.grid(row=1, column=0, padx=8, pady=8, sticky="e")
+        self.audit_open_excel_button = ctk.CTkButton(
+            audit_actions,
+            text="Open Final Excel",
+            width=140,
+            command=self.parent.open_final_excel,
+            state="normal" if os.path.exists("final_grades.xlsx") else "disabled",
+        )
+        self.audit_open_excel_button.pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(
+            audit_actions,
+            text="Open Folder",
+            width=120,
+            command=self.parent.open_output_folder,
+        ).pack(side=tk.LEFT)
         self.audit_table_frame = ctk.CTkScrollableFrame(audit_tab, corner_radius=6)
         self.audit_table_frame.grid(row=2, column=0, padx=8, pady=8, sticky="nsew")
         self.audit_table_frame.grid_columnconfigure(4, weight=1)
@@ -1846,6 +1921,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
     def start_audit_display(self, cases):
         self.clear_audit_table()
         self.add_audit_header()
+        self.audit_open_excel_button.configure(state="normal" if os.path.exists("final_grades.xlsx") else "disabled")
         self.audit_progress_label.configure(text=f"Queued {len(cases)} audit cases...")
         self.tabview.set("Audit")
 
