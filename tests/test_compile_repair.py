@@ -37,6 +37,33 @@ class NeverCompilesProvider:
         }
 
 
+class TooBadThenMainFixProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def complete_json(self, prompt, images=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "status": "too_bad",
+                "too_bad": True,
+                "fixed_code": "",
+                "compile_issue": "entry point is missing",
+                "fix_reason": TOO_BAD_EXCEL_NOTE,
+                "changes_made": "",
+                "risk_note": "unsafe",
+            }
+        return {
+            "status": "fixed_candidate",
+            "too_bad": False,
+            "fixed_code": "int main(){ return 0; }\n",
+            "compile_issue": "The entry point was named incorrectly.",
+            "fix_reason": "renamed the entry point to main without changing program logic.",
+            "changes_made": "renamed entry point",
+            "risk_note": "",
+        }
+
+
 class TestCompileRepair(unittest.TestCase):
     def test_prompt_excludes_student_and_question_metadata(self):
         attempt = CompileRepairAttempt(
@@ -60,6 +87,16 @@ class TestCompileRepair(unittest.TestCase):
         self.assertNotIn("question", prompt.lower())
         self.assertNotIn("reference", prompt.lower())
         self.assertNotIn("expected_outputs", prompt)
+
+    def test_prompt_defines_too_bad_with_good_and_bad_examples(self):
+        prompt = build_compile_fix_prompt("int main1(){return 0;}", "unresolved external symbol main", [])
+
+        self.assertIn("decision_rubric", prompt)
+        self.assertIn("wrong entry-point", prompt)
+        self.assertIn("missing standard include", prompt)
+        self.assertIn("changing = to ==", prompt)
+        self.assertIn("divisor/reverse-number logic", prompt)
+        self.assertIn("self_check_before_too_bad", prompt)
 
     def test_fake_provider_fix_compiles_on_first_attempt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -103,36 +140,37 @@ class TestCompileRepair(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "too_bad")
-            self.assertEqual(result.attempts, 1)
+            self.assertEqual(result.attempts, 3)
             self.assertEqual(result.repair_note, TOO_BAD_EXCEL_NOTE)
             self.assertEqual(result.attempts_history, ())
 
-    def test_missing_semicolon_too_bad_uses_safe_compile_candidate(self):
+    def test_clear_compile_only_too_bad_retries_llm_before_giving_up(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = os.path.join(temp_dir, "123.c")
             with open(source_path, "w", encoding="utf-8") as source_file:
-                source_file.write("int main(){\nreturn 0\n}\n")
+                source_file.write("int main1(){ return 0; }\n")
+            provider = TooBadThenMainFixProvider()
 
             def compile_func(path):
                 with open(path, encoding="utf-8") as candidate_file:
                     text = candidate_file.read()
-                if "return 0;" in text:
+                if "int main()" in text:
                     return path.replace(".c", ".exe"), None
-                return None, "123.c(3): error C2143: syntax error: missing ';' before '}'"
+                return None, "error LNK2019: unresolved external symbol main"
 
             result = repair_compilation_failure(
                 source_path,
-                "123.c(3): error C2143: syntax error: missing ';' before '}'",
-                AlwaysBadProvider(),
+                "error LNK2019: unresolved external symbol main",
+                provider,
                 compile_func,
                 max_attempts=3,
                 repair_penalty=15,
             )
 
+            self.assertEqual(provider.calls, 2)
             self.assertEqual(result.status, "fixed")
             self.assertEqual(result.repair_penalty, 15)
-            self.assertIn("missing semicolon", result.repair_note)
-            self.assertEqual(len(result.attempts_history), 1)
+            self.assertIn("entry point", result.repair_note)
 
     def test_retry_loop_caps_at_max_attempts(self):
         with tempfile.TemporaryDirectory() as temp_dir:

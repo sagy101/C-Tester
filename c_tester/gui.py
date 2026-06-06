@@ -24,6 +24,10 @@ REQUIRED_IMPORTS = {
     "xlsxwriter": "XlsxWriter",
 }
 
+UI_FONT_FAMILY = "Segoe UI"
+REVIEW_TREE_STYLE = "Review.Treeview"
+REVIEW_TREE_HEADING_STYLE = f"{REVIEW_TREE_STYLE}.Heading"
+
 
 def missing_required_packages():
     return [
@@ -45,7 +49,7 @@ def show_requirements_error(missing_packages):
     tk.Label(
         root,
         text="Some Python packages required by the grader are missing.",
-        font=("Segoe UI", 13, "bold"),
+        font=(UI_FONT_FAMILY, 13, "bold"),
         anchor="w",
     ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
     tk.Label(
@@ -2560,6 +2564,8 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.visible_cases: list[ReviewCase] = []
         self.selected_vars: dict[tuple[str, str], tk.BooleanVar] = {}
         self.table_case_by_iid: dict[str, ReviewCase] = {}
+        self.review_sort_column = "student_id"
+        self.review_sort_descending = False
         self.current_case: ReviewCase | None = None
         self.review_running = False
 
@@ -2626,21 +2632,16 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.table_frame.grid(row=0, column=0, padx=8, pady=8, sticky="ew")
         self.table_frame.grid_columnconfigure(0, weight=1)
         self.table_style = ttk.Style(self)
-        self.table_style.configure("Review.Treeview", rowheight=28)
+        self.configure_review_tree_style()
         self.review_tree = ttk.Treeview(
             self.table_frame,
             columns=("student_id", "question", "score", "final", "status", "notes"),
             show="headings",
             selectmode="extended",
             height=5,
-            style="Review.Treeview",
+            style=REVIEW_TREE_STYLE,
         )
-        self.review_tree.heading("student_id", text="Student ID")
-        self.review_tree.heading("question", text="Question")
-        self.review_tree.heading("score", text="Score")
-        self.review_tree.heading("final", text="Final")
-        self.review_tree.heading("status", text="Status")
-        self.review_tree.heading("notes", text="Notes Preview")
+        self.configure_review_tree_headings()
         self.review_tree.column("student_id", width=120, stretch=False, anchor="w")
         self.review_tree.column("question", width=80, stretch=False, anchor="w")
         self.review_tree.column("score", width=70, stretch=False, anchor="w")
@@ -2652,6 +2653,9 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.review_tree.bind("<Double-1>", lambda _event: self.detail_tabview.set("Notes"))
         self.review_tree.bind("<Control-c>", self.copy_selected_student_ids)
         self.review_tree.bind("<Control-C>", self.copy_selected_student_ids)
+        self.review_tree.tag_configure("original", foreground=COLORS["text_light"])
+        self.review_tree.tag_configure("repaired", foreground=COLORS["accent"])
+        self.review_tree.tag_configure("reviewed", foreground=COLORS["secondary"])
         self.review_scrollbar = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.review_tree.yview)
         self.review_scrollbar.grid(row=0, column=1, padx=(0, 8), pady=8, sticky="ns")
         self.review_tree.configure(yscrollcommand=self.review_scrollbar.set)
@@ -2682,6 +2686,65 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
         self.update_gemini_key_status()
         self.reload_cases()
+
+    def configure_review_tree_style(self):
+        try:
+            self.table_style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self.table_style.configure(
+            REVIEW_TREE_STYLE,
+            background="#1f1f1f",
+            fieldbackground="#1f1f1f",
+            foreground=COLORS["text_light"],
+            bordercolor=COLORS["border"],
+            lightcolor="#1f1f1f",
+            darkcolor="#1f1f1f",
+            rowheight=28,
+            font=(UI_FONT_FAMILY, 10),
+        )
+        self.table_style.configure(
+            REVIEW_TREE_HEADING_STYLE,
+            background="#2c3e50",
+            foreground=COLORS["text_light"],
+            relief="flat",
+            font=(UI_FONT_FAMILY, 10, "bold"),
+        )
+        self.table_style.map(
+            REVIEW_TREE_STYLE,
+            background=[("selected", COLORS["primary"])],
+            foreground=[("selected", COLORS["text_light"])],
+        )
+        self.table_style.map(
+            REVIEW_TREE_HEADING_STYLE,
+            background=[("active", COLORS["primary"])],
+            foreground=[("active", COLORS["text_light"])],
+        )
+
+    def configure_review_tree_headings(self):
+        for column, label in self.review_tree_columns():
+            self.review_tree.heading(
+                column,
+                text=self.review_heading_text(column, label),
+                command=lambda selected_column=column: self.sort_review_table(selected_column),
+            )
+
+    @staticmethod
+    def review_tree_columns():
+        return [
+            ("student_id", "Student ID"),
+            ("question", "Question"),
+            ("score", "Score"),
+            ("final", "Final"),
+            ("status", "Status"),
+            ("notes", "Notes Preview"),
+        ]
+
+    def review_heading_text(self, column, label):
+        if column != self.review_sort_column:
+            return label
+        arrow = "▼" if self.review_sort_descending else "▲"
+        return f"{label} {arrow}"
 
     def show_on_top(self):
         self.deiconify()
@@ -2732,7 +2795,8 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             if (not self.only_deductions_var.get() or case.question_score < 100 or case.notes)
             and (not id_query or id_query in case.student_id.lower())
         ]
-        self.visible_cases.sort(key=self._case_sort_key)
+        self.visible_cases.sort(key=self.review_sort_key, reverse=self.review_sort_descending)
+        self.configure_review_tree_headings()
         reviewed = sum(1 for case in self.visible_cases if case.reviewed)
         filter_text = f" matching ID search '{self.id_search_var.get().strip()}'" if id_query else ""
         self.status_var.set(
@@ -2758,10 +2822,12 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
     def insert_review_tree_row(self, iid, case):
         status_text = "Reviewed" if case.reviewed else case.code_source.title()
+        tag = "reviewed" if case.reviewed else case.code_source
         self.review_tree.insert(
             "",
             "end",
             iid=iid,
+            tags=(tag,),
             values=(
                 case.student_id,
                 case.question,
@@ -2785,6 +2851,25 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
     @staticmethod
     def _case_sort_key(case: ReviewCase):
         return (PostScoringReviewWindow._natural_sort_key(case.student_id), case.question)
+
+    def sort_review_table(self, column):
+        if self.review_sort_column == column:
+            self.review_sort_descending = not self.review_sort_descending
+        else:
+            self.review_sort_column = column
+            self.review_sort_descending = False
+        self.render_table()
+
+    def review_sort_key(self, case: ReviewCase):
+        values = {
+            "student_id": self._natural_sort_key(case.student_id),
+            "question": self._natural_sort_key(case.question),
+            "score": case.question_score,
+            "final": case.final_grade,
+            "status": "Reviewed" if case.reviewed else case.code_source.title(),
+            "notes": (case.notes or case.grade_text).lower(),
+        }
+        return (values.get(self.review_sort_column), self._case_sort_key(case))
 
     @staticmethod
     def _natural_sort_key(value: str):

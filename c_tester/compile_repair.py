@@ -5,19 +5,37 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 import os
-import re
 from typing import Callable, Protocol
 
 from .checker_assistant import LLMProvider
 
 
 COMPILE_REPAIR_SYSTEM_PROMPT = (
-    "You are a C compilation repair assistant. Your only job is to make the submitted C code compile. "
-    "You must preserve the student's apparent logic and output behavior. Do not improve the algorithm, "
-    "change business logic, change prompts/output text, add new features, or infer missing intended behavior. "
-    "If the code cannot be made to compile without making meaningful assumptions about the student's intended "
-    "logic, return too_bad. Return only JSON matching the schema."
+    "You are a C compilation repair assistant for intro-to-C homework submissions. "
+    "Goal: make the submitted C source compile with the smallest compile-only edit. "
+    "Preserve the student's apparent algorithm, prompts, output wording, data flow, and mistakes. "
+    "Do not improve correctness, scoring behavior, formatting, edge-case handling, or assignment logic. "
+    "Return fixed_candidate when the failure is a clear compile-only issue. Return too_bad only when compiling "
+    "requires guessing missing business logic or replacing the student's intended algorithm. "
+    "Return only JSON matching the schema."
 )
+COMPILE_REPAIR_DECISION_RUBRIC = {
+    "fixed_candidate_when": [
+        "The compiler points to local syntax or structure that can be repaired without changing the algorithm.",
+        "Examples: missing semicolon or comma; unmatched brace/parenthesis/bracket; malformed declaration; typo in a C keyword or standard function casing; missing standard include for a used standard function; wrong entry-point spelling such as main1/Main when the body is otherwise the submitted program; linker error for missing main when the submitted entry point is obvious.",
+        "The change is mechanical and would not alter what inputs are read, what outputs are intended, or which formula/loop/condition the student wrote.",
+    ],
+    "too_bad_when": [
+        "The code is missing a substantial function/body/algorithm and the intended logic is not present.",
+        "The only way to compile is to invent assignment-specific behavior, formulas, loop bounds, divisor/reverse-number logic, or output text.",
+        "The requested edit would fix a logic bug rather than a compile error, such as changing = to == in a condition, changing loop limits, changing integer division behavior, adding missing edge-case handling, or replacing an incorrect algorithm with a correct one.",
+    ],
+    "self_check_before_too_bad": [
+        "Identify the first compiler error.",
+        "Ask: can one or two local syntax/declaration/include/entry-point edits make this compile while preserving the student's behavior?",
+        "If yes, return fixed_candidate. If no, return too_bad with a concise reason.",
+    ],
+}
 
 TOO_BAD_EXCEL_NOTE = "code cannot be made to compile without guessing the student's intended logic."
 
@@ -78,6 +96,7 @@ def build_compile_fix_prompt(
     payload = {
         "task": "compile_fix",
         "system_prompt": COMPILE_REPAIR_SYSTEM_PROMPT,
+        "decision_rubric": COMPILE_REPAIR_DECISION_RUBRIC,
         "original_code": original_code,
         "current_compile_error": current_compile_error,
         "attempt_history": [
@@ -97,6 +116,7 @@ def build_compile_fix_prompt(
             "fix_reason": "one very brief sentence describing what was changed and why",
             "changes_made": "short bullet-style string, max 2-3 compile-only items",
             "risk_note": "empty or one short sentence if the fix might be unsafe",
+            "decision_check": "one short sentence explaining why this is compile-only or why it truly requires too_bad",
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -265,26 +285,9 @@ def handle_too_bad_suggestion(
     repair_penalty: float,
     compile_func: CompileFunction,
 ) -> tuple[CompileRepairResult | None, str, bool]:
-    fallback_result, next_compile_error = try_safe_semicolon_repair(
-        original_code,
-        current_compile_error,
-        attempts,
-        student_repair_dir,
-        attempt_number,
-        repair_penalty,
-        compile_func,
-    )
-    if fallback_result:
-        return fallback_result, next_compile_error, False
-    if next_compile_error != current_compile_error:
-        return None, next_compile_error, True
-    if is_likely_local_syntax_error(current_compile_error) and attempt_number < max_attempts:
-        retry_error = (
-            current_compile_error
-            + "\nPrevious response returned too_bad, but this looks like a local syntax-only compiler error. "
-            "Try one minimal compile-only candidate before declaring too_bad."
-        )
-        return None, retry_error, True
+    del original_code, repair_penalty, compile_func
+    if attempt_number < max_attempts:
+        return None, build_too_bad_challenge_error(current_compile_error, attempts), True
     result = CompileRepairResult(
         status="too_bad",
         attempts=attempt_number,
@@ -298,126 +301,17 @@ def handle_too_bad_suggestion(
     return result, current_compile_error, False
 
 
-def try_safe_semicolon_repair(
-    original_code: str,
-    current_compile_error: str,
-    attempts: list[CompileRepairAttempt],
-    student_repair_dir: str,
-    attempt_number: int,
-    repair_penalty: float,
-    compile_func: CompileFunction,
-) -> tuple[CompileRepairResult | None, str]:
-    fallback_code = build_safe_semicolon_candidate(original_code, current_compile_error)
-    if not fallback_code:
-        return None, current_compile_error
-    candidate_path = os.path.join(student_repair_dir, f"attempt_{attempt_number}.c")
-    with open(candidate_path, "w", encoding="utf-8", newline="\n") as candidate_file:
-        candidate_file.write(fallback_code)
-    executable, compile_error = compile_func(candidate_path)
-    compiled = compile_error is None and executable is not None
-    attempt = CompileRepairAttempt(
-        attempt=attempt_number,
-        candidate_path=candidate_path,
-        candidate_code=fallback_code,
-        compile_error=compile_error or "",
-        compile_issue="The compiler reported a local missing-semicolon syntax error.",
-        fix_reason="added a missing semicolon without changing the student's logic.",
-        changes_made="added missing semicolon",
-        risk_note="",
-        compiled=compiled,
+def build_too_bad_challenge_error(current_compile_error: str, attempts: list[CompileRepairAttempt]) -> str:
+    previous_reasons = [attempt.fix_reason or attempt.compile_issue for attempt in attempts if attempt.fix_reason or attempt.compile_issue]
+    history_text = "; ".join(previous_reasons[-3:]) if previous_reasons else "none"
+    return (
+        f"{current_compile_error}\n\n"
+        "The previous LLM response returned too_bad. Re-evaluate using decision_rubric and self_check_before_too_bad. "
+        "Do not return too_bad merely because the compiler output is noisy or there are many errors after the first one. "
+        "If the first/root error can be fixed by a local compile-only edit that preserves the student's behavior, return "
+        "fixed_candidate. Return too_bad only if compiling requires inventing missing assignment logic. "
+        f"Previous attempt reasons: {history_text}"
     )
-    attempts.append(attempt)
-    if not compiled:
-        return None, compile_error or "Compilation failed without compiler output."
-    result = CompileRepairResult(
-        status="fixed",
-        attempts=attempt_number,
-        fixed_code_path=candidate_path,
-        executable_path=executable or "",
-        repair_note=attempt.fix_reason,
-        repair_penalty=repair_penalty,
-        attempts_history=tuple(attempts),
-    )
-    write_repair_report(student_repair_dir, result)
-    return result, compile_error or ""
-
-
-def is_likely_local_syntax_error(compile_error: str) -> bool:
-    lowered = compile_error.lower()
-    syntax_markers = [
-        "missing ';'",
-        "expected ';'",
-        "syntax error",
-        "expected declaration",
-        "expected expression",
-    ]
-    return any(marker in lowered for marker in syntax_markers)
-
-
-def build_safe_semicolon_candidate(original_code: str, compile_error: str) -> str:
-    if not is_likely_semicolon_error(compile_error):
-        return ""
-    lines = original_code.splitlines()
-    if not lines:
-        return ""
-    line_number = extract_compile_error_line(compile_error)
-    candidate_indexes = semicolon_candidate_indexes(lines, line_number)
-    for index in candidate_indexes:
-        if 0 <= index < len(lines) and can_append_semicolon(lines[index]):
-            fixed_lines = list(lines)
-            fixed_lines[index] = fixed_lines[index].rstrip() + ";"
-            return "\n".join(fixed_lines).rstrip() + "\n"
-    return ""
-
-
-def is_likely_semicolon_error(compile_error: str) -> bool:
-    lowered = compile_error.lower()
-    return "missing ';'" in lowered or "expected ';'" in lowered
-
-
-def extract_compile_error_line(compile_error: str) -> int | None:
-    patterns = [
-        r"\((\d+)\)\s*:\s*error",
-        r":(\d+):\d*:\s*error",
-        r":(\d+):\s*error",
-        r"line\s+(\d+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, compile_error, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-    return None
-
-
-def semicolon_candidate_indexes(lines: list[str], line_number: int | None) -> list[int]:
-    if line_number is None:
-        return [index for index, line in enumerate(lines) if looks_like_unterminated_statement(line)]
-    indexes = []
-    reported_index = max(0, min(line_number - 1, len(lines) - 1))
-    for index in [reported_index, reported_index - 1]:
-        while index >= 0 and not lines[index].strip():
-            index -= 1
-        if index >= 0 and index not in indexes:
-            indexes.append(index)
-    return indexes
-
-
-def looks_like_unterminated_statement(line: str) -> bool:
-    stripped = line.strip()
-    starters = ("return ", "printf(", "scanf(", "int ", "float ", "double ", "char ", "long ", "short ")
-    operators = ("=", "++", "--")
-    return stripped.startswith(starters) or any(operator in stripped for operator in operators)
-
-
-def can_append_semicolon(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("//"):
-        return False
-    if stripped.endswith((";", "{", "}", ":", ",")):
-        return False
-    if stripped.startswith(("if", "for", "while", "switch", "else", "do")):
-        return False
-    return looks_like_unterminated_statement(stripped)
 
 
 def write_repair_report(repair_dir: str, result: CompileRepairResult):
