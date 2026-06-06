@@ -36,6 +36,80 @@ COMPILE_REPAIR_DECISION_RUBRIC = {
         "If yes, return fixed_candidate. If no, return too_bad with a concise reason.",
     ],
 }
+COMPILE_REPAIR_VALIDATION_EXAMPLES = {
+    "q1_sum_and_average": [
+        {
+            "compile_issue": "missing semicolon after scanf or assignment",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Add punctuation only; do not change the formula or prompts.",
+        },
+        {
+            "compile_issue": "missing #include <stdio.h> while using printf or scanf",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Add the standard include only; do not rewrite I/O behavior.",
+        },
+        {
+            "compile_issue": "main1 or Main is used instead of main",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Rename the obvious entry point only.",
+        },
+        {
+            "compile_issue": "malformed declaration such as int a b;",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Repair declaration syntax only when the intended variables are clear.",
+        },
+    ],
+    "q2_loops_divisors_or_reverse_number": [
+        {
+            "compile_issue": "missing closing brace in a for or while block",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Close the syntactic block without moving logic across branches.",
+        },
+        {
+            "compile_issue": "undeclared identifier caused by a clear local typo",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Fix the local spelling only when it matches an existing variable.",
+        },
+        {
+            "compile_issue": "bad for syntax such as for(i = 0; i < n i++)",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Add missing separators only; do not alter loop bounds.",
+        },
+        {
+            "compile_issue": "missing parenthesis in a condition such as while (num > 0 {",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Balance delimiters only.",
+        },
+    ],
+    "q3_arrays_strings_or_max_min": [
+        {
+            "compile_issue": "broken array declaration such as int arr[n",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Balance brackets only when the declaration is otherwise clear.",
+        },
+        {
+            "compile_issue": "missing quote in a printf string literal",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Close the literal without changing the printed words.",
+        },
+        {
+            "compile_issue": "helper function is called before a visible prototype",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Add a prototype or move declarations without changing the function body.",
+        },
+        {
+            "compile_issue": "no usable C entry point due to void main or missing main symbol",
+            "expected_decision": "fixed_candidate",
+            "boundary": "Use a standard main signature only when the program body is obvious.",
+        },
+    ],
+    "too_bad_examples": [
+        "empty file or comments only",
+        "missing the whole assignment algorithm or core function body",
+        "custom helper is referenced but neither its body nor intended behavior is present",
+        "unrelated fragments have no clear entry point or data flow",
+    ],
+}
 
 TOO_BAD_EXCEL_NOTE = "code cannot be made to compile without guessing the student's intended logic."
 
@@ -97,6 +171,7 @@ def build_compile_fix_prompt(
         "task": "compile_fix",
         "system_prompt": COMPILE_REPAIR_SYSTEM_PROMPT,
         "decision_rubric": COMPILE_REPAIR_DECISION_RUBRIC,
+        "validation_examples": COMPILE_REPAIR_VALIDATION_EXAMPLES,
         "original_code": original_code,
         "current_compile_error": current_compile_error,
         "attempt_history": [

@@ -18,6 +18,28 @@ from . import configuration
 
 MAX_PROMPT_TEXT = 12000
 DEFAULT_MAX_FAILED_CASES = 12
+COMMON_INTRO_C_LOGIC_RUBRIC = {
+    "assignment_instead_of_comparison": (
+        "Code compiles but uses assignment in a condition, for example if (x = 5) instead of if (x == 5). "
+        "Treat this as a logic issue, not a compile repair issue."
+    ),
+    "integer_division": (
+        "Code compiles but uses integer division where a fractional result is expected, for example sum / count "
+        "instead of casting or using a floating operand."
+    ),
+    "off_by_one_loop_or_index": (
+        "Code compiles but loops one too many or one too few times, commonly from <= versus < or incorrect "
+        "zero-based array bounds."
+    ),
+    "scanf_runtime_or_format_misuse": (
+        "Code compiles but reads data incorrectly, such as missing & for numeric scanf targets or using %f for "
+        "a double where scanf expects %lf."
+    ),
+    "wrong_algorithm_condition": (
+        "Code compiles but the algorithm condition is wrong, for example missing a divisor boundary, stopping a "
+        "reverse-number loop early, or using the wrong comparison branch."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -102,6 +124,7 @@ def build_score_review_prompt(case: ReviewCase) -> str:
         "assigned_question_score": case.question_score,
         "assigned_final_grade": case.final_grade,
         "grading_policy": case.grading_policy,
+        "common_intro_c_logic_rubric": COMMON_INTRO_C_LOGIC_RUBRIC,
         "artifact_guide": {
             "assigned_question_score": "The deterministic score for this question after test-case scoring and question-level adjustments.",
             "assigned_final_grade": "The final weighted grade after question weights and final/report-level penalties.",
@@ -116,6 +139,7 @@ def build_score_review_prompt(case: ReviewCase) -> str:
             "final_fields": "The final Excel row for this student, excluding ID_number.",
             "repair_metadata": "Compile-repair report, if one exists; any real ID in paths is redacted.",
             "grading_policy": "The scoring and penalty settings active when this review is being performed.",
+            "common_intro_c_logic_rubric": "Common compiling-but-wrong beginner C mistakes to consider when grouping failures.",
         },
         "notes": _anonymize_value(case.notes, student_id),
         "code_source": case.code_source,

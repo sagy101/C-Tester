@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -84,19 +85,46 @@ class TestCompileRepair(unittest.TestCase):
         self.assertIn("current_compile_error", prompt)
         self.assertIn("attempt_history", prompt)
         self.assertNotIn("student_id", prompt)
-        self.assertNotIn("question", prompt.lower())
-        self.assertNotIn("reference", prompt.lower())
+        self.assertNotIn("question_name", prompt)
+        self.assertNotIn("question_reference_context", prompt)
         self.assertNotIn("expected_outputs", prompt)
 
     def test_prompt_defines_too_bad_with_good_and_bad_examples(self):
         prompt = build_compile_fix_prompt("int main1(){return 0;}", "unresolved external symbol main", [])
 
         self.assertIn("decision_rubric", prompt)
+        self.assertIn("validation_examples", prompt)
         self.assertIn("wrong entry-point", prompt)
         self.assertIn("missing standard include", prompt)
         self.assertIn("changing = to ==", prompt)
         self.assertIn("divisor/reverse-number logic", prompt)
         self.assertIn("self_check_before_too_bad", prompt)
+
+    def test_prompt_covers_common_intro_c_compile_validation_matrix(self):
+        prompt = build_compile_fix_prompt("int main(){return 0;}", "compiler error", [])
+        payload = json.loads(prompt)
+        examples = payload["validation_examples"]
+
+        compile_groups = [
+            "q1_sum_and_average",
+            "q2_loops_divisors_or_reverse_number",
+            "q3_arrays_strings_or_max_min",
+        ]
+        for group_name in compile_groups:
+            self.assertEqual(len(examples[group_name]), 4, group_name)
+            self.assertTrue(all(item["expected_decision"] == "fixed_candidate" for item in examples[group_name]))
+
+        flattened_issues = " ".join(
+            item["compile_issue"] for group_name in compile_groups for item in examples[group_name]
+        )
+        self.assertIn("missing semicolon", flattened_issues)
+        self.assertIn("stdio.h", flattened_issues)
+        self.assertIn("clear local typo", flattened_issues)
+        self.assertIn("bad for syntax", flattened_issues)
+        self.assertIn("missing quote", flattened_issues)
+        self.assertIn("prototype", flattened_issues)
+        self.assertGreaterEqual(len(examples["too_bad_examples"]), 4)
+        self.assertIn("missing the whole assignment algorithm", " ".join(examples["too_bad_examples"]))
 
     def test_fake_provider_fix_compiles_on_first_attempt(self):
         with tempfile.TemporaryDirectory() as temp_dir:

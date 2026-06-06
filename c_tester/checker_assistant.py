@@ -22,6 +22,76 @@ from .semantic_grading import available_checker_templates, compare_output_with_c
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 MAX_ASSIGNMENT_IMAGES = 8
+CHECKER_SUGGESTION_EVAL_CASES = {
+    "common_supported": [
+        {
+            "task_shape": "one numeric answer such as factorial, sum, max, count, gcd, or lcm",
+            "expected_checker": "last_integer",
+            "success_criteria": "Ignore prompts and labels, compare the final numeric answer.",
+        },
+        {
+            "task_shape": "ordered integer sequence such as Fibonacci, primes, sorted array, or printed array values",
+            "expected_checker": "integer_list",
+            "success_criteria": "Compare the extracted integer sequence, preserving order when the assignment requires order.",
+        },
+        {
+            "task_shape": "divisor-list task, including zero-input wording about no divisors",
+            "expected_checker": "divisors",
+            "success_criteria": "Validate the divisor set from the numeric input instead of trusting prompt numbers.",
+        },
+        {
+            "task_shape": "reverse integer digits",
+            "expected_checker": "reverse_integer",
+            "success_criteria": "Compare the reversed integer answer at the configured answer position.",
+        },
+        {
+            "task_shape": "textual yes/no or category answer where punctuation/case are not meaningful",
+            "expected_checker": "normalized_text",
+            "success_criteria": "Normalize harmless case and punctuation only.",
+        },
+    ],
+    "edge_or_unsupported": [
+        {
+            "task_shape": "exact menu, drawing, or required sentence where formatting is part of the answer",
+            "expected_checker": "exact",
+            "success_criteria": "Use exact only when semantic normalization would hide a real mistake.",
+        },
+        {
+            "task_shape": "floating point answer requiring tolerance",
+            "expected_checker": "no_supported_checker",
+            "success_criteria": "No current checker supports numeric tolerance, so require manual configuration.",
+        },
+        {
+            "task_shape": "multi-column table or compound answer with mixed text and numbers",
+            "expected_checker": "no_supported_checker",
+            "success_criteria": "Do not force last_integer or integer_list when important structure would be lost.",
+        },
+        {
+            "task_shape": "assignment text and images include multiple questions",
+            "expected_checker": "selected_question_only",
+            "success_criteria": "Use only the selected question number and ignore neighboring question context.",
+        },
+    ],
+}
+CHECKER_AUDIT_EVAL_CASES = {
+    "looks_correct_when": [
+        "Perfect score, grade text, output, checker result, and Excel fields agree.",
+        "Wrong-input count, comments, and assigned score match the configured checker failures.",
+        "Compile repair succeeded and the final score reflects the configured repair penalty and repair note.",
+        "Submission penalties in final fields match naming, RAR, missing-file, or nested-folder notes.",
+    ],
+    "flagged_when": [
+        "Assigned score conflicts with wrong-input count or checker pass/fail evidence.",
+        "Excel comments, timeout fields, compile-error flags, or wrong-input fields contradict the grade text.",
+        "Final weighted grade does not match question scores, weights, or submission penalties when those fields are present.",
+        "Checker configuration is unsupported or appears mismatched to the assignment intent and would hide mistakes.",
+    ],
+    "uncertain_when": [
+        "Reference context is insufficient to know whether text formatting is semantically important.",
+        "Student output, grade text, or expected/reference output is missing or truncated.",
+        "The case depends on assignment-specific intent not visible in the selected-question context.",
+    ],
+}
 
 
 def get_google_api_key() -> str | None:
@@ -528,6 +598,7 @@ def build_suggestion_prompt(
         "question": question,
         "target_question_number": question_number,
         "available_checkers": available_checker_templates(),
+        "eval_cases": CHECKER_SUGGESTION_EVAL_CASES,
         "original_solution_c": original_code,
         "inputs": inputs,
         "expected_outputs": [{"input": value, "output": output} for value, output in expected_outputs],
@@ -550,6 +621,7 @@ def build_suggestion_prompt(
             "integer_list": "Use for sequences/lists like Fibonacci, primes, sorted arrays, or printed array values.",
             "divisors": "Use only for divisor-list tasks.",
             "reverse_integer": "Use only for reversing integer digits.",
+            "no_supported_checker": "Use for unsupported needs such as floating-point tolerance, multi-column structure, or mixed semantic fields.",
         },
         "response_schema": {
             "status": "supported | no_supported_checker",
@@ -721,6 +793,7 @@ def build_audit_prompt(
             "target_question_number": question_number_from_name(case.question),
             "assignment_text_for_selected_question_optional": assignment_text,
             "assignment_images_for_selected_question_optional": [image.label for image in assignment_images or []],
+            "eval_cases": CHECKER_AUDIT_EVAL_CASES,
             "checker_config": checker_config,
             "assigned_score": case.score,
             "grade_text": case.grade_text[:12000],

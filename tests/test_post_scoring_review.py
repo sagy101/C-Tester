@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import time
@@ -53,6 +54,7 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertIn("expected_output_by_input", prompt)
                 self.assertIn("student_output_by_input", prompt)
                 self.assertIn("do not assign a replacement score", prompt)
+                self.assertIn("common_intro_c_logic_rubric", prompt)
                 self.assertIn("grading_policy", prompt)
                 self.assertIn("per_error_deduction", prompt)
                 self.assertIn("cumulative_per_error", prompt)
@@ -68,6 +70,36 @@ class TestPostScoringReview(unittest.TestCase):
                 reloaded = load_review_cases(["Q1"])[0]
                 self.assertTrue(reloaded.reviewed)
                 self.assertIn("summary", reloaded.saved_review["response"])
+            finally:
+                os.chdir(original_cwd)
+
+    def test_prompt_covers_common_intro_c_non_compile_logic_mistakes(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                case = load_review_cases(["Q1"])[0]
+
+                payload = json.loads(build_score_review_prompt(case))
+                rubric = payload["common_intro_c_logic_rubric"]
+                self.assertEqual(
+                    set(rubric),
+                    {
+                        "assignment_instead_of_comparison",
+                        "integer_division",
+                        "off_by_one_loop_or_index",
+                        "scanf_runtime_or_format_misuse",
+                        "wrong_algorithm_condition",
+                    },
+                )
+                rubric_text = " ".join(rubric.values())
+                self.assertIn("if (x = 5)", rubric_text)
+                self.assertIn("sum / count", rubric_text)
+                self.assertIn("<= versus <", rubric_text)
+                self.assertIn("%lf", rubric_text)
+                self.assertIn("reverse-number loop", rubric_text)
+                self.assertNotIn("123456789", json.dumps(payload))
             finally:
                 os.chdir(original_cwd)
 
