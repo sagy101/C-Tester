@@ -2,8 +2,8 @@ import math
 import os
 import re
 import pandas as pd
-from Utils import log
-from configuration import penalty
+from .utils import log
+from .configuration import penalty
 
 
 def delete_existing_excel_files(directory):
@@ -39,6 +39,38 @@ def extract_compilation_error(text):
     Returns True if a compilation error is found, False otherwise.
     """
     return "Compilation error:" in text
+
+
+def extract_original_compilation_error(text):
+    return "Original Compilation Error: yes" in text or extract_compilation_error(text)
+
+
+def extract_compilation_repair_status(text):
+    match = re.search(r'^Compilation Repair:\s*(.*)$', text, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def extract_compilation_repair_attempts(text):
+    match = re.search(r'^Compilation Repair Attempts:\s*(\d+)', text, re.MULTILINE)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def extract_compilation_repair_penalty(text):
+    match = re.search(r'^Compilation Repair Penalty:\s*-?(\d+(?:\.\d+)?)', text, re.MULTILINE)
+    if match:
+        return float(match.group(1))
+    return 0
+
+
+def extract_compilation_repair_note(text):
+    match = re.search(r'^Compilation Repair Note:\s*(.*)$', text, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def extract_timeouts(text):
@@ -200,7 +232,7 @@ def create_excel_for_grades(parent_folders):
             log(f"Skipping '{grade_folder}' - not found or not a directory.", level="warning")
             continue
 
-        rows = []  # Will store [student_id, grade, compilation_error, timeouts, wrong_inputs_str, timeout_inputs_str] for each file
+        rows = []
 
         for filename in os.listdir(grade_folder):
             # Process only .txt files AND skip example_student.txt
@@ -218,21 +250,56 @@ def create_excel_for_grades(parent_folders):
 
             grade_value = extract_grade(text)
             compilation_error = extract_compilation_error(text)
+            original_compilation_error = extract_original_compilation_error(text)
             timeouts = extract_timeouts(text)
             wrong_inputs_str = extract_wrong_inputs(text)
             timeout_inputs_str = extract_timeout_inputs(text)  # Extract the new timeout inputs
+            repair_status = extract_compilation_repair_status(text)
+            repair_attempts = extract_compilation_repair_attempts(text)
+            repair_penalty = extract_compilation_repair_penalty(text)
+            repair_note = extract_compilation_repair_note(text)
             
-            rows.append([student_id, grade_value, compilation_error, timeouts, wrong_inputs_str, timeout_inputs_str])
+            rows.append([
+                student_id,
+                grade_value,
+                compilation_error,
+                original_compilation_error,
+                timeouts,
+                wrong_inputs_str,
+                timeout_inputs_str,
+                repair_status,
+                repair_attempts,
+                repair_penalty,
+                repair_note,
+            ])
 
         # Create a DataFrame with the new column
-        df = pd.DataFrame(rows, columns=["ID_number", "Grade", "Compilation_Error", "Timeouts", "Wrong_Inputs", "Timeout_Inputs"])
+        df = pd.DataFrame(rows, columns=[
+            "ID_number",
+            "Grade",
+            "Compilation_Error",
+            "Original_Compilation_Error",
+            "Timeouts",
+            "Wrong_Inputs",
+            "Timeout_Inputs",
+            "Compilation_Repair_Status",
+            "Compilation_Repair_Attempts",
+            "Compilation_Repair_Penalty",
+            "Compilation_Repair_Note",
+        ])
 
         # Write the per-question Excel
         output_excel = os.path.join(parent, f"{parent}_grades_to_upload.xlsx")
         with pd.ExcelWriter(output_excel, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False)
             worksheet = writer.sheets['Sheet1']
-            write_text_columns(worksheet, df, ["ID_number", "Wrong_Inputs", "Timeout_Inputs"])
+            write_text_columns(worksheet, df, [
+                "ID_number",
+                "Wrong_Inputs",
+                "Timeout_Inputs",
+                "Compilation_Repair_Status",
+                "Compilation_Repair_Note",
+            ])
         log(f"Created file: {output_excel} with {len(df)} records.", level="success")
 
         folder_data[parent] = df
@@ -290,9 +357,14 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
         df_temp = df.copy().rename(columns={
             "Grade": f"Grade_{folder}_{weight}%",
             "Compilation_Error": f"Compilation_Error_{folder}",
+            "Original_Compilation_Error": f"Original_Compilation_Error_{folder}",
             "Timeouts": f"Timeouts_{folder}",
             "Wrong_Inputs": f"Wrong_Inputs_{folder}",
-            "Timeout_Inputs": f"Timeout_Inputs_{folder}"  # Rename new column
+            "Timeout_Inputs": f"Timeout_Inputs_{folder}",
+            "Compilation_Repair_Status": f"Compilation_Repair_Status_{folder}",
+            "Compilation_Repair_Attempts": f"Compilation_Repair_Attempts_{folder}",
+            "Compilation_Repair_Penalty": f"Compilation_Repair_Penalty_{folder}",
+            "Compilation_Repair_Note": f"Compilation_Repair_Note_{folder}",
         })
         if final_df is None:
             final_df = df_temp
@@ -303,17 +375,28 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
     grade_columns = [col for col in final_df.columns if col.startswith("Grade_")]
     timeout_columns = [col for col in final_df.columns if col.startswith("Timeouts_")]
     compile_columns = [col for col in final_df.columns if col.startswith("Compilation_Error_")]
+    original_compile_columns = [col for col in final_df.columns if col.startswith("Original_Compilation_Error_")]
     wrong_input_columns = [col for col in final_df.columns if col.startswith("Wrong_Inputs_")]
     timeout_input_columns = [col for col in final_df.columns if col.startswith("Timeout_Inputs_")]  # Add new column type
+    repair_status_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Status_")]
+    repair_attempt_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Attempts_")]
+    repair_penalty_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Penalty_")]
+    repair_note_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Note_")]
 
     final_df[grade_columns] = final_df[grade_columns].fillna(0)
     final_df[timeout_columns] = final_df[timeout_columns].fillna(0)
+    final_df[repair_attempt_columns] = final_df[repair_attempt_columns].fillna(0)
+    final_df[repair_penalty_columns] = final_df[repair_penalty_columns].fillna(0)
     for col in compile_columns:
-        final_df[col] = final_df[col].fillna(False)
+        final_df[col] = final_df[col].where(final_df[col].notna(), False).astype(bool)
+    for col in original_compile_columns:
+        final_df[col] = final_df[col].where(final_df[col].notna(), False).astype(bool)
     for col in wrong_input_columns:
         final_df[col] = final_df[col].fillna("")  # Fill missing wrong inputs with empty string
     for col in timeout_input_columns:
         final_df[col] = final_df[col].fillna("")  # Fill missing timeout inputs with empty string
+    for col in repair_status_columns + repair_note_columns:
+        final_df[col] = final_df[col].fillna("")
 
     # Calculate initial final weighted grade
     final_df["Final_Grade"] = 0
@@ -413,6 +496,25 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                     compilation_errors_list.append(f"Compilation error on {q_name}")
         if compilation_errors_list:
             comments_parts.append("Compilation Errors:\n" + "\n".join(compilation_errors_list))
+
+        repair_notes_list = []
+        for col_name in repair_note_columns:
+            repair_note = row[col_name]
+            if repair_note:
+                q_name_match = re.match(r'Compilation_Repair_Note_(Q\d+)', col_name)
+                if q_name_match:
+                    q_name = q_name_match.group(1)
+                    status = row.get(f"Compilation_Repair_Status_{q_name}", "")
+                    attempts = row.get(f"Compilation_Repair_Attempts_{q_name}", 0)
+                    repair_penalty_value = row.get(f"Compilation_Repair_Penalty_{q_name}", 0)
+                    if status == "fixed":
+                        repair_notes_list.append(
+                            f"{q_name}: fixed after {int(attempts)} attempts (-{repair_penalty_value:g}): {repair_note}"
+                        )
+                    else:
+                        repair_notes_list.append(f"{q_name}: {repair_note}")
+        if repair_notes_list:
+            comments_parts.append("Compilation Repair: " + "; ".join(repair_notes_list))
         
         # 2. Add Timeout Cases
         timeout_cases_list = []
@@ -506,6 +608,8 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_er
                 or col in ("Comments", "Penalty Applied")
                 or col.startswith("Wrong_Inputs_")
                 or col.startswith("Timeout_Inputs_")
+                or col.startswith("Compilation_Repair_Status_")
+                or col.startswith("Compilation_Repair_Note_")
             ]
             write_text_columns(worksheet, final_grades_df, text_columns)
 

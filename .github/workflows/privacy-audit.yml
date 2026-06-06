@@ -1,0 +1,25 @@
+name: Privacy Audit
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  privacy-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Audit tip
+        run: python tools/privacy_audit.py HEAD
+
+      - name: Audit reachable history
+        run: python tools/privacy_audit.py HEAD --history

@@ -1,6 +1,6 @@
 import unittest
 
-from semantic_grading import compare_output
+from c_tester.semantic_grading import compare_output
 
 
 class TestSemanticGrading(unittest.TestCase):

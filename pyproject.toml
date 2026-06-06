@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "c-auto-grader"
+version = "0.1.0"
+description = "Windows C assignment grader with GUI and CLI workflows."
+requires-python = ">=3.10"
+license = "Apache-2.0"
+
+[tool.setuptools]
+packages = ["c_tester"]
+
+[project.scripts]
+c-auto-grader = "c_tester.cli:main"
+

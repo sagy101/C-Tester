@@ -27,15 +27,17 @@ except ImportError:
             pass
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from Utils import log
-from Utils import VERBOSITY_LEVEL
-from configuration import vs_path  # Import vs_path from configuration
-from semantic_grading import compare_output
+from .utils import log
+from .utils import VERBOSITY_LEVEL
+from .configuration import vs_path  # Import vs_path from configuration
+from .compile_repair import CompileRepairResult, repair_compilation_failure
+from .semantic_grading import compare_output
 
 
-def setup_visual_studio_environment():
+def setup_visual_studio_environment(vs_path_override=None):
     log("Setting up Visual Studio environment...", "info", verbosity=1)
-    command = f'cmd /c ""{vs_path}" && set"'
+    active_vs_path = vs_path_override or vs_path
+    command = f'cmd /c ""{active_vs_path}" && set"'
     try:
         result = subprocess.run(command, capture_output=True, text=True, shell=True)
         if result.returncode != 0:
@@ -76,7 +78,7 @@ def ensure_output_folder(folder_name):
 
 def compile_file(c_file):
     executable = c_file.replace(".c", ".exe")
-    compile_cmd = f'cl /TC /EHsc /MP /O2 /Za /Fe{executable} {c_file}'
+    compile_cmd = f'cl /TC /EHsc /MP /O2 /Fe{executable} {c_file}'
     result = subprocess.run(compile_cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         log(f"Compilation failed: {c_file}", "error", verbosity=1)
@@ -253,19 +255,82 @@ def write_discrepancy_details(grade_file, discrepancy):
     grade_file.write("\n")
 
 
-def write_grade(grade_path, correct_count, total, discrepancies, compile_error, timeout_count=0):
+def calculate_grade(correct_count, total, discrepancies, scoring_mode="percentage", deduction_per_error=0):
+    if total == 0:
+        return 0, "No inputs provided."
+
+    percentage = (correct_count / total) * 100
+    if scoring_mode == "per_error_deduction":
+        failed_count = len(discrepancies)
+        grade = max(0, 100 - (deduction_per_error * failed_count))
+        return grade, (
+            f"Calculated grade is: {grade:.2f}% "
+            f"(deducted {deduction_per_error:g} point(s) x {failed_count} failed test case(s); "
+            f"{correct_count}/{total} correct, percentage would be {percentage:.2f}%)"
+        )
+
+    rounded_percentage = math.ceil(percentage)
+    return rounded_percentage, f"Calculated grade is: {percentage:.2f}%"
+
+
+def format_grade_value(value):
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return f"{value:g}"
+
+
+def apply_repair_penalty(grade_value, repair_result):
+    if repair_result and repair_result.fixed and repair_result.repair_penalty:
+        return max(0, grade_value - repair_result.repair_penalty)
+    return grade_value
+
+
+def write_repair_metadata(grade_file, repair_result: CompileRepairResult | None):
+    if not repair_result:
+        return
+    grade_file.write(f"Original Compilation Error: yes\n")
+    grade_file.write(f"Compilation Repair: {repair_result.status}\n")
+    grade_file.write(f"Compilation Repair Attempts: {repair_result.attempts}\n")
+    grade_file.write(f"Compilation Repair Penalty: -{format_grade_value(repair_result.repair_penalty)}\n")
+    grade_file.write(f"Compilation Repair Note: {repair_result.repair_note}\n")
+
+
+def write_grade(
+    grade_path,
+    correct_count,
+    total,
+    discrepancies,
+    compile_error,
+    timeout_count=0,
+    scoring_mode="percentage",
+    deduction_per_error=0,
+    repair_result: CompileRepairResult | None = None,
+):
     try:
         with open(grade_path, "w", encoding="utf-8") as grade_file:
             if compile_error:
                 grade_file.write(f"Grade: 0%\nCompilation error: {compile_error}\n")
+                write_repair_metadata(grade_file, repair_result)
             else:
                 if total == 0:
                     grade_file.write("Grade: 0%\nNo inputs provided.\n")
                 else:
-                    percentage = (correct_count / total) * 100
-                    rounded_percentage = math.ceil(percentage)
-                    grade_file.write(f"Grade: {rounded_percentage}%\n")
-                    grade_file.write(f"(Calculated grade is: {percentage:.2f}%)\n")
+                    grade_value, calculation_text = calculate_grade(
+                        correct_count,
+                        total,
+                        discrepancies,
+                        scoring_mode,
+                        deduction_per_error,
+                    )
+                    effective_grade = apply_repair_penalty(grade_value, repair_result)
+                    grade_file.write(f"Grade: {format_grade_value(effective_grade)}%\n")
+                    grade_file.write(f"({calculation_text})\n")
+                    if repair_result and repair_result.fixed:
+                        grade_file.write(
+                            f"(Compilation repair adjusted grade: {format_grade_value(grade_value)}"
+                            f" - {format_grade_value(repair_result.repair_penalty)}"
+                            f" = {format_grade_value(effective_grade)}%)\n"
+                        )
                     
                     # Add Wrong Inputs line if there were discrepancies
                     if discrepancies:
@@ -282,6 +347,8 @@ def write_grade(grade_path, correct_count, total, discrepancies, compile_error, 
                     timeout_inputs = [str(d[0]) for d in discrepancies if d[2] == "Timeout"]
                     if timeout_inputs:
                         grade_file.write(f"Timeout Inputs: {', '.join(timeout_inputs)}\n")
+
+                write_repair_metadata(grade_file, repair_result)
 
                 # Write discrepancies AFTER the summary lines
                 if discrepancies:
@@ -308,7 +375,17 @@ def compare_outputs(ground_truth, actual_outputs, question_name=None):
     return correct_count, discrepancies, total
 
 
-def execute_and_grade(file, executable, inputs, ground_truth, output_folder, grade_folder, question_name):
+def execute_and_grade(
+    file,
+    executable,
+    inputs,
+    ground_truth,
+    output_folder,
+    grade_folder,
+    question_name,
+    scoring_mode="percentage",
+    deduction_per_error=0,
+):
     grade_path = os.path.join(grade_folder, file.replace(".c", ".txt"))
     output_path = os.path.join(output_folder, file.replace(".c", ".txt"))
 
@@ -327,7 +404,60 @@ def execute_and_grade(file, executable, inputs, ground_truth, output_folder, gra
         sol_file.writelines(lines_to_write)
 
     correct_count, discrepancies, total = compare_outputs(ground_truth, actual_outputs, question_name)
-    write_grade(grade_path, correct_count, total, discrepancies, None, timeout_count)
+    write_grade(
+        grade_path,
+        correct_count,
+        total,
+        discrepancies,
+        None,
+        timeout_count,
+        scoring_mode,
+        deduction_per_error,
+    )
+
+    return executable
+
+
+def execute_repaired_and_grade(
+    student_id,
+    executable,
+    inputs,
+    ground_truth,
+    output_folder,
+    grade_folder,
+    question_name,
+    repair_result,
+    scoring_mode="percentage",
+    deduction_per_error=0,
+):
+    grade_path = os.path.join(grade_folder, f"{student_id}.txt")
+    output_path = os.path.join(output_folder, f"{student_id}.txt")
+    actual_outputs, lines_to_write = [], []
+    timeout_count = 0
+
+    os.makedirs(output_folder, exist_ok=True)
+    for input_value in inputs:
+        output = run_executable(executable, input_value)
+        if output == "Timeout":
+            timeout_count += 1
+        actual_outputs.append((input_value, output))
+        lines_to_write.append(f"Input: {input_value}\nOutput: {output}\n\n")
+
+    with open(output_path, "w", encoding="utf-8") as sol_file:
+        sol_file.writelines(lines_to_write)
+
+    correct_count, discrepancies, total = compare_outputs(ground_truth, actual_outputs, question_name)
+    write_grade(
+        grade_path,
+        correct_count,
+        total,
+        discrepancies,
+        None,
+        timeout_count,
+        scoring_mode,
+        deduction_per_error,
+        repair_result,
+    )
 
     return executable
 
@@ -408,7 +538,13 @@ def cleanup_obj_files():
 def process_folder(
     folder_name: str,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    cancel_event: Optional[threading.Event] = None
+    cancel_event: Optional[threading.Event] = None,
+    scoring_mode: str = "percentage",
+    deduction_per_error: float = 0,
+    llm_compile_repair_enabled: bool = False,
+    llm_compile_repair_provider=None,
+    llm_compile_repair_penalty: float = 10,
+    llm_compile_repair_max_attempts: int = 3,
 ) -> str:
     print("\n\n")
     log(f"Processing folder: {folder_name}...", "info")
@@ -454,14 +590,57 @@ def process_folder(
     compiled, compile_errors = parallel_compile_files(c_files_dir, c_files_to_process, progress_callback, cancel_event)
     if cancel_event and cancel_event.is_set(): return "cancelled"
 
-    # Write grade files for compilation errors
+    repair_output_folder = os.path.join(folder_name, "llm_fixed_output")
+    repair_executables_to_cleanup = []
+    repaired_count = 0
+
+    # Write grade files for compilation errors, or repair and regrade them when enabled.
     for file, error in compile_errors.items():
         grade_path = os.path.join(grade_folder, file.replace(".c", ".txt"))
-        write_grade(grade_path, 0, 0, [], error, 0)
+        if llm_compile_repair_enabled and llm_compile_repair_provider:
+            student_id = os.path.splitext(file)[0]
+            source_path = os.path.join(c_files_dir, file)
+            log(f"{folder_name} {student_id}: attempting LLM compile repair", "info")
+            repair_result = repair_compilation_failure(
+                source_path,
+                error,
+                llm_compile_repair_provider,
+                compile_file,
+                max_attempts=llm_compile_repair_max_attempts,
+                repair_penalty=llm_compile_repair_penalty,
+                repair_root=os.path.join(folder_name, "llm_fixed"),
+                progress_callback=lambda message, q=folder_name, sid=student_id: log(
+                    f"{q} {sid}: {message}", "info"
+                ),
+            )
+            if repair_result.fixed:
+                execute_repaired_and_grade(
+                    student_id,
+                    repair_result.executable_path,
+                    inputs,
+                    ground_truth,
+                    repair_output_folder,
+                    grade_folder,
+                    folder_name,
+                    repair_result,
+                    scoring_mode,
+                    deduction_per_error,
+                )
+                repair_executables_to_cleanup.append(repair_result.executable_path)
+                repaired_count += 1
+                continue
+            write_grade(grade_path, 0, 0, [], error, 0, scoring_mode, deduction_per_error, repair_result)
+        else:
+            write_grade(grade_path, 0, 0, [], error, 0, scoring_mode, deduction_per_error)
 
     # ... (handle compile errors and write grades for them) ...
-    if len(compiled) == 0 and len(c_files_to_process) > 0: return "error"
-    if len(compiled) == 0: return "warning" # No files to even attempt compile?
+    if len(compiled) == 0 and len(c_files_to_process) > 0:
+        cleanup_executables(repair_executables_to_cleanup)
+        log_compilation_summary(compile_errors)
+        return "warning" if repaired_count else "error"
+    if len(compiled) == 0:
+        cleanup_executables(repair_executables_to_cleanup)
+        return "warning" # No files to even attempt compile?
 
     time.sleep(0.1)
 
@@ -475,8 +654,21 @@ def process_folder(
     iterator_factory = tqdm if use_tqdm else lambda iterable, **kwargs: iterable
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = { executor.submit(execute_and_grade, file, exe, inputs, ground_truth, output_folder, grade_folder, folder_name): file
-                    for file, exe in compiled.items() }
+        futures = {
+            executor.submit(
+                execute_and_grade,
+                file,
+                exe,
+                inputs,
+                ground_truth,
+                output_folder,
+                grade_folder,
+                folder_name,
+                scoring_mode,
+                deduction_per_error,
+            ): file
+            for file, exe in compiled.items()
+        }
 
         progress_iterator = iterator_factory(
             as_completed(futures),
@@ -503,7 +695,7 @@ def process_folder(
     # --- Cleanup & Summary --- 
     # Cleanup only if not cancelled mid-execution?
     if not (cancel_event and cancel_event.is_set()):
-        cleanup_executables(executables_to_cleanup)
+        cleanup_executables(executables_to_cleanup + repair_executables_to_cleanup)
         log_compilation_summary(compile_errors)
 
         total_files = len(c_files_to_process)
@@ -521,7 +713,13 @@ def process_folder(
 def process_all_questions(
     questions_arr: list,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    cancel_event: Optional[threading.Event] = None
+    cancel_event: Optional[threading.Event] = None,
+    scoring_mode: str = "percentage",
+    deduction_per_error: float = 0,
+    llm_compile_repair_enabled: bool = False,
+    llm_compile_repair_provider=None,
+    llm_compile_repair_penalty: float = 10,
+    llm_compile_repair_max_attempts: int = 3,
 ) -> list:
     results = []
     total_questions = len(questions_arr)
@@ -531,7 +729,17 @@ def process_all_questions(
             log("Processing all questions cancelled.", "warning", verbosity=1)
             break
         # Pass the main callback down to sub-stages
-        status = process_folder(question, progress_callback=progress_callback, cancel_event=cancel_event)
+        status = process_folder(
+            question,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+            scoring_mode=scoring_mode,
+            deduction_per_error=deduction_per_error,
+            llm_compile_repair_enabled=llm_compile_repair_enabled,
+            llm_compile_repair_provider=llm_compile_repair_provider,
+            llm_compile_repair_penalty=llm_compile_repair_penalty,
+            llm_compile_repair_max_attempts=llm_compile_repair_max_attempts,
+        )
         results.append((question, status))
         # Optionally report overall progress here too, though sub-stages are reporting
         # if progress_callback:
@@ -562,12 +770,29 @@ def process_all_questions(
 def run_tests(
     questions: list,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    cancel_event: Optional[threading.Event] = None
+    cancel_event: Optional[threading.Event] = None,
+    scoring_mode: str = "percentage",
+    deduction_per_error: float = 0,
+    llm_compile_repair_enabled: bool = False,
+    llm_compile_repair_provider=None,
+    llm_compile_repair_penalty: float = 10,
+    llm_compile_repair_max_attempts: int = 3,
+    vs_path_override: str = None,
 ):
     try:
-        setup_visual_studio_environment()
+        setup_visual_studio_environment(vs_path_override)
         # Pass callback and event down
-        process_all_questions(questions, progress_callback, cancel_event)
+        process_all_questions(
+            questions,
+            progress_callback,
+            cancel_event,
+            scoring_mode,
+            deduction_per_error,
+            llm_compile_repair_enabled,
+            llm_compile_repair_provider,
+            llm_compile_repair_penalty,
+            llm_compile_repair_max_attempts,
+        )
     finally:
         # Cleanup only if not cancelled?
         if not (cancel_event and cancel_event.is_set()):

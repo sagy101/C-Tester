@@ -1,0 +1,17 @@
+{
+  "questions": {
+    "Q1": {
+      "checker": "divisors",
+      "config": {
+        "allow_prompt_numbers": true,
+        "zero_requires_no_divisors_message": true
+      }
+    },
+    "Q2": {
+      "checker": "reverse_integer",
+      "config": {
+        "answer_position": "last_integer"
+      }
+    }
+  }
+}

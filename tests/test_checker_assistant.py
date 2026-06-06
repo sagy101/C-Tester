@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from checker_assistant import (
+from c_tester.checker_assistant import (
     AssignmentContext,
     AssignmentImage,
     FakeLLMProvider,
@@ -11,8 +11,8 @@ from checker_assistant import (
     run_checker_tests,
     suggest_checker,
 )
-from checker_assistant import AuditCase
-from semantic_grading import load_checker_config, save_checker_config
+from c_tester.checker_assistant import AuditCase
+from c_tester.semantic_grading import load_checker_config, save_checker_config
 
 
 class RecordingProvider:

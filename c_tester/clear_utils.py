@@ -1,6 +1,7 @@
 import os
 import glob
-from Utils import log # Import the log function
+import shutil
+from .utils import log # Import the log function
 
 def clear_folder_contents(folder_path):
     """Removes all files within a given folder, but not the folder itself.
@@ -23,6 +24,17 @@ def clear_folder_contents(folder_path):
             # Optionally, add elif os.path.isdir(file_path): shutil.rmtree(file_path) to remove subdirectories
         except Exception as e:
             log(f'Failed to delete {file_path}. Reason: {e}', level="error") # Use log with error level
+
+def clear_folder_tree(folder_path):
+    """Removes a generated folder and all of its contents."""
+    if not os.path.isdir(folder_path):
+        log(f"Directory not found: {folder_path}", level="warning")
+        return
+    try:
+        shutil.rmtree(folder_path)
+        log(f"Deleted folder tree: {folder_path}", level="info")
+    except Exception as e:
+        log(f"Failed to delete folder tree {folder_path}. Reason: {e}", level="error")
 
 def clear_grades(questions):
     """Clears the contents of the 'grade' folder for each question."""
@@ -50,6 +62,10 @@ def clear_output(questions):
         # Clear contents of the output subfolder
         output_path = os.path.join(q_folder, 'output')
         clear_folder_contents(output_path)
+
+        # Clear outputs produced by LLM compile repair.
+        repair_output_path = os.path.join(q_folder, 'llm_fixed_output')
+        clear_folder_tree(repair_output_path)
         
         # Delete the original_sol_output.txt file in the parent question folder
         original_output_file = os.path.join(q_folder, "original_sol_output.txt")
@@ -62,6 +78,14 @@ def clear_output(questions):
         # else: File didn't exist, nothing to delete
             
     log("Finished clearing output folders, original_sol_output.txt files, and submit_error.txt.", level="success")
+
+def clear_repair_files(questions):
+    """Clears generated LLM compile-repair candidates and repaired outputs."""
+    log("Clearing LLM compile repair folders...", level="info")
+    for q_folder in questions:
+        clear_folder_tree(os.path.join(q_folder, 'llm_fixed'))
+        clear_folder_tree(os.path.join(q_folder, 'llm_fixed_output'))
+    log("Finished clearing LLM compile repair folders.", level="success")
 
 def clear_c_files(questions):
     """Clears the contents of the 'C' folder for each question."""
@@ -116,6 +140,7 @@ def clear_all(questions):
     log("Starting clear all operation...", level="info")
     clear_grades(questions)
     clear_output(questions)  # This will now also delete submit_error.txt
+    clear_repair_files(questions)
     clear_excels()
     clear_build_files()
     log("Finished clear all operation.", level="success") 

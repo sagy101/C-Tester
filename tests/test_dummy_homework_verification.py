@@ -4,9 +4,9 @@ import unittest
 
 import pandas as pd
 
-from checker_assistant import FakeLLMProvider, audit_cases_with_llm, run_checker_tests, select_audit_cases, suggest_checker
-from CreateExcel import create_excels
-from semantic_grading import load_checker_config, save_checker_config
+from c_tester.checker_assistant import FakeLLMProvider, audit_cases_with_llm, run_checker_tests, select_audit_cases, suggest_checker
+from c_tester.create_excel import create_excels
+from c_tester.semantic_grading import load_checker_config, save_checker_config
 
 
 class TestDummyHomeworkVerification(unittest.TestCase):

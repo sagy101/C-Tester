@@ -5,7 +5,7 @@ import os # Needed for validate_config
 # Flag to control file naming pattern
 # When True: expects files named as "hw[0-9].c" and treats them as "hw[0-9]_q1.c"
 # When False: expects files named as "hw[0-9]_q[0-9].c" (default)
-use_simple_naming = True
+use_simple_naming = False
 
 # Penalty points for submission errors reported in submit_error.txt
 penalty = 5
@@ -14,6 +14,19 @@ penalty = 5
 # When True: each error gets its own penalty (can accumulate)
 # When False: only apply penalty once per student regardless of number of errors
 per_error_penalty = False
+
+# Question scoring mode for failed test cases.
+# "percentage": grade = ceil(correct_tests / total_tests * 100)
+# "per_error_deduction": grade = max(0, 100 - test_error_deduction * failed_tests)
+test_scoring_mode = "percentage"
+test_error_deduction = 2
+
+# Optional LLM compile-only repair for submissions that fail to compile.
+llm_compile_repair_enabled = False
+llm_compile_repair_penalty = 10
+llm_compile_repair_max_attempts = 3
+llm_compile_repair_provider = "Gemini"
+llm_compile_repair_model = ""
 
 # Flag to enable RAR file extraction support
 isRarSupportActive = False
@@ -28,12 +41,13 @@ winrar_path = r"C:\Program Files\WinRAR\UnRAR.exe"
 vs_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 
 # List of question folder names (must match actual folder names in the project root)
-questions = ["Q1"]
+questions = ["Q1", "Q2"]
 
 # Dictionary mapping question folder names to their weight percentage for the final grade
 # Ensure keys match the 'questions' list and values sum to 100.
 folder_weights = {
-    questions[0]: 100
+    questions[0]: 50,
+    questions[1]: 50
 }
 
 def validate_config(questions_list, weights_dict):
