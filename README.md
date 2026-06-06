@@ -273,7 +273,7 @@ Recommended for interactive use.
     *   **Grading:** 
         *   Check the "Slim Output" box if you only want the final `final_grades.xlsx` to contain `ID_number` and `Final_Grade` columns.
         *   Click "Run Grading" to start the compilation, execution, and report generation (button will be disabled until VS path is validated).
-        *   Click **LLM Score Review** after grading to open a score/notes table. Use **Search ID** to filter local rows by student ID, select unlocked rows, choose Gemini or Fake/Offline, and request a grader-facing explanation of deductions. Student IDs remain excluded from the LLM prompt.
+        *   Click **LLM Score Review** after grading to open a score/notes table. Use **Search ID** to filter local rows by student ID, select unlocked rows, press `Ctrl+C` to copy selected local IDs when needed, choose Gemini or Fake/Offline, and request a grader-facing explanation of deductions. Student IDs remain excluded from the LLM prompt.
     *   **Clear Actions:** Open the **Maintenance** tab and click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, Clear Repair, Clear Reviews, All) use the *currently applied GUI question list*. **Clear Reviews** unlocks saved post-scoring LLM review rows so they can be reviewed again.
     *   **Output:** Logs are available from the collapsible **Console Output** drawer at the bottom. Progress descriptions and the progress bar stay visible, and long tasks can be cancelled.
 

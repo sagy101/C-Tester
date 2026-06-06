@@ -2,7 +2,7 @@ import importlib.util
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 REQUIRED_IMPORTS = {
     "colorama": "colorama",
@@ -2559,6 +2559,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.cases: list[ReviewCase] = []
         self.visible_cases: list[ReviewCase] = []
         self.selected_vars: dict[tuple[str, str], tk.BooleanVar] = {}
+        self.table_case_by_iid: dict[str, ReviewCase] = {}
         self.current_case: ReviewCase | None = None
         self.review_running = False
 
@@ -2621,11 +2622,39 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         body.grid_rowconfigure(0, weight=0)
         body.grid_rowconfigure(1, weight=1)
 
-        self.table_frame = ctk.CTkScrollableFrame(body, corner_radius=6, height=170)
+        self.table_frame = ctk.CTkFrame(body, corner_radius=6)
         self.table_frame.grid(row=0, column=0, padx=8, pady=8, sticky="ew")
-        self.table_frame.grid_columnconfigure(1, weight=0, minsize=110)
-        self.table_frame.grid_columnconfigure(5, weight=0, minsize=96)
-        self.table_frame.grid_columnconfigure(6, weight=1, minsize=320)
+        self.table_frame.grid_columnconfigure(0, weight=1)
+        self.table_style = ttk.Style(self)
+        self.table_style.configure("Review.Treeview", rowheight=28)
+        self.review_tree = ttk.Treeview(
+            self.table_frame,
+            columns=("student_id", "question", "score", "final", "status", "notes"),
+            show="headings",
+            selectmode="extended",
+            height=5,
+            style="Review.Treeview",
+        )
+        self.review_tree.heading("student_id", text="Student ID")
+        self.review_tree.heading("question", text="Question")
+        self.review_tree.heading("score", text="Score")
+        self.review_tree.heading("final", text="Final")
+        self.review_tree.heading("status", text="Status")
+        self.review_tree.heading("notes", text="Notes Preview")
+        self.review_tree.column("student_id", width=120, stretch=False, anchor="w")
+        self.review_tree.column("question", width=80, stretch=False, anchor="w")
+        self.review_tree.column("score", width=70, stretch=False, anchor="w")
+        self.review_tree.column("final", width=70, stretch=False, anchor="w")
+        self.review_tree.column("status", width=110, stretch=False, anchor="w")
+        self.review_tree.column("notes", width=720, stretch=True, anchor="w")
+        self.review_tree.grid(row=0, column=0, padx=(8, 0), pady=8, sticky="ew")
+        self.review_tree.bind("<<TreeviewSelect>>", self.on_review_tree_select)
+        self.review_tree.bind("<Double-1>", lambda _event: self.detail_tabview.set("Notes"))
+        self.review_tree.bind("<Control-c>", self.copy_selected_student_ids)
+        self.review_tree.bind("<Control-C>", self.copy_selected_student_ids)
+        self.review_scrollbar = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.review_tree.yview)
+        self.review_scrollbar.grid(row=0, column=1, padx=(0, 8), pady=8, sticky="ns")
+        self.review_tree.configure(yscrollcommand=self.review_scrollbar.set)
 
         self.detail_tabview = ctk.CTkTabview(body, corner_radius=6)
         self.detail_tabview.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
@@ -2689,21 +2718,14 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             self.cases = []
         self.selected_vars.clear()
         self.render_table()
-        if self.visible_cases:
-            self.show_case(self.visible_cases[0])
-        else:
-            self.clear_detail()
 
     def clear_id_search(self):
         self.id_search_var.set("")
 
     def render_table(self):
-        for child in self.table_frame.winfo_children():
-            child.destroy()
-        headers = ["Select", "Student ID", "Question", "Score", "Final", "Status", "Notes Preview"]
-        for col, header in enumerate(headers):
-            ctk.CTkLabel(self.table_frame, text=header, font=ctk.CTkFont(weight="bold")).grid(row=0, column=col, padx=4, pady=4, sticky="w")
-
+        previous_key = self._case_identity(self.current_case) if self.current_case else None
+        self.review_tree.delete(*self.review_tree.get_children())
+        self.table_case_by_iid.clear()
         id_query = self.id_search_var.get().strip().lower()
         self.visible_cases = [
             case for case in self.cases
@@ -2718,33 +2740,47 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             "Click a notes preview to open the full Notes tab."
         )
 
-        for row_index, case in enumerate(self.visible_cases, start=1):
-            key = (case.question, case.student_id)
-            var = self.selected_vars.setdefault(key, tk.BooleanVar(value=False))
-            checkbox = ctk.CTkCheckBox(self.table_frame, text="", variable=var, width=28)
-            checkbox.configure(state="disabled" if case.reviewed else "normal")
-            checkbox.grid(row=row_index, column=0, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=case.student_id).grid(row=row_index, column=1, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=case.question).grid(row=row_index, column=2, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=f"{case.question_score:g}").grid(row=row_index, column=3, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=f"{case.final_grade:g}").grid(row=row_index, column=4, padx=4, pady=3, sticky="w")
-            status_text = "Reviewed" if case.reviewed else case.code_source.title()
-            status_color = COLORS["secondary"] if case.reviewed else COLORS["primary"]
-            ctk.CTkButton(
-                self.table_frame,
-                text=status_text,
-                width=92,
-                fg_color=status_color,
-                command=lambda selected_case=case: self.show_case(selected_case),
-            ).grid(row=row_index, column=5, padx=4, pady=3, sticky="w")
-            notes_label = ctk.CTkLabel(
-                self.table_frame,
-                text=self._shorten(case.notes or case.grade_text, 90),
-                anchor="w",
-                justify="left",
-            )
-            notes_label.grid(row=row_index, column=6, padx=4, pady=3, sticky="ew")
-            notes_label.bind("<Button-1>", lambda _event, selected_case=case: self.show_case(selected_case, show_notes=True))
+        selected_iid = self.populate_review_tree(previous_key)
+        self.select_review_tree_item(selected_iid)
+
+    def populate_review_tree(self, previous_key):
+        self.review_tree.configure(height=max(2, min(8, len(self.visible_cases) + 1)))
+        first_iid = ""
+        preferred_iid = ""
+        for row_index, case in enumerate(self.visible_cases):
+            iid = f"review-{row_index}"
+            first_iid = first_iid or iid
+            preferred_iid = iid if self._case_identity(case) == previous_key else preferred_iid
+            self.table_case_by_iid[iid] = case
+            self.insert_review_tree_row(iid, case)
+        self.review_tree.yview_moveto(0)
+        return preferred_iid or first_iid
+
+    def insert_review_tree_row(self, iid, case):
+        status_text = "Reviewed" if case.reviewed else case.code_source.title()
+        self.review_tree.insert(
+            "",
+            "end",
+            iid=iid,
+            values=(
+                case.student_id,
+                case.question,
+                f"{case.question_score:g}",
+                f"{case.final_grade:g}",
+                status_text,
+                self._shorten(case.notes or case.grade_text, 120),
+            ),
+        )
+
+    def select_review_tree_item(self, selected_iid):
+        if not selected_iid:
+            self.current_case = None
+            self.clear_detail()
+            return
+        self.review_tree.selection_set(selected_iid)
+        self.review_tree.focus(selected_iid)
+        self.review_tree.see(selected_iid)
+        self.show_case(self.table_case_by_iid[selected_iid])
 
     @staticmethod
     def _case_sort_key(case: ReviewCase):
@@ -2754,13 +2790,41 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
     def _natural_sort_key(value: str):
         return tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value))
 
+    @staticmethod
+    def _case_identity(case: ReviewCase | None):
+        if not case:
+            return None
+        return (case.question, case.student_id)
+
+    def selected_review_cases(self):
+        return [
+            self.table_case_by_iid[iid]
+            for iid in self.review_tree.selection()
+            if iid in self.table_case_by_iid
+        ]
+
+    def on_review_tree_select(self, _event=None):
+        selected = self.selected_review_cases()
+        if selected:
+            self.show_case(selected[0])
+
+    def copy_selected_student_ids(self, _event=None):
+        student_ids = []
+        for case in self.selected_review_cases():
+            if case.student_id not in student_ids:
+                student_ids.append(case.student_id)
+        if not student_ids:
+            return None
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(student_ids))
+        suffix = "s" if len(student_ids) != 1 else ""
+        self.status_var.set(f"Copied {len(student_ids)} student ID{suffix}.")
+        return "break"
+
     def review_selected(self):
         if self.review_running:
             return
-        selected = [
-            case for case in self.visible_cases
-            if self.selected_vars.get((case.question, case.student_id), tk.BooleanVar(value=False)).get() and not case.reviewed
-        ]
+        selected = [case for case in self.selected_review_cases() if not case.reviewed]
         if not selected:
             messagebox.showinfo("No Rows Selected", "Select one or more unlocked rows to review.")
             return
@@ -3280,28 +3344,47 @@ class CheckerManagerWindow(ctk.CTkToplevel):
     def refresh_checker_status_strip(self):
         for child in self.checker_state_frame.winfo_children():
             child.destroy()
+        self.checker_state_frame.grid_columnconfigure(0, weight=0)
         ctk.CTkLabel(
             self.checker_state_frame,
-            text="Checker readiness",
+            text="Checker readiness:",
             font=ctk.CTkFont(weight="bold"),
             anchor="w",
-        ).grid(row=0, column=0, padx=8, pady=(8, 4), sticky="w")
-        ctk.CTkLabel(
-            self.checker_state_frame,
-            text="Green means the checker was saved and audit passed. Yellow means saved/tested but still needs grading/audit. Red needs action.",
-            text_color="gray",
-            anchor="w",
-            justify="left",
-        ).grid(row=1, column=0, padx=8, pady=(0, 4), sticky="ew")
-        for index, question in enumerate(self.parent.gui_questions or ["Q1"], start=2):
-            status_text, status_color = self.checker_status_for_question(question)
+        ).grid(row=0, column=0, padx=(8, 6), pady=6, sticky="w")
+        questions = self.parent.gui_questions or ["Q1"]
+        for index, question in enumerate(questions, start=1):
+            status_text, status_color = self.compact_checker_status_for_question(question)
+            self.checker_state_frame.grid_columnconfigure(index, weight=0)
             ctk.CTkLabel(
                 self.checker_state_frame,
                 text=status_text,
                 text_color=status_color,
                 anchor="w",
                 justify="left",
-            ).grid(row=index, column=0, padx=8, pady=2, sticky="ew")
+            ).grid(row=0, column=index, padx=6, pady=6, sticky="w")
+        self.checker_state_frame.grid_columnconfigure(len(questions) + 1, weight=1)
+        ctk.CTkLabel(
+            self.checker_state_frame,
+            text="Green=audited, yellow=needs audit, red=needs checker",
+            text_color="gray",
+            anchor="w",
+            justify="left",
+        ).grid(row=0, column=len(questions) + 1, padx=8, pady=6, sticky="e")
+
+    def compact_checker_status_for_question(self, question):
+        question_config = self.checker_config.get("questions", {}).get(question) or self.checker_config.get("questions", {}).get(question.upper())
+        if not question_config:
+            return f"{question}: needs checker", COLORS["danger"]
+        metadata = question_config.get("metadata", {}) if isinstance(question_config, dict) else {}
+        audit_status = metadata.get("audit_status", "not_run")
+        test_status = metadata.get("test_status", "not_run")
+        if audit_status == "passed":
+            return f"{question}: audited", COLORS["secondary"]
+        if audit_status in {"flagged", "error"}:
+            return f"{question}: audit {audit_status}", COLORS["danger"]
+        if test_status == "passed":
+            return f"{question}: needs audit", COLORS["warning"]
+        return f"{question}: saved", COLORS["warning"]
 
     def checker_status_for_question(self, question):
         question_config = self.checker_config.get("questions", {}).get(question) or self.checker_config.get("questions", {}).get(question.upper())

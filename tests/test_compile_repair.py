@@ -107,6 +107,33 @@ class TestCompileRepair(unittest.TestCase):
             self.assertEqual(result.repair_note, TOO_BAD_EXCEL_NOTE)
             self.assertEqual(result.attempts_history, ())
 
+    def test_missing_semicolon_too_bad_uses_safe_compile_candidate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, "123.c")
+            with open(source_path, "w", encoding="utf-8") as source_file:
+                source_file.write("int main(){\nreturn 0\n}\n")
+
+            def compile_func(path):
+                with open(path, encoding="utf-8") as candidate_file:
+                    text = candidate_file.read()
+                if "return 0;" in text:
+                    return path.replace(".c", ".exe"), None
+                return None, "123.c(3): error C2143: syntax error: missing ';' before '}'"
+
+            result = repair_compilation_failure(
+                source_path,
+                "123.c(3): error C2143: syntax error: missing ';' before '}'",
+                AlwaysBadProvider(),
+                compile_func,
+                max_attempts=3,
+                repair_penalty=15,
+            )
+
+            self.assertEqual(result.status, "fixed")
+            self.assertEqual(result.repair_penalty, 15)
+            self.assertIn("missing semicolon", result.repair_note)
+            self.assertEqual(len(result.attempts_history), 1)
+
     def test_retry_loop_caps_at_max_attempts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = os.path.join(temp_dir, "123.c")

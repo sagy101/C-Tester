@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -205,6 +206,13 @@ class TestPostScoringReview(unittest.TestCase):
                         window.update()
                         self.assertEqual(len(window.visible_cases), 1)
                         self.assertEqual(window.visible_cases[0].student_id, "123456789")
+                        children = window.review_tree.get_children()
+                        self.assertEqual(len(children), 1)
+                        self.assertEqual(window.review_tree.yview()[0], 0.0)
+                        self.assertEqual(window.current_case.student_id, "123456789")
+                        window.review_tree.selection_set(children[0])
+                        window.copy_selected_student_ids()
+                        self.assertEqual(window.clipboard_get(), "123456789")
 
                         window.id_search_var.set("no-match")
                         window.update()
@@ -238,6 +246,43 @@ class TestPostScoringReview(unittest.TestCase):
                     window.withdraw()
                     try:
                         self.assertEqual([case.student_id for case in window.visible_cases], ["111111111", "123456789"])
+                    finally:
+                        window.destroy()
+                        app.shutdown_for_tests()
+            finally:
+                os.environ.pop("C_TESTER_SKIP_STARTUP_VALIDATION", None)
+                os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
+                os.chdir(original_cwd)
+
+    def test_review_window_many_rows_filter_and_refresh_stay_fast(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                for index in range(80):
+                    self._add_review_student(f"demo_{index:03d}", grade=90 + (index % 9))
+                os.environ["C_TESTER_SKIP_STARTUP_VALIDATION"] = "1"
+                os.environ["C_TESTER_SUPPRESS_TK_BGERRORS"] = "1"
+                from c_tester import gui
+
+                with patch("c_tester.gui.get_google_api_key", return_value=None):
+                    app = gui.App()
+                    app.withdraw()
+                    start = time.perf_counter()
+                    window = gui.PostScoringReviewWindow(app)
+                    first_load_seconds = time.perf_counter() - start
+                    window.withdraw()
+                    try:
+                        self.assertLess(first_load_seconds, 3.0)
+                        start = time.perf_counter()
+                        window.id_search_var.set("demo_079")
+                        window.update()
+                        filter_seconds = time.perf_counter() - start
+                        self.assertLess(filter_seconds, 1.0)
+                        self.assertEqual(len(window.visible_cases), 1)
+                        self.assertEqual(window.visible_cases[0].student_id, "demo_079")
+                        self.assertEqual(window.review_tree.yview()[0], 0.0)
                     finally:
                         window.destroy()
                         app.shutdown_for_tests()
