@@ -2617,6 +2617,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             if (not self.only_deductions_var.get() or case.question_score < 100 or case.notes)
             and (not id_query or id_query in case.student_id.lower())
         ]
+        self.visible_cases.sort(key=self._case_sort_key)
         reviewed = sum(1 for case in self.visible_cases if case.reviewed)
         filter_text = f" matching ID search '{self.id_search_var.get().strip()}'" if id_query else ""
         self.status_var.set(
@@ -2651,6 +2652,14 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             )
             notes_label.grid(row=row_index, column=6, padx=4, pady=3, sticky="ew")
             notes_label.bind("<Button-1>", lambda _event, selected_case=case: self.show_case(selected_case, show_notes=True))
+
+    @staticmethod
+    def _case_sort_key(case: ReviewCase):
+        return (PostScoringReviewWindow._natural_sort_key(case.student_id), case.question)
+
+    @staticmethod
+    def _natural_sort_key(value: str):
+        return tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value))
 
     def review_selected(self):
         if self.review_running:
