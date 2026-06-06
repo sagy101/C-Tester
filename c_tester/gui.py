@@ -234,8 +234,8 @@ class App(ctk.CTk):
             self.tk.eval("proc bgerror {msg} {}")
 
         self.title("C Auto Grader")
-        self.geometry("1200x900")  # Increased height from 800 to 900
-        self.minsize(1300, 800)     # Increased minimum height from 700 to 800
+        self.geometry("1050x760")
+        self.minsize(960, 680)
         
         # Add application icon (if available)
         try:
@@ -246,7 +246,7 @@ class App(ctk.CTk):
         # Configure grid layout
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=0)  # Progress/Cancel
-        self.grid_rowconfigure(2, weight=1)  # Logs
+        self.grid_rowconfigure(2, weight=0, minsize=54)  # Logs
 
         # --- App State (Initialize with defaults) --- 
         self.gui_questions = default_questions[:]  # Make copies
@@ -279,6 +279,7 @@ class App(ctk.CTk):
         self.config_rows = []  # To store row widgets [q_entry, w_entry]
         self.setup_assistant_window = None
         self.score_review_window = None
+        self.console_collapsed = False
 
         # --- Frames with enhanced styling --- 
         # Top frame with a subtle header background
@@ -294,17 +295,45 @@ class App(ctk.CTk):
         # Log frame with increased padding and rounded corners
         self.log_frame = ctk.CTkFrame(self, corner_radius=10)
         self.log_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=(5, 15))
-        self.log_frame.grid_rowconfigure(0, weight=1)
+        self.log_frame.grid_rowconfigure(0, weight=0)
+        self.log_frame.grid_rowconfigure(1, weight=1)
         self.log_frame.grid_columnconfigure(0, weight=1)
+        self.log_frame.grid_columnconfigure(1, weight=0)
 
         # --- Top Frame Content (Controls) ---
-        self.controls_frame = ctk.CTkFrame(self.top_frame, fg_color="transparent")
-        self.controls_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-        # Adjust column weights to provide more space for config which needs more width
-        self.controls_frame.grid_columnconfigure(0, weight=3)  # Config gets more space
-        self.controls_frame.grid_columnconfigure((1, 2, 3), weight=2)  # Other sections
-        self.controls_frame.grid_rowconfigure(0, weight=1)  # Main sections row
-        self.controls_frame.grid_rowconfigure(1, weight=0)  # Dependencies row
+        self.workspace_tabs = ctk.CTkTabview(self.top_frame, corner_radius=8)
+        self.workspace_tabs.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.run_tab = self.workspace_tabs.add("Run")
+        self.options_tab = self.workspace_tabs.add("Scoring Options")
+        self.maintenance_tab = self.workspace_tabs.add("Maintenance")
+        self.run_tab.grid_columnconfigure(0, weight=1)
+        self.options_tab.grid_columnconfigure(0, weight=1)
+        self.maintenance_tab.grid_columnconfigure(0, weight=1)
+
+        self.controls_frame = ctk.CTkFrame(self.run_tab, fg_color="transparent")
+        self.controls_frame.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
+        self.controls_frame.grid_columnconfigure(0, weight=4, minsize=390)
+        self.controls_frame.grid_columnconfigure(1, weight=2, minsize=200)
+        self.controls_frame.grid_columnconfigure(2, weight=2, minsize=200)
+        self.controls_frame.grid_rowconfigure(0, weight=1)
+
+        self.maintenance_frame = ctk.CTkFrame(self.maintenance_tab, fg_color="transparent")
+        self.maintenance_frame.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
+        self.maintenance_frame.grid_columnconfigure(0, weight=1, minsize=300)
+        self.maintenance_frame.grid_columnconfigure(1, weight=2, minsize=520)
+        self.maintenance_frame.grid_rowconfigure(0, weight=1)
+
+        self.scoring_options_frame = ctk.CTkFrame(self.options_tab, corner_radius=8, border_width=1, border_color=COLORS["border"])
+        self.scoring_options_frame.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
+        self.scoring_options_frame.grid_columnconfigure(0, weight=1)
+
+        self.scoring_options_label = ctk.CTkLabel(
+            self.scoring_options_frame,
+            text="⚙️ Scoring and LLM Options",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["primary"],
+        )
+        self.scoring_options_label.grid(row=0, column=0, padx=12, pady=(12, 8), sticky="w")
 
         self.setup_status_frame = ctk.CTkFrame(self.top_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.setup_status_frame.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="ew")
@@ -314,8 +343,10 @@ class App(ctk.CTk):
             text="Setup readiness: checking...",
             anchor="w",
             justify="left",
+            wraplength=900,
         )
         self.setup_status_label.grid(row=0, column=0, padx=12, pady=8, sticky="ew")
+        self.setup_status_frame.bind("<Configure>", self._resize_setup_status_label)
         self.setup_assistant_button = ctk.CTkButton(
             self.setup_status_frame,
             text="Setup Assistant",
@@ -326,12 +357,12 @@ class App(ctk.CTk):
         )
         self.setup_assistant_button.grid(row=0, column=1, padx=12, pady=8, sticky="e")
 
-        # Section 0: Configuration - Now spans rows 0-1
+        # Section 0: Configuration
         self.config_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
-        self.config_frame.grid(row=0, column=0, rowspan=2, padx=10, pady=10, sticky="nsew")  # Added rowspan=2 to span both rows
+        self.config_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
         self.config_frame.grid_columnconfigure((0, 1), weight=1)  # Columns for table
-        # Row 1 for headers, Row 2 for table frame (expands), Row 3 for penalty, Row 4 for buttons, Row 5 for status
-        self.config_frame.grid_rowconfigure(2, weight=1) 
+        # Keep the question list compact; it scrolls when many questions are configured.
+        self.config_frame.grid_rowconfigure(2, weight=0)
 
         # Section title with icon-like emoji and better font
         self.config_label = ctk.CTkLabel(
@@ -352,13 +383,13 @@ class App(ctk.CTk):
         )
         
         # Frame for the scrollable rows with subtle background
-        self.config_table_frame = ctk.CTkFrame(self.config_frame, fg_color=("gray95", "gray17"))
+        self.config_table_frame = ctk.CTkScrollableFrame(self.config_frame, fg_color=("gray95", "gray17"), height=96)
         self.config_table_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
         self.config_table_frame.grid_columnconfigure((0, 1), weight=1)  # Columns expand
         
         # Penalty Input with cleaner layout
-        self.penalty_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.penalty_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky="w")
+        self.penalty_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
+        self.penalty_frame.grid(row=1, column=0, padx=12, pady=8, sticky="w")
         self.penalty_label = ctk.CTkLabel(self.penalty_frame, text="Submission Error Penalty (%):", anchor="w")
         self.penalty_label.pack(side=tk.LEFT, padx=(0,10))
         self.penalty_entry = ctk.CTkEntry(self.penalty_frame, width=60, border_width=1)
@@ -366,8 +397,8 @@ class App(ctk.CTk):
         self.penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty()) 
         
         # Add Per-Error Penalty Checkbox with improved spacing
-        self.per_error_penalty_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.per_error_penalty_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+        self.per_error_penalty_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
+        self.per_error_penalty_frame.grid(row=2, column=0, padx=12, pady=6, sticky="w")
         self.per_error_penalty_checkbox = ctk.CTkCheckBox(
             self.per_error_penalty_frame, 
             text="Apply penalty per error (cumulative)",
@@ -380,9 +411,10 @@ class App(ctk.CTk):
         )
         self.per_error_penalty_checkbox.pack(side=tk.LEFT, padx=(0, 15))
 
-        self.test_scoring_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.test_scoring_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=5, sticky="w")
-        ctk.CTkLabel(self.test_scoring_frame, text="Test Case Scoring:", anchor="w").pack(side=tk.LEFT, padx=(0, 10))
+        self.test_scoring_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
+        self.test_scoring_frame.grid(row=3, column=0, padx=12, pady=6, sticky="ew")
+        self.test_scoring_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(self.test_scoring_frame, text="Test Case Scoring:", anchor="w").grid(row=0, column=0, padx=(0, 10), pady=3, sticky="w")
         self.test_scoring_menu = ctk.CTkOptionMenu(
             self.test_scoring_frame,
             variable=self.test_scoring_mode_var,
@@ -390,14 +422,16 @@ class App(ctk.CTk):
             command=lambda _choice: self.mark_config_dirty(),
             width=170,
         )
-        self.test_scoring_menu.pack(side=tk.LEFT, padx=(0, 10))
-        ctk.CTkLabel(self.test_scoring_frame, text="Deduct per failed test:", anchor="w").pack(side=tk.LEFT, padx=(0, 10))
+        self.test_scoring_menu.grid(row=0, column=1, padx=(0, 10), pady=3, sticky="ew")
+        ctk.CTkLabel(self.test_scoring_frame, text="Deduct per failed test:", anchor="w").grid(row=1, column=0, padx=(0, 10), pady=3, sticky="w")
         self.test_error_deduction_entry = ctk.CTkEntry(self.test_scoring_frame, width=60, border_width=1)
-        self.test_error_deduction_entry.pack(side=tk.LEFT)
+        self.test_error_deduction_entry.grid(row=1, column=1, padx=(0, 10), pady=3, sticky="w")
         self.test_error_deduction_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
 
-        self.compile_repair_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.compile_repair_frame.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+        self.compile_repair_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
+        self.compile_repair_frame.grid(row=4, column=0, padx=12, pady=6, sticky="ew")
+        self.compile_repair_frame.grid_columnconfigure(1, weight=1)
+        self.compile_repair_frame.grid_columnconfigure(3, weight=1)
         self.compile_repair_checkbox = ctk.CTkCheckBox(
             self.compile_repair_frame,
             text="Enable LLM compile repair",
@@ -408,15 +442,16 @@ class App(ctk.CTk):
             border_width=2,
             hover=True,
         )
-        self.compile_repair_checkbox.pack(side=tk.LEFT, padx=(0, 10))
-        ctk.CTkLabel(self.compile_repair_frame, text="Repair penalty:").pack(side=tk.LEFT, padx=(0, 5))
+        self.compile_repair_checkbox.grid(row=0, column=0, columnspan=4, padx=(0, 10), pady=3, sticky="w")
+        ctk.CTkLabel(self.compile_repair_frame, text="Repair penalty:").grid(row=1, column=0, padx=(0, 5), pady=3, sticky="w")
         self.compile_repair_penalty_entry = ctk.CTkEntry(self.compile_repair_frame, width=55, border_width=1)
-        self.compile_repair_penalty_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.compile_repair_penalty_entry.grid(row=1, column=1, padx=(0, 10), pady=3, sticky="w")
         self.compile_repair_penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
-        ctk.CTkLabel(self.compile_repair_frame, text="Max attempts:").pack(side=tk.LEFT, padx=(0, 5))
+        ctk.CTkLabel(self.compile_repair_frame, text="Max attempts:").grid(row=1, column=2, padx=(0, 5), pady=3, sticky="w")
         self.compile_repair_attempts_entry = ctk.CTkEntry(self.compile_repair_frame, width=45, border_width=1)
-        self.compile_repair_attempts_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.compile_repair_attempts_entry.grid(row=1, column=3, padx=(0, 10), pady=3, sticky="w")
         self.compile_repair_attempts_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        ctk.CTkLabel(self.compile_repair_frame, text="Provider:").grid(row=2, column=0, padx=(0, 5), pady=3, sticky="w")
         self.compile_repair_provider_menu = ctk.CTkOptionMenu(
             self.compile_repair_frame,
             variable=self.llm_compile_repair_provider_var,
@@ -424,19 +459,19 @@ class App(ctk.CTk):
             command=lambda _choice: self.mark_config_dirty(),
             width=90,
         )
-        self.compile_repair_provider_menu.pack(side=tk.LEFT, padx=(0, 10))
+        self.compile_repair_provider_menu.grid(row=2, column=1, padx=(0, 10), pady=3, sticky="w")
+        ctk.CTkLabel(self.compile_repair_frame, text="Model:").grid(row=2, column=2, padx=(0, 5), pady=3, sticky="w")
         self.compile_repair_model_entry = ctk.CTkEntry(
             self.compile_repair_frame,
-            width=150,
             textvariable=self.llm_compile_repair_model_var,
             border_width=1,
         )
-        self.compile_repair_model_entry.pack(side=tk.LEFT)
+        self.compile_repair_model_entry.grid(row=2, column=3, padx=(0, 10), pady=3, sticky="ew")
         self.compile_repair_model_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
         
         # Buttons with improved styling and spacing
         self.config_buttons_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.config_buttons_frame.grid(row=7, column=0, columnspan=2, padx=10, pady=10)
+        self.config_buttons_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=10)
         self.add_row_button = ctk.CTkButton(
             self.config_buttons_frame, 
             text="➕ Add Question", 
@@ -485,7 +520,7 @@ class App(ctk.CTk):
             text_color="gray",
             height=25
         )
-        self.config_status_label.grid(row=6, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="ew")
+        self.config_status_label.grid(row=4, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="ew")
 
         # Section 1: Preprocessing
         self.preprocess_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -566,7 +601,7 @@ class App(ctk.CTk):
         self.rar_help_frame.grid(row=5, column=0, padx=15, pady=(0, 5), sticky="w")
         self.rar_help_label = ctk.CTkLabel(
             self.rar_help_frame, 
-            text="requires rarfile package and WinRAR installed",
+            text="Needs rarfile + WinRAR/UnRAR",
             font=("", 10),
             text_color="gray"
         )
@@ -579,7 +614,7 @@ class App(ctk.CTk):
         self.simple_naming_var = tk.BooleanVar(value=configuration.use_simple_naming)
         self.simple_naming_checkbox = ctk.CTkCheckBox(
             self.simple_naming_frame, 
-            text="Use simple file naming (hw[0-9].c)",
+            text="Simple naming (hwN.c)",
             variable=self.simple_naming_var,
             command=self.update_simple_naming_state,
             border_width=2,
@@ -593,7 +628,7 @@ class App(ctk.CTk):
         self.simple_naming_help_frame.grid(row=7, column=0, padx=15, pady=(0, 5), sticky="w")
         self.simple_naming_help_label = ctk.CTkLabel(
             self.simple_naming_help_frame, 
-            text="auto-detected from the selected zip; plain hw123.c is treated as Q1",
+            text="Auto-detected; plain hw123.c maps to Q1",
             font=("", 10),
             text_color="gray"
         )
@@ -644,7 +679,7 @@ class App(ctk.CTk):
         
         self.slim_checkbox = ctk.CTkCheckBox(
             self.slim_checkbox_frame, 
-            text="Slim Output (ID & Grade Only)",  # Shortened text slightly
+            text="Slim output",
                                            variable=self.slim_output_var,
             onvalue=True, 
             offvalue=False,
@@ -707,9 +742,9 @@ class App(ctk.CTk):
         self.open_folder_button.grid(row=6, column=0, padx=15, pady=(0, 15))
 
         # Section 3: Clear Actions
-        self.clear_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
-        self.clear_frame.grid(row=0, column=3, padx=10, pady=10, sticky="nsew")
-        self.clear_frame.grid_columnconfigure((0,1), weight=1)
+        self.clear_frame = ctk.CTkFrame(self.maintenance_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
+        self.clear_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.clear_frame.grid_columnconfigure((0, 1), weight=1)
         
         self.clear_label = ctk.CTkLabel(
             self.clear_frame, 
@@ -721,7 +756,7 @@ class App(ctk.CTk):
         
         button_height = 32
         button_corner = 6
-        button_width = 120  # Explicit width for clear buttons
+        button_width = 140
         
         # Clear buttons with improved styling and icons
         self.clear_grades_button = ctk.CTkButton(
@@ -814,10 +849,10 @@ class App(ctk.CTk):
         )
         self.clear_all_button.grid(row=5, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 
-        # Section 4: Dependencies - Now placed in row 1, spanning columns 1-3
-        self.dependencies_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
-        self.dependencies_frame.grid(row=1, column=1, columnspan=3, padx=10, pady=(5, 10), sticky="ew")  # Span columns 1-3 in row 1
-        self.dependencies_frame.grid_columnconfigure((0, 1, 2), weight=1)  # Equal weights for 3 sections
+        # Section 4: Dependencies
+        self.dependencies_frame = ctk.CTkFrame(self.maintenance_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
+        self.dependencies_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        self.dependencies_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         # Title for Dependencies section
         self.dependencies_label = ctk.CTkLabel(
@@ -991,6 +1026,15 @@ class App(ctk.CTk):
             anchor="w"
         )
         self.log_header.grid(row=0, column=0, sticky="w", padx=15, pady=(10, 5))
+        self.console_toggle_button = ctk.CTkButton(
+            self.log_frame,
+            text="Hide Console",
+            command=self.toggle_console,
+            height=28,
+            width=120,
+            corner_radius=6,
+        )
+        self.console_toggle_button.grid(row=0, column=1, sticky="e", padx=15, pady=(10, 5))
         
         # The main log text box with improved styling
         self.log_textbox = ctk.CTkTextbox(
@@ -1002,13 +1046,14 @@ class App(ctk.CTk):
             border_width=1,
             border_color=COLORS["border"]
         )
-        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
+        self.log_textbox.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=15, pady=(0, 15))
 
         # Configure tags for log levels with enhanced colors
         self.log_textbox.tag_config("info_tag", foreground=COLORS["primary"])       # Blue
         self.log_textbox.tag_config("success_tag", foreground=COLORS["secondary"])  # Green
         self.log_textbox.tag_config("warning_tag", foreground=COLORS["warning"])    # Orange
         self.log_textbox.tag_config("error_tag", foreground=COLORS["danger"])       # Red
+        self.toggle_console()
 
         # Store active buttons to disable during tasks
         self.active_buttons = [
@@ -1145,10 +1190,26 @@ class App(ctk.CTk):
         except tk.TclError:
             pass
 
+    def toggle_console(self):
+        self.console_collapsed = not self.console_collapsed
+        if self.console_collapsed:
+            self.log_textbox.grid_remove()
+            self.log_frame.grid_rowconfigure(1, weight=0)
+            self.grid_rowconfigure(2, weight=0, minsize=54)
+            self.console_toggle_button.configure(text="Show Console")
+        else:
+            self.log_textbox.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=15, pady=(0, 15))
+            self.log_frame.grid_rowconfigure(1, weight=1)
+            self.grid_rowconfigure(2, weight=1, minsize=130)
+            self.console_toggle_button.configure(text="Hide Console")
+
     def update_excel_button_state(self):
         state = "normal" if os.path.exists("final_grades.xlsx") else "disabled"
         self.open_excel_button.configure(state=state)
         self.score_review_button.configure(state=state)
+
+    def _resize_setup_status_label(self, event):
+        self.setup_status_label.configure(wraplength=max(300, event.width - 190))
 
     def open_final_excel(self):
         excel_path = os.path.abspath("final_grades.xlsx")
@@ -2121,24 +2182,44 @@ class SetupAssistantWindow(ctk.CTkToplevel):
         self.minsize(760, 560)
         self.transient(parent)
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
-        ctk.CTkLabel(
+        self.title_label = ctk.CTkLabel(
             self,
             text="Setup Assistant",
             font=ctk.CTkFont(size=20, weight="bold"),
             text_color=COLORS["primary"],
             anchor="w",
-        ).grid(row=0, column=0, padx=18, pady=(16, 4), sticky="ew")
-        ctk.CTkLabel(
+        )
+        self.title_label.grid(row=0, column=0, padx=18, pady=(16, 4), sticky="ew")
+        self.subtitle_label = ctk.CTkLabel(
             self,
             text="Follow these steps once per assignment. When the readiness checks pass, continue to the main grader screen.",
             anchor="w",
             justify="left",
-        ).grid(row=0, column=0, padx=18, pady=(48, 8), sticky="ew")
+            wraplength=780,
+        )
+        self.subtitle_label.grid(row=1, column=0, padx=18, pady=(0, 8), sticky="ew")
+        self.subtitle_label.bind("<Configure>", lambda event: self.subtitle_label.configure(wraplength=max(360, event.width - 10)))
+
+        self.global_status_frame = ctk.CTkFrame(self, corner_radius=8, border_width=1, border_color=COLORS["border"])
+        self.global_status_frame.grid(row=2, column=0, padx=18, pady=(0, 8), sticky="ew")
+        self.global_status_frame.grid_columnconfigure(0, weight=1)
+        self.global_status_label = ctk.CTkLabel(
+            self.global_status_frame,
+            text="Checking setup readiness...",
+            anchor="w",
+            justify="left",
+            wraplength=780,
+        )
+        self.global_status_label.grid(row=0, column=0, padx=12, pady=8, sticky="ew")
+        self.global_status_frame.bind(
+            "<Configure>",
+            lambda event: self.global_status_label.configure(wraplength=max(360, event.width - 24)),
+        )
 
         self.tabview = ctk.CTkTabview(self)
-        self.tabview.grid(row=1, column=0, padx=18, pady=10, sticky="nsew")
+        self.tabview.grid(row=3, column=0, padx=18, pady=(0, 10), sticky="nsew")
         self.tabs = {
             "Assignment": self.tabview.add("1. Assignment"),
             "Dependencies": self.tabview.add("2. Dependencies"),
@@ -2174,6 +2255,7 @@ class SetupAssistantWindow(ctk.CTkToplevel):
     def _section_text(self, parent, text, row):
         label = ctk.CTkLabel(parent, text=text, anchor="w", justify="left", wraplength=760)
         label.grid(row=row, column=0, padx=12, pady=(8, 4), sticky="ew")
+        label.bind("<Configure>", lambda event, current_label=label: current_label.configure(wraplength=max(340, event.width - 24)))
         return label
 
     def _build_assignment_tab(self):
@@ -2300,6 +2382,7 @@ class SetupAssistantWindow(ctk.CTkToplevel):
                 self.question_var.set(question_names[0])
 
         readiness = self.parent.get_setup_readiness()
+        self._refresh_global_status(readiness)
         missing_assignment = []
         for question in question_names:
             if not os.path.isdir(os.path.join(question, "C")):
@@ -2346,6 +2429,20 @@ class SetupAssistantWindow(ctk.CTkToplevel):
         self.next_button.configure(state="normal" if readiness["assignment"] else "disabled")
         self.parent.update_setup_readiness_banner()
 
+    def _refresh_global_status(self, readiness):
+        items = [
+            f"Assignment: {'ready' if readiness['assignment'] else 'needs setup'}",
+            f"Dependencies: {'ready' if readiness['scoring'] else 'needs setup'}",
+            f"Submissions: {'ready' if readiness['preprocess'] else 'optional/not ready'}",
+            f"Checker: {'ready' if readiness['checker'] else 'needs setup'}",
+            f"Compile repair API: {'ready/disabled' if readiness['compile_repair_api'] else 'needs setup'}",
+        ]
+        all_core_ready = readiness["assignment"] and readiness["scoring"] and readiness["checker"]
+        self.global_status_label.configure(
+            text=" | ".join(items),
+            text_color=COLORS["secondary"] if all_core_ready else COLORS["warning"],
+        )
+
 
 class PostScoringReviewWindow(ctk.CTkToplevel):
     """Review scored rows with an LLM while keeping student identity out of prompts."""
@@ -2365,6 +2462,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
         self.status_var = tk.StringVar(value="Loading scored rows...")
         self.only_deductions_var = tk.BooleanVar(value=True)
+        self.id_search_var = tk.StringVar(value="")
         self.cases: list[ReviewCase] = []
         self.visible_cases: list[ReviewCase] = []
         self.selected_vars: dict[tuple[str, str], tk.BooleanVar] = {}
@@ -2406,8 +2504,20 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.review_selected_button = ctk.CTkButton(top, text="Review Selected", command=self.review_selected)
         self.review_selected_button.grid(row=0, column=6, padx=8, pady=8, sticky="ew")
 
+        ctk.CTkLabel(top, text="Search ID:").grid(row=1, column=0, padx=8, pady=(0, 8), sticky="w")
+        self.id_search_entry = ctk.CTkEntry(
+            top,
+            textvariable=self.id_search_var,
+            placeholder_text="student ID",
+            width=180,
+        )
+        self.id_search_entry.grid(row=1, column=1, padx=8, pady=(0, 8), sticky="ew")
+        self.id_search_var.trace_add("write", lambda *_args: self.render_table())
+        self.clear_id_search_button = ctk.CTkButton(top, text="Clear Search", width=110, command=self.clear_id_search)
+        self.clear_id_search_button.grid(row=1, column=2, padx=8, pady=(0, 8), sticky="w")
+
         self.key_status_label = ctk.CTkLabel(top, text="", anchor="w", justify="left")
-        self.key_status_label.grid(row=1, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+        self.key_status_label.grid(row=2, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
 
         self.status_label = ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left")
         self.status_label.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
@@ -2415,32 +2525,37 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         body = ctk.CTkFrame(self, corner_radius=8)
         body.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
         body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=2)
-        body.grid_rowconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=0)
+        body.grid_rowconfigure(1, weight=1)
 
-        self.table_frame = ctk.CTkScrollableFrame(body, corner_radius=6)
-        self.table_frame.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
-        self.table_frame.grid_columnconfigure(4, weight=1)
+        self.table_frame = ctk.CTkScrollableFrame(body, corner_radius=6, height=170)
+        self.table_frame.grid(row=0, column=0, padx=8, pady=8, sticky="ew")
+        self.table_frame.grid_columnconfigure(1, weight=0, minsize=110)
+        self.table_frame.grid_columnconfigure(5, weight=0, minsize=96)
+        self.table_frame.grid_columnconfigure(6, weight=1, minsize=320)
 
-        detail = ctk.CTkTabview(body, corner_radius=6)
-        detail.grid(row=0, column=1, padx=8, pady=8, sticky="nsew")
-        for tab_name in ["Code", "Review", "Failures", "Prompt"]:
-            detail.add(tab_name)
+        self.detail_tabview = ctk.CTkTabview(body, corner_radius=6)
+        self.detail_tabview.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
+        for tab_name in ["Code", "Notes", "Review", "Failures", "Prompt"]:
+            self.detail_tabview.add(tab_name)
 
-        self.code_textbox = ctk.CTkTextbox(detail.tab("Code"), wrap="none")
+        self.code_textbox = ctk.CTkTextbox(self.detail_tabview.tab("Code"), wrap="none")
         self.code_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self._configure_code_tags()
 
-        self.review_textbox = ctk.CTkTextbox(detail.tab("Review"), wrap="word")
+        self.notes_textbox = ctk.CTkTextbox(self.detail_tabview.tab("Notes"), wrap="word")
+        self.notes_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        self.review_textbox = ctk.CTkTextbox(self.detail_tabview.tab("Review"), wrap="word")
         self.review_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.review_textbox.tag_config("summary", foreground=COLORS["primary"])
         self.review_textbox.tag_config("warning", foreground=COLORS["warning"])
         self.review_textbox.tag_config("good", foreground=COLORS["secondary"])
 
-        self.failures_textbox = ctk.CTkTextbox(detail.tab("Failures"), wrap="word")
+        self.failures_textbox = ctk.CTkTextbox(self.detail_tabview.tab("Failures"), wrap="word")
         self.failures_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        self.prompt_textbox = ctk.CTkTextbox(detail.tab("Prompt"), wrap="word")
+        self.prompt_textbox = ctk.CTkTextbox(self.detail_tabview.tab("Prompt"), wrap="word")
         self.prompt_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         self.update_gemini_key_status()
@@ -2486,19 +2601,28 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         else:
             self.clear_detail()
 
+    def clear_id_search(self):
+        self.id_search_var.set("")
+
     def render_table(self):
         for child in self.table_frame.winfo_children():
             child.destroy()
-        headers = ["Select", "Question", "Score", "Final", "Status", "Notes"]
+        headers = ["Select", "Student ID", "Question", "Score", "Final", "Status", "Notes Preview"]
         for col, header in enumerate(headers):
             ctk.CTkLabel(self.table_frame, text=header, font=ctk.CTkFont(weight="bold")).grid(row=0, column=col, padx=4, pady=4, sticky="w")
 
+        id_query = self.id_search_var.get().strip().lower()
         self.visible_cases = [
             case for case in self.cases
             if (not self.only_deductions_var.get() or case.question_score < 100 or case.notes)
+            and (not id_query or id_query in case.student_id.lower())
         ]
         reviewed = sum(1 for case in self.visible_cases if case.reviewed)
-        self.status_var.set(f"Loaded {len(self.visible_cases)} row(s), {reviewed} already reviewed.")
+        filter_text = f" matching ID search '{self.id_search_var.get().strip()}'" if id_query else ""
+        self.status_var.set(
+            f"Loaded {len(self.visible_cases)} row(s){filter_text}, {reviewed} already reviewed. "
+            "Click a notes preview to open the full Notes tab."
+        )
 
         for row_index, case in enumerate(self.visible_cases, start=1):
             key = (case.question, case.student_id)
@@ -2506,9 +2630,10 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             checkbox = ctk.CTkCheckBox(self.table_frame, text="", variable=var, width=28)
             checkbox.configure(state="disabled" if case.reviewed else "normal")
             checkbox.grid(row=row_index, column=0, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=case.question).grid(row=row_index, column=1, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=f"{case.question_score:g}").grid(row=row_index, column=2, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=f"{case.final_grade:g}").grid(row=row_index, column=3, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=case.student_id).grid(row=row_index, column=1, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=case.question).grid(row=row_index, column=2, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=f"{case.question_score:g}").grid(row=row_index, column=3, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=f"{case.final_grade:g}").grid(row=row_index, column=4, padx=4, pady=3, sticky="w")
             status_text = "Reviewed" if case.reviewed else case.code_source.title()
             status_color = COLORS["secondary"] if case.reviewed else COLORS["primary"]
             ctk.CTkButton(
@@ -2517,8 +2642,15 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
                 width=92,
                 fg_color=status_color,
                 command=lambda selected_case=case: self.show_case(selected_case),
-            ).grid(row=row_index, column=4, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(self.table_frame, text=self._shorten(case.notes or case.grade_text, 80), anchor="w", justify="left").grid(row=row_index, column=5, padx=4, pady=3, sticky="ew")
+            ).grid(row=row_index, column=5, padx=4, pady=3, sticky="w")
+            notes_label = ctk.CTkLabel(
+                self.table_frame,
+                text=self._shorten(case.notes or case.grade_text, 90),
+                anchor="w",
+                justify="left",
+            )
+            notes_label.grid(row=row_index, column=6, padx=4, pady=3, sticky="ew")
+            notes_label.bind("<Button-1>", lambda _event, selected_case=case: self.show_case(selected_case, show_notes=True))
 
     def review_selected(self):
         if self.review_running:
@@ -2586,18 +2718,42 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         policy["compile_repair"]["max_attempts"] = self.parent.gui_llm_compile_repair_max_attempts
         return policy
 
-    def show_case(self, case: ReviewCase):
+    def show_case(self, case: ReviewCase, show_notes=False):
         self.current_case = case
         self._set_text(self.code_textbox, self._numbered_code(case.code_text))
         self._highlight_code(case.code_text)
+        self._set_text(self.notes_textbox, self._format_notes(case))
         self._set_text(self.failures_textbox, self._format_failures(case))
         self._set_text(self.prompt_textbox, build_score_review_prompt(case))
         saved_response = (case.saved_review or {}).get("response") if case.saved_review else None
         self._set_text(self.review_textbox, self._format_review(saved_response, case))
+        if show_notes:
+            self.detail_tabview.set("Notes")
 
     def clear_detail(self):
-        for textbox in [self.code_textbox, self.review_textbox, self.failures_textbox, self.prompt_textbox]:
+        for textbox in [self.code_textbox, self.notes_textbox, self.review_textbox, self.failures_textbox, self.prompt_textbox]:
             self._set_text(textbox, "")
+
+    def _format_notes(self, case: ReviewCase) -> str:
+        sections = [
+            f"Question: {case.question}",
+            f"Student label: {case.anonymized_label}",
+            f"Question score: {case.question_score:g}",
+            f"Final grade: {case.final_grade:g}",
+            f"Code source: {case.code_source}",
+            "",
+            "Final Excel notes/comments:",
+            case.notes or "(no final comments)",
+            "",
+            "Per-question Excel fields:",
+            json.dumps(case.excel_fields, indent=2, ensure_ascii=False, default=str),
+            "",
+            "Final Excel fields:",
+            json.dumps(case.final_fields, indent=2, ensure_ascii=False, default=str),
+        ]
+        if case.saved_review:
+            sections.extend(["", "Saved review JSON:", json.dumps(case.saved_review, indent=2, ensure_ascii=False, default=str)])
+        return "\n".join(sections)
 
     def _format_review(self, response: dict | None, case: ReviewCase) -> str:
         if not response:

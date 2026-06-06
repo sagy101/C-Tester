@@ -93,6 +93,25 @@ class TestPostScoringReview(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_long_notes_are_preserved_with_single_line_preview(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                long_note = self._create_review_fixture()
+
+                case = load_review_cases(["Q1"])[0]
+                self.assertEqual(case.notes, long_note)
+
+                from c_tester import gui
+
+                preview = gui.PostScoringReviewWindow._shorten(case.notes, 90)
+                self.assertLessEqual(len(preview), 90)
+                self.assertNotIn("\n", preview)
+                self.assertTrue(preview.endswith("..."))
+            finally:
+                os.chdir(original_cwd)
+
     def test_clear_review_files_and_privacy_audit_pattern(self):
         original_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -165,7 +184,48 @@ class TestPostScoringReview(unittest.TestCase):
                 os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
                 os.chdir(original_cwd)
 
+    def test_review_window_can_search_by_local_student_id(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                os.environ["C_TESTER_SKIP_STARTUP_VALIDATION"] = "1"
+                os.environ["C_TESTER_SUPPRESS_TK_BGERRORS"] = "1"
+                from c_tester import gui
+
+                with patch("c_tester.gui.get_google_api_key", return_value=None):
+                    app = gui.App()
+                    app.withdraw()
+                    window = gui.PostScoringReviewWindow(app)
+                    window.withdraw()
+                    try:
+                        self.assertEqual(len(window.visible_cases), 1)
+                        window.id_search_var.set("4567")
+                        window.update()
+                        self.assertEqual(len(window.visible_cases), 1)
+                        self.assertEqual(window.visible_cases[0].student_id, "123456789")
+
+                        window.id_search_var.set("no-match")
+                        window.update()
+                        self.assertEqual(window.visible_cases, [])
+
+                        prompt = build_score_review_prompt(window.cases[0])
+                        self.assertNotIn("123456789", prompt)
+                    finally:
+                        window.destroy()
+                        app.shutdown_for_tests()
+            finally:
+                os.environ.pop("C_TESTER_SKIP_STARTUP_VALIDATION", None)
+                os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
+                os.chdir(original_cwd)
+
     def _create_review_fixture(self):
+        long_note = (
+            "Q1 wrong input 0. This is a deliberately long final comment with preprocessing penalty context, "
+            "nested subfolder notes, and enough detail to verify the table shows only a compact preview while "
+            "the selected Notes tab preserves the complete text."
+        )
         os.makedirs(os.path.join("Q1", "C"), exist_ok=True)
         os.makedirs(os.path.join("Q1", "grade"), exist_ok=True)
         os.makedirs(os.path.join("Q1", "output"), exist_ok=True)
@@ -193,7 +253,7 @@ class TestPostScoringReview(unittest.TestCase):
                     "Wrong_Inputs": "0",
                     "Compilation_Error": False,
                     "Timeouts": "",
-                    "Comments": "Wrong input 0",
+                    "Comments": long_note,
                 }
             ]
         ).to_excel(os.path.join("Q1", "Q1_grades_to_upload.xlsx"), index=False)
@@ -203,10 +263,11 @@ class TestPostScoringReview(unittest.TestCase):
                     "ID_number": "123456789",
                     "Q1": 98,
                     "Final_Grade": 98,
-                    "Comments": "Q1 wrong input 0",
+                    "Comments": long_note,
                 }
             ]
         ).to_excel("final_grades.xlsx", index=False)
+        return long_note
 
 
 if __name__ == "__main__":

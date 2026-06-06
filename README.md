@@ -53,6 +53,22 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ![GUI Screenshot](docs/gui.png)
 
+**Scoring Options Screen:**
+
+![GUI Scoring Options Screenshot](docs/gui_scoring_options.png)
+
+**Maintenance and Cleanup Screen:**
+
+![GUI Maintenance Screenshot](docs/gui_maintenance.png)
+
+**Console Output Drawer:**
+
+![GUI Console Screenshot](docs/gui_console.png)
+
+**Setup Assistant:**
+
+![Setup Assistant Screenshot](docs/setup_assistant.png)
+
 **Post-Scoring LLM Review Screen:**
 
 ![Post-Scoring LLM Review Screen](docs/post_scoring_review.png)
@@ -149,31 +165,31 @@ For the **Preprocessing** step (via GUI or CLI) to work correctly, the input zip
   <summary>View Expected Input Zip Structure</summary>
   
   1.  The main zip file should contain **individual zip or RAR files** for each student submission.
-  2.  Each inner archive's name **must end with the student's ID number**, preceded by an underscore (e.g., `Student Name_Assign1_123456789.zip` or `Student Name_Assign1_123456789.rar`). The part before the underscore and ID is not used by default but helps organization.
-  3.  When an inner archive (e.g., `Student Name_Assign1_123456789.zip`) is extracted, it creates a folder (`Student Name_Assign1_123456789/`).
+  2.  Each inner archive's name **must end with the student's ID number**, preceded by an underscore (e.g., `Student Name_Assign1_<STUDENT_ID>.zip` or `Student Name_Assign1_<STUDENT_ID>.rar`). The part before the underscore and ID is not used by default but helps organization.
+  3.  When an inner archive (e.g., `Student Name_Assign1_<STUDENT_ID>.zip`) is extracted, it creates a folder (`Student Name_Assign1_<STUDENT_ID>/`).
   4.  Inside this folder, the script looks for C files named in one of two formats:
       * **Default Pattern:** `some_filename_qN.c`, where `N` is the question number (e.g., `main_program_q1.c`, `my_solution_q2.c`).
       * **Simple Pattern:** `hwN.c`, where `N` is the question number (e.g., `hw1.c`, `hw2.c`). Use this pattern by enabling the `--simple-naming` flag in CLI or the corresponding option in GUI.
-  5.  **Alternatively**, if no matching C files are found directly inside the student's folder, the script will look for them inside **exactly one subdirectory** within the student's folder (e.g., `Student Name_Assign1_123456789/Submission/main_program_q1.c`). It will not search deeper than one subfolder level.
+  5.  **Alternatively**, if no matching C files are found directly inside the student's folder, the script will look for them inside **exactly one subdirectory** within the student's folder (e.g., `Student Name_Assign1_<STUDENT_ID>/Submission/main_program_q1.c`). It will not search deeper than one subfolder level.
       
   **Example:**
   ```
   main_submissions.zip          <-- Input zip file
   │
-  ├── FirstName_LastName_Assign1_123456789.zip
-  │   │ # Extracted to folder FirstName_LastName_Assign1_123456789/
+  ├── FirstName_LastName_Assign1_<STUDENT_ID_1>.zip
+  │   │ # Extracted to folder FirstName_LastName_Assign1_<STUDENT_ID_1>/
   │   └── main_code_q1.c
   │   └── helper_functions_q2.c
   │
-  ├── Another_Student_Assign1_987654321.rar   <-- Now supports RAR files
-  │   │ # Extracted to folder Another_Student_Assign1_987654321/
+  ├── Another_Student_Assign1_<STUDENT_ID_2>.rar   <-- Now supports RAR files
+  │   │ # Extracted to folder Another_Student_Assign1_<STUDENT_ID_2>/
   │   └── SubmittedFiles/          <-- Single subfolder is OK
   │       ├── program_q1.c
   │       └── library_q2.c
   │       └── readme.txt
   │
-  └── Problem_Student_Assign1_111223344.zip
-      │ # Extracted to folder Problem_Student_Assign1_111223344/
+  └── Problem_Student_Assign1_<STUDENT_ID_3>.zip
+      │ # Extracted to folder Problem_Student_Assign1_<STUDENT_ID_3>/
       └── source.c                <-- File doesn't match _qN.c pattern, will cause error in submit_error.txt
   ```
   
@@ -227,6 +243,7 @@ Recommended for interactive use.
     *   The "Configuration" section displays the current questions and weights in a table.
     *   Modify folder names and weights directly in the table.
     *   Use "Add Question" to add a new empty row or "Remove Last" to delete the bottom row.
+    *   Open **Scoring Options** to edit submission penalties, per-test scoring, and LLM compile repair.
     *   Edit the "Submission Error Penalty" value in its field.
     *   Check "Apply penalty per error (cumulative)" if you want penalties to add up for each error a student has. Leave unchecked to apply only a single penalty per student regardless of error count.
     *   Choose "Test Case Scoring" mode:
@@ -238,7 +255,7 @@ Recommended for interactive use.
         *   The "Apply Config" button will be highlighted if changes are unapplied.
         *   The "Run Preprocess" and "Run Grading" buttons are **disabled** if the configuration is invalid or has unapplied changes.
 4.  **Set Dependencies:**
-    *   The "Dependencies" section allows you to configure paths to required executables:
+    *   Open the **Maintenance** tab. The "Dependencies" section allows you to configure paths to required executables:
         *   **Visual Studio Path**: Path to your Visual Studio environment's vcvars64.bat file (required for grading).
         *   **WinRAR Path**: Path to your WinRAR.exe or UnRAR.exe (only required if RAR support is enabled).
     *   After setting or changing paths, click the corresponding "Apply" button to validate the path.
@@ -252,9 +269,9 @@ Recommended for interactive use.
     *   **Grading:** 
         *   Check the "Slim Output" box if you only want the final `final_grades.xlsx` to contain `ID_number` and `Final_Grade` columns.
         *   Click "Run Grading" to start the compilation, execution, and report generation (button will be disabled until VS path is validated).
-        *   Click **LLM Score Review** after grading to open a score/notes table. Select unlocked rows, choose Gemini or Fake/Offline, and request a grader-facing explanation of deductions.
-    *   **Clear Actions:** Click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, Clear Repair, Clear Reviews, All) use the *currently applied GUI question list*. **Clear Reviews** unlocks saved post-scoring LLM review rows so they can be reviewed again.
-    *   **Output:** Logs, progress descriptions, and the progress bar appear at the bottom. Long tasks can be cancelled.
+        *   Click **LLM Score Review** after grading to open a score/notes table. Use **Search ID** to filter local rows by student ID, select unlocked rows, choose Gemini or Fake/Offline, and request a grader-facing explanation of deductions. Student IDs remain excluded from the LLM prompt.
+    *   **Clear Actions:** Open the **Maintenance** tab and click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, Clear Repair, Clear Reviews, All) use the *currently applied GUI question list*. **Clear Reviews** unlocks saved post-scoring LLM review rows so they can be reviewed again.
+    *   **Output:** Logs are available from the collapsible **Console Output** drawer at the bottom. Progress descriptions and the progress bar stay visible, and long tasks can be cancelled.
 
 ### Command Line Interface (CLI)
 
@@ -384,10 +401,16 @@ The GUI has three separate LLM workflows:
 
 The default Gemini model is `gemini-3.5-flash` through `DEFAULT_GEMINI_MODEL`; use the GUI model picker or `GEMINI_MODEL` environment variable to choose another model available to your key. Fake/Offline is deterministic and intended for regression tests and demos, not real grading judgment.
 
-To refresh the README review screenshot from a synthetic local fixture:
+To refresh all README GUI screenshots from a synthetic local fixture:
 
 ```bash
-python tools/capture_review_screenshot.py
+python tools/capture_readme_screenshots.py
+```
+
+The generated screenshots use fake public demo data only, including `demo_student` instead of a real student ID. To capture separate visual-smoke screenshots for layout inspection:
+
+```bash
+python tools/capture_gui_layout_screenshots.py
 ```
 
 ---
