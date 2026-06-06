@@ -254,6 +254,45 @@ class TestPostScoringReview(unittest.TestCase):
                 os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
                 os.chdir(original_cwd)
 
+    def test_review_window_headers_sort_and_table_uses_dark_style(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                self._add_review_student("111111111", grade=97)
+                self._add_review_student("999999999", grade=91)
+                os.environ["C_TESTER_SKIP_STARTUP_VALIDATION"] = "1"
+                os.environ["C_TESTER_SUPPRESS_TK_BGERRORS"] = "1"
+                from c_tester import gui
+
+                with patch("c_tester.gui.get_google_api_key", return_value=None):
+                    app = gui.App()
+                    app.withdraw()
+                    window = gui.PostScoringReviewWindow(app)
+                    window.withdraw()
+                    try:
+                        self.assertEqual(window.table_style.lookup("Review.Treeview", "background"), "#1f1f1f")
+                        self.assertIn("Student ID", window.review_tree.heading("student_id")["text"])
+
+                        window.sort_review_table("score")
+                        self.assertEqual(window.review_sort_column, "score")
+                        self.assertFalse(window.review_sort_descending)
+                        self.assertEqual([case.student_id for case in window.visible_cases], ["999999999", "111111111", "123456789"])
+                        self.assertIn("▲", window.review_tree.heading("score")["text"])
+
+                        window.sort_review_table("score")
+                        self.assertTrue(window.review_sort_descending)
+                        self.assertEqual([case.student_id for case in window.visible_cases], ["123456789", "111111111", "999999999"])
+                        self.assertIn("▼", window.review_tree.heading("score")["text"])
+                    finally:
+                        window.destroy()
+                        app.shutdown_for_tests()
+            finally:
+                os.environ.pop("C_TESTER_SKIP_STARTUP_VALIDATION", None)
+                os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
+                os.chdir(original_cwd)
+
     def test_review_window_many_rows_filter_and_refresh_stay_fast(self):
         original_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as temp_dir:
