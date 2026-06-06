@@ -104,6 +104,14 @@ def extract_wrong_inputs(text):
     return None # Return None if the line doesn't exist
 
 
+def extract_grade_calculation(text):
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("(Calculated grade is:"):
+            return stripped[1:-1] if stripped.endswith(")") else stripped
+    return None
+
+
 def extract_timeout_inputs(text):
     """Extracts the list of timeout inputs from the text.
     Looks for a pattern like 'Timeout Inputs: input1, input2, ...'
@@ -331,6 +339,7 @@ def create_excel_for_grades(parent_folders):
             original_compilation_error = extract_original_compilation_error(text)
             timeouts = extract_timeouts(text)
             wrong_inputs_str = extract_wrong_inputs(text)
+            grade_calculation = extract_grade_calculation(text)
             timeout_inputs_str = extract_timeout_inputs(text)  # Extract the new timeout inputs
             repair_status = extract_compilation_repair_status(text)
             repair_attempts = extract_compilation_repair_attempts(text)
@@ -344,6 +353,7 @@ def create_excel_for_grades(parent_folders):
                 original_compilation_error,
                 timeouts,
                 wrong_inputs_str,
+                grade_calculation,
                 timeout_inputs_str,
                 repair_status,
                 repair_attempts,
@@ -359,6 +369,7 @@ def create_excel_for_grades(parent_folders):
             "Original_Compilation_Error",
             "Timeouts",
             "Wrong_Inputs",
+            "Grade_Calculation",
             "Timeout_Inputs",
             "Compilation_Repair_Status",
             "Compilation_Repair_Attempts",
@@ -374,6 +385,7 @@ def create_excel_for_grades(parent_folders):
             write_text_columns(worksheet, df, [
                 "ID_number",
                 "Wrong_Inputs",
+                "Grade_Calculation",
                 "Timeout_Inputs",
                 "Compilation_Repair_Status",
                 "Compilation_Repair_Note",
@@ -438,6 +450,7 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
             "Original_Compilation_Error": f"Original_Compilation_Error_{folder}",
             "Timeouts": f"Timeouts_{folder}",
             "Wrong_Inputs": f"Wrong_Inputs_{folder}",
+            "Grade_Calculation": f"Grade_Calculation_{folder}",
             "Timeout_Inputs": f"Timeout_Inputs_{folder}",
             "Compilation_Repair_Status": f"Compilation_Repair_Status_{folder}",
             "Compilation_Repair_Attempts": f"Compilation_Repair_Attempts_{folder}",
@@ -455,6 +468,7 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
     compile_columns = [col for col in final_df.columns if col.startswith("Compilation_Error_")]
     original_compile_columns = [col for col in final_df.columns if col.startswith("Original_Compilation_Error_")]
     wrong_input_columns = [col for col in final_df.columns if col.startswith("Wrong_Inputs_")]
+    grade_calculation_columns = [col for col in final_df.columns if col.startswith("Grade_Calculation_")]
     timeout_input_columns = [col for col in final_df.columns if col.startswith("Timeout_Inputs_")]  # Add new column type
     repair_status_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Status_")]
     repair_attempt_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Attempts_")]
@@ -471,6 +485,8 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
         final_df[col] = final_df[col].where(final_df[col].notna(), False).astype(bool)
     for col in wrong_input_columns:
         final_df[col] = final_df[col].fillna("")  # Fill missing wrong inputs with empty string
+    for col in grade_calculation_columns:
+        final_df[col] = final_df[col].fillna("")
     for col in timeout_input_columns:
         final_df[col] = final_df[col].fillna("")  # Fill missing timeout inputs with empty string
     for col in repair_status_columns + repair_note_columns:
@@ -562,7 +578,9 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                 q_name_match = re.match(r'Wrong_Inputs_(Q\d+)', col_name)
                 if q_name_match:
                     q_name = q_name_match.group(1)
-                    failed_cases_list.append(f"{q_name}: {wrong_inputs_str}")
+                    calculation = row.get(f"Grade_Calculation_{q_name}", "")
+                    calculation_text = f" | {calculation}" if calculation else ""
+                    failed_cases_list.append(f"{q_name}: {wrong_inputs_str}{calculation_text}")
         if failed_cases_list:
             comments_parts.append("Failed Test Cases:\n" + "\n".join(failed_cases_list))
         
@@ -695,6 +713,7 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_er
                 if col == ID_COLUMN
                 or col in (COMMENTS_COLUMN, PENALTY_APPLIED_COLUMN)
                 or col.startswith("Wrong_Inputs_")
+                or col.startswith("Grade_Calculation_")
                 or col.startswith("Timeout_Inputs_")
                 or col.startswith("Compilation_Repair_Status_")
                 or col.startswith("Compilation_Repair_Note_")

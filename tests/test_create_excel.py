@@ -10,6 +10,7 @@ from c_tester.create_excel import (
     extract_compilation_repair_note,
     extract_compilation_repair_penalty,
     extract_compilation_repair_status,
+    extract_grade_calculation,
     extract_original_compilation_error,
     parse_submit_errors,
 )
@@ -51,6 +52,20 @@ class TestCreateExcelParsing(unittest.TestCase):
         self.assertEqual(extract_compilation_repair_attempts(text), 2)
         self.assertEqual(extract_compilation_repair_penalty(text), 10)
         self.assertEqual(extract_compilation_repair_note(text), "added missing semicolon.")
+
+    def test_extract_grade_calculation(self):
+        text = (
+            "Grade: 96%\n"
+            "(Calculated grade is: 96.00% (deducted 2 point(s) x 2 failed test case(s); "
+            "3/5 correct, percentage would be 60.00%))\n"
+            "Wrong Inputs: 3, 7\n"
+        )
+
+        self.assertEqual(
+            extract_grade_calculation(text),
+            "Calculated grade is: 96.00% (deducted 2 point(s) x 2 failed test case(s); "
+            "3/5 correct, percentage would be 60.00%)",
+        )
 
     def test_final_comments_include_weighted_grade_calculation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -107,6 +122,37 @@ class TestCreateExcelParsing(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_failed_test_cases_include_question_grade_calculation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(temp_dir)
+                folder_data = {
+                    "Q1": self._grade_df(
+                        "123456789",
+                        96,
+                        wrong_inputs="3, 7",
+                        grade_calculation=(
+                            "Calculated grade is: 96.00% (deducted 2 point(s) x 2 failed test case(s); "
+                            "3/5 correct, percentage would be 60.00%)"
+                        ),
+                    ),
+                    "Q2": self._grade_df("123456789", 100),
+                }
+
+                result = compute_final_grades(folder_data, {"Q1": 50, "Q2": 50}, penalty=5, slim=True)
+
+                self.assertEqual(result.loc[0, "Final_Grade"], 98)
+                comments = result.loc[0, "Comments"]
+                self.assertIn("Failed Test Cases:", comments)
+                self.assertIn(
+                    "Q1: 3, 7 | Calculated grade is: 96.00% "
+                    "(deducted 2 point(s) x 2 failed test case(s); 3/5 correct, percentage would be 60.00%)",
+                    comments,
+                )
+            finally:
+                os.chdir(original_cwd)
+
     def test_final_comments_show_compile_repair_penalty_in_question_breakdown(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original_cwd = os.getcwd()
@@ -138,6 +184,7 @@ class TestCreateExcelParsing(unittest.TestCase):
         student_id,
         grade,
         wrong_inputs="",
+        grade_calculation="",
         timeout_inputs="",
         repair_status="",
         repair_attempts=0,
@@ -153,6 +200,7 @@ class TestCreateExcelParsing(unittest.TestCase):
                     "Original_Compilation_Error": bool(repair_status),
                     "Timeouts": 0,
                     "Wrong_Inputs": wrong_inputs,
+                    "Grade_Calculation": grade_calculation,
                     "Timeout_Inputs": timeout_inputs,
                     "Compilation_Repair_Status": repair_status,
                     "Compilation_Repair_Attempts": repair_attempts,
