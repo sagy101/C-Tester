@@ -87,6 +87,13 @@ def clear_repair_files(questions):
         clear_folder_tree(os.path.join(q_folder, 'llm_fixed_output'))
     log("Finished clearing LLM compile repair folders.", level="success")
 
+def clear_review_files(questions):
+    """Clears generated post-scoring LLM review JSON files."""
+    log("Clearing post-scoring review folders...", level="info")
+    for q_folder in questions:
+        clear_folder_tree(os.path.join(q_folder, 'review'))
+    log("Finished clearing post-scoring review folders.", level="success")
+
 def clear_c_files(questions):
     """Clears the contents of the 'C' folder for each question."""
     log("Clearing C folders...", level="info") # Use log
@@ -141,6 +148,7 @@ def clear_all(questions):
     clear_grades(questions)
     clear_output(questions)  # This will now also delete submit_error.txt
     clear_repair_files(questions)
+    clear_review_files(questions)
     clear_excels()
     clear_build_files()
     log("Finished clear all operation.", level="success") 

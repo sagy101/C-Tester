@@ -34,6 +34,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
     *   Optional per-test-case deduction mode for question scoring.
     *   Lists failed test cases and timeout-causing inputs in the Comments column.
     *   Optional "slim" mode for final grades only.
+    *   Post-scoring LLM review screen for explaining low scores and Excel notes from selected rows.
 *   **Dual Interface:**
     *   Modern GUI (`python -m c_tester.gui`) for interactive use with guided setup, progress display, and cancellation.
     *   Robust CLI (`python -m c_tester.cli`) for scripting and automation.
@@ -42,7 +43,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
     *   Input validation for ZIP file selection and configuration settings.
     *   Clear status messages and button state management based on validation.
 *   **Flexible Configuration:** Define questions, weights, penalties, and penalty modes in `c_tester/configuration.py` or override via the GUI.
-*   **Cleanup Utilities:** Easily clear generated files (grades, output, C copies, build files, excels) via GUI or CLI.
+*   **Cleanup Utilities:** Easily clear generated files (grades, output, C copies, build files, excels, repair files, and review files) via GUI or CLI.
 
 ---
 
@@ -51,6 +52,10 @@ This project automates the batch grading of multiple C programs. It sets up the 
 **Graphical User Interface (GUI):**
 
 ![GUI Screenshot](docs/gui.png)
+
+**Post-Scoring LLM Review Screen:**
+
+![Post-Scoring LLM Review Screen](docs/post_scoring_review.png)
 
 **Command Line Interface (CLI) Example Output:**
 
@@ -69,7 +74,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
     *   WinRAR or UnRAR executable installed
     *   Path to WinRAR configured in `c_tester/configuration.py` (default: `C:\Program Files\WinRAR\UnRAR.exe`) or from the GUI Setup Assistant.
 *   **For checker/scoring features:** `checker_config.json` is optional; if missing or invalid, built-in default checkers are used. Use the Checker Manager to review or save per-question checkers.
-*   **For Gemini/LLM features:** `GOOGLE_API_KEY` must be configured if you use Gemini for checker setup, grading audit, or compile repair. Offline/Fake mode is available for tests and demos only.
+*   **For Gemini/LLM features:** `GOOGLE_API_KEY` must be configured if you use Gemini for checker setup, grading audit, compile repair, or post-scoring review. Offline/Fake mode is available for tests and demos only.
 *   **Dependencies:** Listed in `requirements.txt`.
 
 ---
@@ -110,6 +115,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
     *   `preprocess.py`: Logic for extracting and organizing student submissions.
     *   `process.py`: Visual Studio setup, compilation, execution, output comparison, and compile repair integration.
     *   `create_excel.py`: Individual and final Excel report generation.
+    *   `post_scoring_review.py`: Anonymized LLM review prompts, saved review state, and review artifact loading.
     *   `clear_utils.py`: Functions for cleaning generated files.
     *   `utils.py`: Logging utility and verbosity settings.
 *   `tests/`: Unit, integration, GUI-flow, and synthetic e2e tests.
@@ -124,6 +130,7 @@ This project automates the batch grading of multiple C programs. It sets up the 
     *   `grade/`: Generated text files with individual grades/errors.
         *   Now includes lists of inputs that caused timeouts.
     *   `output/`: Generated text files with student program output for each input.
+    *   `review/`: Generated post-scoring LLM review JSON files. These are local/private and ignored by Git.
     *   `Q*_grades_to_upload.xlsx`: Generated Excel report for the question.
         *   Now includes a "Timeout_Inputs" column.
 *   `final_grades.xlsx`: Generated consolidated final grade report.
@@ -195,6 +202,7 @@ The Setup Assistant validates prerequisites by workflow:
 * **Scoring:** Python dependencies, local `Q*/input.txt` and `Q*/original_sol.c`, `Q*/C/`, valid weights, Visual Studio C++ compiler, checker config/default checker availability, and compile-repair API readiness if compile repair is enabled.
 * **Checker Manager:** Python dependencies and checker configuration/defaults. Gemini-powered suggestions and audits additionally require `GOOGLE_API_KEY`; manual/Fake checker workflows can run without it.
 * **LLM Compile Repair:** Visual Studio compilation prerequisites plus `GOOGLE_API_KEY` for Gemini, or the Fake provider for deterministic tests/demos.
+* **Post-Scoring LLM Review:** Existing Excel/grade/output artifacts from grading plus `GOOGLE_API_KEY` for Gemini, or the Fake provider for deterministic tests/demos.
 
 ---
 
@@ -244,7 +252,8 @@ Recommended for interactive use.
     *   **Grading:** 
         *   Check the "Slim Output" box if you only want the final `final_grades.xlsx` to contain `ID_number` and `Final_Grade` columns.
         *   Click "Run Grading" to start the compilation, execution, and report generation (button will be disabled until VS path is validated).
-    *   **Clear Actions:** Click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, All) use the *currently applied GUI question list*.
+        *   Click **LLM Score Review** after grading to open a score/notes table. Select unlocked rows, choose Gemini or Fake/Offline, and request a grader-facing explanation of deductions.
+    *   **Clear Actions:** Click the desired button. Actions related to specific questions (Clear Grades, Output, C Files, Clear Repair, Clear Reviews, All) use the *currently applied GUI question list*. **Clear Reviews** unlocks saved post-scoring LLM review rows so they can be reviewed again.
     *   **Output:** Logs, progress descriptions, and the progress bar appear at the bottom. Long tasks can be cancelled.
 
 ### Command Line Interface (CLI)
@@ -300,14 +309,16 @@ Suitable for scripting or users preferring the command line. Uses the static con
 
   *   **Clear generated files:**
       ```bash
-      # Clear specific items: grades, output, c, excels, build, repair
+      # Clear specific items: grades, output, c, excels, build, repair, reviews
       python -m c_tester.cli clear <item_to_clear> 
       # Example: Clear build files (.exe, .obj)
       python -m c_tester.cli clear build 
       # Clear LLM compile repair candidates and repaired outputs
       python -m c_tester.cli clear repair
+      # Clear saved post-scoring LLM reviews
+      python -m c_tester.cli clear reviews
       
-      # Clear grades, output, repair artifacts, excels, and build files:
+      # Clear grades, output, repair artifacts, review artifacts, excels, and build files:
       python -m c_tester.cli clear all 
       ```
       *(Note: `clear all` does not clear the `C/` folders.)*
@@ -354,6 +365,30 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   Generates `final_grades.xlsx` (full or slim format) with:
         *   Timeout inputs per question.
         *   Comprehensive Comments column listing failed, timeout, penalty, and compile-repair cases.
+4.  **Post-Scoring Review (GUI only):**
+    *   Reads `final_grades.xlsx`, per-question Excel files, grade text, student code, repaired code when available, and parsed discrepancy blocks.
+    *   Sends only selected rows to the LLM. The real student ID is removed from the prompt and replaced with an anonymous label such as `student_001`.
+    *   The prompt includes anonymized code, notes, grade text, per-question/final Excel fields without `ID_number`, parsed failed inputs, raw student output by input, expected/reference output by input, active grading policy, and compile-repair metadata with IDs redacted.
+    *   The active grading policy tells the LLM whether failed inputs use percentage scoring or a fixed per-input deduction, the fixed deduction amount, whether submission errors are cumulative or once per student, the submission-error penalty amount, and compile-repair penalty settings.
+    *   The LLM returns JSON with a short summary, whether the deduction looks plausible, grouped root causes, inline line comments, fix guidance to reach full score, and a risk note.
+    *   Shows the code with Pygments-backed C syntax highlighting, failed inputs, expected/actual outputs, and the LLM explanation with inline line comments.
+    *   Saves each review under `Q*/review/ID.json`; reviewed rows are locked until those generated review files are cleared.
+
+### Advanced LLM Features
+
+The GUI has three separate LLM workflows:
+
+* **Checker Manager:** Suggests semantic checker JSON, tests it against ground-truth outputs, saves per-question checker configuration, and can sample already graded rows for audit. It can use Gemini or Fake/Offline.
+* **LLM Compile Repair:** During grading, compile failures can be repaired with bounded compile-only LLM attempts. The original student file is never overwritten; candidates go under `Q*/llm_fixed/`, repaired outputs under `Q*/llm_fixed_output/`, and the Excel comments include the repair note and penalty.
+* **LLM Score Review:** After grading, opens a score/notes table. The grader selects rows, and the LLM receives anonymized code, parsed failed inputs, raw student output, expected/reference output, grade text, Excel fields without `ID_number`, notes, active grading policy, and compile-repair metadata with IDs redacted. It returns a concise summary, grouped root causes, inline code comments, and a suggested fix to reach full score.
+
+The default Gemini model is `gemini-3.5-flash` through `DEFAULT_GEMINI_MODEL`; use the GUI model picker or `GEMINI_MODEL` environment variable to choose another model available to your key. Fake/Offline is deterministic and intended for regression tests and demos, not real grading judgment.
+
+To refresh the README review screenshot from a synthetic local fixture:
+
+```bash
+python tools/capture_review_screenshot.py
+```
 
 ---
 
