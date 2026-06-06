@@ -220,6 +220,32 @@ class TestPostScoringReview(unittest.TestCase):
                 os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
                 os.chdir(original_cwd)
 
+    def test_review_window_sorts_rows_by_student_id(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                self._add_review_student("111111111", grade=97)
+                os.environ["C_TESTER_SKIP_STARTUP_VALIDATION"] = "1"
+                os.environ["C_TESTER_SUPPRESS_TK_BGERRORS"] = "1"
+                from c_tester import gui
+
+                with patch("c_tester.gui.get_google_api_key", return_value=None):
+                    app = gui.App()
+                    app.withdraw()
+                    window = gui.PostScoringReviewWindow(app)
+                    window.withdraw()
+                    try:
+                        self.assertEqual([case.student_id for case in window.visible_cases], ["111111111", "123456789"])
+                    finally:
+                        window.destroy()
+                        app.shutdown_for_tests()
+            finally:
+                os.environ.pop("C_TESTER_SKIP_STARTUP_VALIDATION", None)
+                os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
+                os.chdir(original_cwd)
+
     def _create_review_fixture(self):
         long_note = (
             "Q1 wrong input 0. This is a deliberately long final comment with preprocessing penalty context, "
@@ -268,6 +294,63 @@ class TestPostScoringReview(unittest.TestCase):
             ]
         ).to_excel("final_grades.xlsx", index=False)
         return long_note
+
+    def _add_review_student(self, student_id, grade=97):
+        with open(os.path.join("Q1", "C", f"{student_id}.c"), "w", encoding="utf-8") as source_file:
+            source_file.write("#include <stdio.h>\nint main(){printf(\"also bad\");return 0;}\n")
+        with open(os.path.join("Q1", "output", f"{student_id}.txt"), "w", encoding="utf-8") as output_file:
+            output_file.write("Input: 0\nOutput: Another actual output\n")
+        with open(os.path.join("Q1", "grade", f"{student_id}.txt"), "w", encoding="utf-8") as grade_file:
+            grade_file.write(
+                f"Grade: {grade}%\n"
+                "Wrong Inputs: 0\n\n"
+                "Discrepancies:\n"
+                "Input: 0\n"
+                "Expected: 0 has no Divisors!\n"
+                "Actual: also bad\n"
+                "Semantic Reason: zero input must explicitly state there are no divisors\n"
+            )
+
+        q1_path = os.path.join("Q1", "Q1_grades_to_upload.xlsx")
+        q1_df = pd.read_excel(q1_path)
+        q1_df = pd.concat(
+            [
+                q1_df,
+                pd.DataFrame(
+                    [
+                        {
+                            "ID_number": student_id,
+                            "Grade": grade,
+                            "Wrong_Inputs": "0",
+                            "Compilation_Error": False,
+                            "Timeouts": "",
+                            "Comments": "Q1 wrong input 0",
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+        q1_df.to_excel(q1_path, index=False)
+
+        final_df = pd.read_excel("final_grades.xlsx")
+        final_df = pd.concat(
+            [
+                final_df,
+                pd.DataFrame(
+                    [
+                        {
+                            "ID_number": student_id,
+                            "Q1": grade,
+                            "Final_Grade": grade,
+                            "Comments": "Q1 wrong input 0",
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+        final_df.to_excel("final_grades.xlsx", index=False)
 
 
 if __name__ == "__main__":
