@@ -405,6 +405,37 @@ The GUI has three separate LLM workflows:
 
 The default Gemini model is `gemini-3.5-flash` through `DEFAULT_GEMINI_MODEL`; use the GUI model picker or `GEMINI_MODEL` environment variable to choose another model available to your key. Fake/Offline is deterministic and intended for regression tests and demos, not real grading judgment.
 
+#### LLM Endpoint Evals
+
+The project includes a deterministic-first eval runner for all app LLM endpoints: checker suggestion, audit scoring, compile repair, and post-scoring review. It ships with common intro-C college homework cases such as missing semicolons, missing includes, wrong `main`, loop syntax errors, true `too_bad` compile failures, assignment-vs-comparison mistakes, integer division, off-by-one loops, `scanf` misuse, checker-template selection, unsupported float/table checker cases, and audit consistency boundaries.
+
+Run the offline smoke suite with the fake provider:
+
+```bash
+python -m c_tester.llm_eval --provider fake
+```
+
+Run against Gemini when `GOOGLE_API_KEY` is set:
+
+```bash
+python -m c_tester.llm_eval --provider gemini --model gemini-3.5-flash --json-output llm_eval_report.json
+```
+
+Filter to a single endpoint or case while iterating:
+
+```bash
+python -m c_tester.llm_eval --provider gemini --endpoint compile_fix
+python -m c_tester.llm_eval --provider gemini --case-id compile_missing_stdio
+```
+
+Judging is layered to control cost. Deterministic gates always run first: JSON shape, required fields, expected labels such as `status` / `checker` / `verdict`, forbidden ID leaks, fixed-code sanity checks, and required explanation keywords. Optional LLM-as-a-judge only runs after deterministic gates pass and only for cases with subjective criteria:
+
+```bash
+python -m c_tester.llm_eval --provider gemini --include-llm-judge --judge-provider gemini --json-output llm_eval_report.json
+```
+
+Adding future LLM endpoints is intended to be local: add an endpoint spec, built-in eval cases, deterministic gates, and optional judge criteria in `c_tester/llm_eval.py`.
+
 To refresh all README GUI screenshots from a synthetic local fixture:
 
 ```bash
