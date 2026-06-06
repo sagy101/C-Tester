@@ -5,6 +5,14 @@ import pandas as pd
 from .utils import log
 from .configuration import penalty
 
+ID_COLUMN = "ID_number"
+COMMENTS_COLUMN = "Comments"
+FINAL_GRADE_COLUMN = "Final_Grade"
+PENALTY_APPLIED_COLUMN = "Penalty Applied"
+WEIGHTED_SUBTOTAL_COLUMN = "_Weighted_Subtotal"
+SUBMISSION_PENALTY_AMOUNT_COLUMN = "_Submission_Penalty_Amount"
+SUBMISSION_PENALTY_COUNT_COLUMN = "_Submission_Penalty_Count"
+
 
 def delete_existing_excel_files(directory):
     """
@@ -129,6 +137,76 @@ def write_text_columns(worksheet, df, columns):
                 worksheet.write_blank(row_index, column_index, None)
             else:
                 worksheet.write_string(row_index, column_index, str(value))
+
+
+def format_grade_number(value, decimals=2):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if decimals == 0 or numeric.is_integer():
+        return f"{numeric:.0f}"
+    return f"{numeric:.{decimals}f}"
+
+
+def parse_grade_column_name(column_name):
+    match = re.match(r"^Grade_(.+)_(\d+(?:\.\d+)?)%$", column_name)
+    if not match:
+        return None, None
+    return match.group(1), float(match.group(2))
+
+
+def calculate_submission_penalty(reason, penalty_value, per_error_penalty):
+    if not reason:
+        return 0, 0, ""
+    if per_error_penalty:
+        error_count = len([issue for issue in reason.split("; ") if issue.strip()])
+        total_penalty = penalty_value * error_count
+        penalty_text = f"{reason} (-{format_grade_number(penalty_value)}% x {error_count} = -{format_grade_number(total_penalty)}%)"
+        return error_count, total_penalty, penalty_text
+    penalty_text = f"{reason} (-{format_grade_number(penalty_value)}%)"
+    return 1, penalty_value, penalty_text
+
+
+def build_grade_calculation_comment(row, grade_columns, repair_penalty_columns, weighted_subtotal, final_grade):
+    lines = ["Grade Calculation:"]
+    for grade_column in grade_columns:
+        question_name, weight = parse_grade_column_name(grade_column)
+        if question_name is None:
+            continue
+        grade_value = float(row[grade_column])
+        contribution = grade_value * weight / 100
+        repair_note = repair_calculation_note(row, question_name, repair_penalty_columns)
+        lines.append(
+            f"{question_name}: {format_grade_number(grade_value)} x {format_grade_number(weight)}% = "
+            f"{contribution:.2f}{repair_note}"
+        )
+
+    penalty_amount = float(row.get(SUBMISSION_PENALTY_AMOUNT_COLUMN, 0) or 0)
+    penalty_count = int(row.get(SUBMISSION_PENALTY_COUNT_COLUMN, 0) or 0)
+    lines.append(f"Weighted subtotal: {float(weighted_subtotal):.2f}")
+    if penalty_amount:
+        if penalty_count > 1:
+            per_issue_penalty = penalty_amount / penalty_count
+            lines.append(
+                f"Submission penalty: -{format_grade_number(per_issue_penalty)} x {penalty_count} = "
+                f"-{format_grade_number(penalty_amount)}"
+            )
+        else:
+            lines.append(f"Submission penalty: -{format_grade_number(penalty_amount)}")
+    post_penalty = max(0, float(weighted_subtotal) - penalty_amount)
+    lines.append(f"Final grade: ceil(max(0, {post_penalty:.2f})) = {format_grade_number(final_grade, decimals=0)}")
+    return "\n".join(lines)
+
+
+def repair_calculation_note(row, question_name, repair_penalty_columns):
+    penalty_column = f"Compilation_Repair_Penalty_{question_name}"
+    if penalty_column not in repair_penalty_columns:
+        return ""
+    repair_penalty_value = float(row.get(penalty_column, 0) or 0)
+    if repair_penalty_value <= 0:
+        return ""
+    return f" (includes compile repair penalty -{format_grade_number(repair_penalty_value)})"
 
 
 def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
@@ -330,7 +408,7 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
             normalized_id_mapping[normalized_id] = str_id
             
     log(f"Found {len(all_student_ids)} unique student IDs in grade files", "info")
-    log(f"Sample student IDs: {', '.join(sorted(list(all_student_ids))[:5])}...", "info", verbosity=2)
+    log(f"Sample student IDs: {', '.join(sorted(all_student_ids)[:5])}...", "info", verbosity=2)
     
     # Check if any student IDs match the submission errors after normalization
     matching_ids = set()
@@ -345,7 +423,7 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
     
     log(f"Found {len(matching_ids)} matching IDs between grade files and submission errors", "info")
     if matching_ids:
-        log(f"Matching IDs: {', '.join(sorted(list(matching_ids))[:5])}...", "info", verbosity=2)
+        log(f"Matching IDs: {', '.join(sorted(matching_ids)[:5])}...", "info", verbosity=2)
     else:
         log("No matching IDs found between grade files and submission errors!", "warning")
     
@@ -369,7 +447,7 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
         if final_df is None:
             final_df = df_temp
         else:
-            final_df = pd.merge(final_df, df_temp, on="ID_number", how="outer")
+            final_df = pd.merge(final_df, df_temp, on="ID_number", how="outer", validate="one_to_one")
 
     # Fill missing values with 0 for numeric columns and False for compilation errors.
     grade_columns = [col for col in final_df.columns if col.startswith("Grade_")]
@@ -404,9 +482,12 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
         grade_column = f"Grade_{folder}_{weight}%"
         if grade_column in final_df.columns:
             final_df["Final_Grade"] += final_df[grade_column] * weight / 100
+    final_df[WEIGHTED_SUBTOTAL_COLUMN] = final_df[FINAL_GRADE_COLUMN]
 
     # Apply Penalty
-    final_df["Penalty Applied"] = "" # Initialize empty column
+    final_df[PENALTY_APPLIED_COLUMN] = "" # Initialize empty column
+    final_df[SUBMISSION_PENALTY_AMOUNT_COLUMN] = 0.0
+    final_df[SUBMISSION_PENALTY_COUNT_COLUMN] = 0
     penalty_applied_count = 0
 
     for index, row in final_df.iterrows():
@@ -418,48 +499,39 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
             reason = submission_errors[error_id]
             penalty_applied_count += 1
             original_grade = row["Final_Grade"]
-            
-            # Calculate penalty based on number of errors if per_error_penalty is True
-            if per_error_penalty:
-                # Count the number of separate errors (split by semicolons)
-                error_list = reason.split("; ")
-                error_count = len(error_list)
-                total_penalty = penalty * error_count
-                penalized_grade = max(0, original_grade - total_penalty)
-                penalty_text = f"{reason} (-{penalty}% x {error_count} = -{total_penalty}%)"
-                log(f"Applied penalty ({penalty}% x {error_count} = {total_penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
-            else:
-                # Traditional single penalty regardless of error count
-                penalized_grade = max(0, original_grade - penalty)
-                penalty_text = f"{reason} (-{penalty}%)"
-                log(f"Applied penalty ({penalty}%) to ID {student_id} (matched to error ID {error_id}). Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
+            error_count, total_penalty, penalty_text = calculate_submission_penalty(reason, penalty, per_error_penalty)
+            penalized_grade = max(0, original_grade - total_penalty)
+            log(
+                f"Applied penalty ({format_grade_number(total_penalty)}%) to ID {student_id} "
+                f"(matched to error ID {error_id}). Original: {original_grade:.2f}, "
+                f"Penalized: {penalized_grade:.2f}",
+                "info",
+                verbosity=2,
+            )
             
             final_df.loc[index, "Final_Grade"] = penalized_grade
-            final_df.loc[index, "Penalty Applied"] = penalty_text
+            final_df.loc[index, PENALTY_APPLIED_COLUMN] = penalty_text
+            final_df.loc[index, SUBMISSION_PENALTY_AMOUNT_COLUMN] = total_penalty
+            final_df.loc[index, SUBMISSION_PENALTY_COUNT_COLUMN] = error_count
         
         # Traditional matching (backward compatibility)
         elif student_id in submission_errors:
             reason = submission_errors[student_id]
             penalty_applied_count += 1
             original_grade = row["Final_Grade"]
-            
-            # Calculate penalty based on number of errors if per_error_penalty is True
-            if per_error_penalty:
-                # Count the number of separate errors (split by semicolons)
-                error_list = reason.split("; ")
-                error_count = len(error_list)
-                total_penalty = penalty * error_count
-                penalized_grade = max(0, original_grade - total_penalty)
-                penalty_text = f"{reason} (-{penalty}% x {error_count} = -{total_penalty}%)"
-                log(f"Applied penalty ({penalty}% x {error_count} = {total_penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
-            else:
-                # Traditional single penalty regardless of error count
-                penalized_grade = max(0, original_grade - penalty)
-                penalty_text = f"{reason} (-{penalty}%)"
-                log(f"Applied penalty ({penalty}%) to ID {student_id}. Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}", "info", verbosity=2)
+            error_count, total_penalty, penalty_text = calculate_submission_penalty(reason, penalty, per_error_penalty)
+            penalized_grade = max(0, original_grade - total_penalty)
+            log(
+                f"Applied penalty ({format_grade_number(total_penalty)}%) to ID {student_id}. "
+                f"Original: {original_grade:.2f}, Penalized: {penalized_grade:.2f}",
+                "info",
+                verbosity=2,
+            )
             
             final_df.loc[index, "Final_Grade"] = penalized_grade
-            final_df.loc[index, "Penalty Applied"] = penalty_text
+            final_df.loc[index, PENALTY_APPLIED_COLUMN] = penalty_text
+            final_df.loc[index, SUBMISSION_PENALTY_AMOUNT_COLUMN] = total_penalty
+            final_df.loc[index, SUBMISSION_PENALTY_COUNT_COLUMN] = error_count
 
     if penalty_applied_count > 0:
         log(f"Applied submission error penalty to {penalty_applied_count} students.", "warning")
@@ -467,12 +539,20 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
         log("No penalties were applied to any students", "warning")
 
     # Round the final grade
-    final_df["Final_Grade"] = final_df["Final_Grade"].apply(math.ceil)
+    final_df[FINAL_GRADE_COLUMN] = final_df[FINAL_GRADE_COLUMN].apply(math.ceil)
 
     # --- Create comprehensive Comments column with all information --- 
-    final_df["Comments"] = ""
+    final_df[COMMENTS_COLUMN] = ""
     for index, row in final_df.iterrows():
-        comments_parts = []
+        comments_parts = [
+            build_grade_calculation_comment(
+                row,
+                grade_columns,
+                repair_penalty_columns,
+                row[WEIGHTED_SUBTOTAL_COLUMN],
+                row[FINAL_GRADE_COLUMN],
+            )
+        ]
         
         # 1. Add Failed Test Cases
         failed_cases_list = []
@@ -529,24 +609,32 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
             comments_parts.append("Timeout Cases:\n" + "\n".join(timeout_cases_list))
         
         # 3. Add Penalty reason and amount
-        penalty_info = row["Penalty Applied"]
+        penalty_info = row[PENALTY_APPLIED_COLUMN]
         if penalty_info:
             comments_parts.append(f"Penalty: {penalty_info}")
         
         # Join all comments with newlines
-        final_df.loc[index, "Comments"] = "\n\n".join(comments_parts) if comments_parts else ""
+        final_df.loc[index, COMMENTS_COLUMN] = "\n\n".join(comments_parts) if comments_parts else ""
 
     # --- Handle Slim vs Full Output --- 
     if slim:
         # Slim output now includes ID, Comments, and Grade
-        final_output = final_df[["ID_number", "Comments", "Final_Grade"]]
+        final_output = final_df[[ID_COLUMN, COMMENTS_COLUMN, FINAL_GRADE_COLUMN]]
     else:
         # Full output includes everything else plus Comments, Penalty, Grade
-        excluded_cols = ["ID_number", "Comments", "Penalty Applied", "Final_Grade"]
+        excluded_cols = [
+            ID_COLUMN,
+            COMMENTS_COLUMN,
+            PENALTY_APPLIED_COLUMN,
+            FINAL_GRADE_COLUMN,
+            WEIGHTED_SUBTOTAL_COLUMN,
+            SUBMISSION_PENALTY_AMOUNT_COLUMN,
+            SUBMISSION_PENALTY_COUNT_COLUMN,
+        ]
         other_cols = [col for col in final_df.columns if col not in excluded_cols]
         
         # Define desired column order (ID first, then others, then specific last columns)
-        final_cols_order = ["ID_number"] + sorted(other_cols) + ["Comments", "Penalty Applied", "Final_Grade"]
+        final_cols_order = [ID_COLUMN] + sorted(other_cols) + [COMMENTS_COLUMN, PENALTY_APPLIED_COLUMN, FINAL_GRADE_COLUMN]
         
         # Ensure all columns exist before reordering
         if all(col in final_df.columns for col in final_cols_order):
@@ -555,9 +643,9 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
             log("Warning: Columns mismatch during final reordering, using default order.", "warning")
             # Ensure ID is still first even in fallback
             cols = list(final_df.columns)
-            if "ID_number" in cols:
-                cols.remove("ID_number")
-                final_output = final_df[["ID_number"] + cols]
+            if ID_COLUMN in cols:
+                cols.remove(ID_COLUMN)
+                final_output = final_df[[ID_COLUMN] + cols]
             else:
                 final_output = final_df 
 
@@ -575,7 +663,7 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_er
     :param per_error_penalty: If True, apply penalties per error. If False, apply only once per student.
     :return: None
     """
-    log(f'\nCreating final excel file...', level='success')
+    log('\nCreating final excel file...', level='success')
     # Delete the final grades Excel file from the current directory if it exists
     final_output_excel = "final_grades.xlsx"
     if os.path.exists(final_output_excel):
@@ -604,8 +692,8 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_er
 
             text_columns = [
                 col for col in final_grades_df.columns
-                if col == "ID_number"
-                or col in ("Comments", "Penalty Applied")
+                if col == ID_COLUMN
+                or col in (COMMENTS_COLUMN, PENALTY_APPLIED_COLUMN)
                 or col.startswith("Wrong_Inputs_")
                 or col.startswith("Timeout_Inputs_")
                 or col.startswith("Compilation_Repair_Status_")
