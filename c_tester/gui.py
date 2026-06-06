@@ -34,7 +34,7 @@ def missing_required_packages():
 
 
 def show_requirements_error(missing_packages):
-    install_command = f'"{sys.executable}" -m pip install -r requirements.txt'
+    install_command = f'& "{sys.executable}" -m pip install -r requirements.txt'
     root = tk.Tk()
     root.title("Missing Python Requirements")
     root.geometry("720x360")
@@ -89,23 +89,31 @@ import io
 import os
 import json
 import re # Import regex module
+import shutil
 import time
 
 # Import backend functions & default config
 # Import defaults from configuration.py now
-from configuration import questions as default_questions
-from configuration import folder_weights as default_weights
-from configuration import penalty as default_penalty # Import default penalty
-from configuration import per_error_penalty as default_per_error_penalty # Import default per-error-penalty flag
-from configuration import vs_path as default_vs_path # Import default VS path
-from configuration import winrar_path as default_winrar_path # Import default WinRAR path
+from .configuration import questions as default_questions
+from .configuration import folder_weights as default_weights
+from .configuration import penalty as default_penalty # Import default penalty
+from .configuration import per_error_penalty as default_per_error_penalty # Import default per-error-penalty flag
+from .configuration import test_scoring_mode as default_test_scoring_mode
+from .configuration import test_error_deduction as default_test_error_deduction
+from .configuration import llm_compile_repair_enabled as default_llm_compile_repair_enabled
+from .configuration import llm_compile_repair_penalty as default_llm_compile_repair_penalty
+from .configuration import llm_compile_repair_max_attempts as default_llm_compile_repair_max_attempts
+from .configuration import llm_compile_repair_provider as default_llm_compile_repair_provider
+from .configuration import llm_compile_repair_model as default_llm_compile_repair_model
+from .configuration import vs_path as default_vs_path # Import default VS path
+from .configuration import winrar_path as default_winrar_path # Import default WinRAR path
 # Import validator from configuration now
-from configuration import validate_config
-import configuration
-from preprocess import detect_submission_naming, preprocess_submissions
-from Process import run_tests, setup_visual_studio_environment, read_inputs_from_file, get_ground_truth
-from CreateExcel import create_excels
-from checker_assistant import (
+from .configuration import validate_config
+from . import configuration
+from .preprocess import detect_submission_naming, preprocess_submissions
+from .process import run_tests, setup_visual_studio_environment, read_inputs_from_file, get_ground_truth
+from .create_excel import create_excels
+from .checker_assistant import (
     DEFAULT_GEMINI_MODEL,
     FakeLLMProvider,
     GeminiProvider,
@@ -121,16 +129,17 @@ from checker_assistant import (
     select_audit_cases,
     suggest_checker,
 )
-from semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config
-from clear_utils import (
+from .semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config
+from .clear_utils import (
     clear_grades,
     clear_output,
     clear_excels,
     clear_c_files,
     clear_all,
-    clear_build_files
+    clear_build_files,
+    clear_repair_files,
 )
-from Utils import log # For direct logging if needed, though most comes via redirect
+from .utils import log # For direct logging if needed, though most comes via redirect
 
 # Set a modern theme
 ctk.set_appearance_mode("System")  # Modes: "System" (default), "Dark", "Light"
@@ -224,12 +233,23 @@ class App(ctk.CTk):
         self.gui_weights = default_weights.copy()
         self.gui_penalty = default_penalty  # Initialize GUI penalty
         self.gui_per_error_penalty = default_per_error_penalty  # Initialize per-error penalty flag
+        self.gui_test_scoring_mode = default_test_scoring_mode
+        self.gui_test_error_deduction = default_test_error_deduction
+        self.gui_llm_compile_repair_enabled = default_llm_compile_repair_enabled
+        self.gui_llm_compile_repair_penalty = default_llm_compile_repair_penalty
+        self.gui_llm_compile_repair_max_attempts = default_llm_compile_repair_max_attempts
+        self.gui_llm_compile_repair_provider = default_llm_compile_repair_provider
+        self.gui_llm_compile_repair_model = default_llm_compile_repair_model or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
         self.gui_rar_support = False  # New RAR support variable
         self.gui_vs_path = default_vs_path  # Initialize VS path
         self.gui_winrar_path = default_winrar_path  # Initialize WinRAR path
         self.gui_simple_naming = configuration.use_simple_naming  # Initialize simple naming flag
         self.slim_output_var = tk.BooleanVar(value=False)  # Variable for slim checkbox
         self.per_error_penalty_var = tk.BooleanVar(value=default_per_error_penalty)  # Variable for per-error penalty checkbox
+        self.test_scoring_mode_var = tk.StringVar(value=default_test_scoring_mode)
+        self.llm_compile_repair_var = tk.BooleanVar(value=default_llm_compile_repair_enabled)
+        self.llm_compile_repair_provider_var = tk.StringVar(value=default_llm_compile_repair_provider)
+        self.llm_compile_repair_model_var = tk.StringVar(value=self.gui_llm_compile_repair_model)
         self.config_valid = False
         self.config_dirty = False  # Track unapplied changes
         self.vs_path_dirty = False  # Track unapplied VS path
@@ -237,6 +257,7 @@ class App(ctk.CTk):
         self.current_task_thread = None
         self.cancel_event = None
         self.config_rows = []  # To store row widgets [q_entry, w_entry]
+        self.setup_assistant_window = None
 
         # --- Frames with enhanced styling --- 
         # Top frame with a subtle header background
@@ -263,6 +284,26 @@ class App(ctk.CTk):
         self.controls_frame.grid_columnconfigure((1, 2, 3), weight=2)  # Other sections
         self.controls_frame.grid_rowconfigure(0, weight=1)  # Main sections row
         self.controls_frame.grid_rowconfigure(1, weight=0)  # Dependencies row
+
+        self.setup_status_frame = ctk.CTkFrame(self.top_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
+        self.setup_status_frame.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="ew")
+        self.setup_status_frame.grid_columnconfigure(0, weight=1)
+        self.setup_status_label = ctk.CTkLabel(
+            self.setup_status_frame,
+            text="Setup readiness: checking...",
+            anchor="w",
+            justify="left",
+        )
+        self.setup_status_label.grid(row=0, column=0, padx=12, pady=8, sticky="ew")
+        self.setup_assistant_button = ctk.CTkButton(
+            self.setup_status_frame,
+            text="Setup Assistant",
+            command=self.open_setup_assistant,
+            width=150,
+            height=30,
+            corner_radius=6,
+        )
+        self.setup_assistant_button.grid(row=0, column=1, padx=12, pady=8, sticky="e")
 
         # Section 0: Configuration - Now spans rows 0-1
         self.config_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -317,10 +358,64 @@ class App(ctk.CTk):
             width=250  # Ensure enough width for the text
         )
         self.per_error_penalty_checkbox.pack(side=tk.LEFT, padx=(0, 15))
+
+        self.test_scoring_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
+        self.test_scoring_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(self.test_scoring_frame, text="Test Case Scoring:", anchor="w").pack(side=tk.LEFT, padx=(0, 10))
+        self.test_scoring_menu = ctk.CTkOptionMenu(
+            self.test_scoring_frame,
+            variable=self.test_scoring_mode_var,
+            values=["percentage", "per_error_deduction"],
+            command=lambda _choice: self.mark_config_dirty(),
+            width=170,
+        )
+        self.test_scoring_menu.pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkLabel(self.test_scoring_frame, text="Deduct per failed test:", anchor="w").pack(side=tk.LEFT, padx=(0, 10))
+        self.test_error_deduction_entry = ctk.CTkEntry(self.test_scoring_frame, width=60, border_width=1)
+        self.test_error_deduction_entry.pack(side=tk.LEFT)
+        self.test_error_deduction_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+
+        self.compile_repair_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
+        self.compile_repair_frame.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+        self.compile_repair_checkbox = ctk.CTkCheckBox(
+            self.compile_repair_frame,
+            text="Enable LLM compile repair",
+            variable=self.llm_compile_repair_var,
+            onvalue=True,
+            offvalue=False,
+            command=self.mark_config_dirty,
+            border_width=2,
+            hover=True,
+        )
+        self.compile_repair_checkbox.pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkLabel(self.compile_repair_frame, text="Repair penalty:").pack(side=tk.LEFT, padx=(0, 5))
+        self.compile_repair_penalty_entry = ctk.CTkEntry(self.compile_repair_frame, width=55, border_width=1)
+        self.compile_repair_penalty_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.compile_repair_penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        ctk.CTkLabel(self.compile_repair_frame, text="Max attempts:").pack(side=tk.LEFT, padx=(0, 5))
+        self.compile_repair_attempts_entry = ctk.CTkEntry(self.compile_repair_frame, width=45, border_width=1)
+        self.compile_repair_attempts_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.compile_repair_attempts_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        self.compile_repair_provider_menu = ctk.CTkOptionMenu(
+            self.compile_repair_frame,
+            variable=self.llm_compile_repair_provider_var,
+            values=["Gemini", "Fake"],
+            command=lambda _choice: self.mark_config_dirty(),
+            width=90,
+        )
+        self.compile_repair_provider_menu.pack(side=tk.LEFT, padx=(0, 10))
+        self.compile_repair_model_entry = ctk.CTkEntry(
+            self.compile_repair_frame,
+            width=150,
+            textvariable=self.llm_compile_repair_model_var,
+            border_width=1,
+        )
+        self.compile_repair_model_entry.pack(side=tk.LEFT)
+        self.compile_repair_model_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
         
         # Buttons with improved styling and spacing
         self.config_buttons_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
-        self.config_buttons_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=10)
+        self.config_buttons_frame.grid(row=7, column=0, columnspan=2, padx=10, pady=10)
         self.add_row_button = ctk.CTkButton(
             self.config_buttons_frame, 
             text="➕ Add Question", 
@@ -649,6 +744,17 @@ class App(ctk.CTk):
             hover=True
         )
         self.clear_build_button.grid(row=3, column=0, padx=5, pady=5, sticky="ew")
+
+        self.clear_repair_button = ctk.CTkButton(
+            self.clear_frame,
+            text="Clear Repair",
+            command=lambda: self.run_task(lambda: clear_repair_files(self.gui_questions)),
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
+        self.clear_repair_button.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
         
         self.clear_all_button = ctk.CTkButton(
             self.clear_frame, 
@@ -661,7 +767,7 @@ class App(ctk.CTk):
             corner_radius=button_corner,
             hover=True
         )
-        self.clear_all_button.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+        self.clear_all_button.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 
         # Section 4: Dependencies - Now placed in row 1, spanning columns 1-3
         self.dependencies_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -864,7 +970,7 @@ class App(ctk.CTk):
             self.browse_button, self.preprocess_button, self.run_button, self.checker_manager_button,
             self.open_excel_button, self.open_folder_button,
             self.clear_grades_button, self.clear_output_button, self.clear_c_button,
-            self.clear_excels_button, self.clear_build_button, self.clear_all_button
+            self.clear_excels_button, self.clear_build_button, self.clear_repair_button, self.clear_all_button
         ]
 
         self.setup_button_commands() # Bind commands AFTER initial validation might disable them
@@ -875,7 +981,9 @@ class App(ctk.CTk):
         
         # Perform initial validation of VS and WinRAR paths when the GUI starts
         # Use after() to ensure GUI is fully initialized first
-        self.after(100, self.validate_initial_paths)
+        if not os.getenv("C_TESTER_SKIP_STARTUP_VALIDATION"):
+            self.after(100, self.validate_initial_paths)
+            self.after(250, self.maybe_show_setup_assistant)
 
     def browse_zip(self):
         filepath = filedialog.askopenfilename(
@@ -944,10 +1052,16 @@ class App(ctk.CTk):
     def check_preprocess_button_state(self):
         """Check if preprocess button should be enabled based on zip file selection and WinRAR validation."""
         zip_path = self.zip_path_var.get().strip()
+
+        if not self.config_valid or self.config_dirty:
+            self.preprocess_button.configure(state="disabled")
+            self.update_setup_readiness_banner()
+            return
         
         # First check if a zip file is selected
         if not zip_path:
             self.preprocess_button.configure(state="disabled")
+            self.update_setup_readiness_banner()
             return
         
         # Then check if RAR support is enabled and WinRAR path is valid
@@ -960,6 +1074,7 @@ class App(ctk.CTk):
                 fg_color=COLORS["secondary"],
                 hover_color=("#2aa65a", "#216e3d")
             )
+        self.update_setup_readiness_banner()
 
     def set_controls_state(self, state):
         """Enable or disable all control buttons."""
@@ -997,6 +1112,77 @@ class App(ctk.CTk):
                 subprocess.Popen(["xdg-open", path])
         except Exception as exc:
             messagebox.showerror("Open Failed", f"Could not open:\n{path}\n\n{exc}")
+
+    def get_setup_readiness(self):
+        """Return readiness checks used by the setup assistant and main banner."""
+        zip_path = self.zip_path_var.get().strip()
+        packages_ready = not missing_required_packages()
+        config_ready = self.config_valid and not self.config_dirty
+        zip_ready = bool(zip_path and os.path.exists(zip_path) and zip_path.lower().endswith(".zip"))
+        rar_ready = (not self.rar_support_var.get()) or (not self.winrar_path_dirty and bool(self.gui_winrar_path))
+        vs_ready = not self.vs_path_dirty and bool(self.gui_vs_path)
+        gemini_ready = bool(get_google_api_key())
+        checker_config_ready = isinstance(load_checker_config(DEFAULT_CHECKER_CONFIG_PATH), dict)
+        compile_repair_api_ready = (
+            (not self.llm_compile_repair_var.get())
+            or self.llm_compile_repair_provider_var.get() == "Fake"
+            or gemini_ready
+        )
+        scoring_ready = packages_ready and config_ready and vs_ready and checker_config_ready and compile_repair_api_ready
+        checker_ready = packages_ready and checker_config_ready
+        return {
+            "packages": packages_ready,
+            "assignment": config_ready,
+            "visual_studio": vs_ready,
+            "submissions_zip": zip_ready,
+            "rar": rar_ready,
+            "checker_config": checker_config_ready,
+            "gemini_api": gemini_ready,
+            "compile_repair_api": compile_repair_api_ready,
+            "preprocess": packages_ready and config_ready and zip_ready and rar_ready,
+            "scoring": scoring_ready,
+            "checker": checker_ready,
+            "grading": scoring_ready,
+        }
+
+    def update_setup_readiness_banner(self):
+        if not hasattr(self, "setup_status_label"):
+            return
+        readiness = self.get_setup_readiness()
+        preprocess_status = "ready" if readiness["preprocess"] else "needs setup"
+        scoring_status = "ready" if readiness["scoring"] else "needs setup"
+        checker_status = "ready" if readiness["checker"] else "needs setup"
+        missing = []
+        if not readiness["packages"]:
+            missing.append("Python packages")
+        if not readiness["assignment"]:
+            missing.append("assignment folders/files")
+        if not readiness["visual_studio"]:
+            missing.append("Visual Studio path")
+        if not readiness["submissions_zip"]:
+            missing.append("submissions zip")
+        if not readiness["rar"]:
+            missing.append("WinRAR/UnRAR")
+        if not readiness["checker_config"]:
+            missing.append("checker configuration")
+        if not readiness["compile_repair_api"]:
+            missing.append("GOOGLE_API_KEY or Fake provider for compile repair")
+        detail = "All required checks are ready." if not missing else "Missing: " + ", ".join(missing)
+        color = COLORS["secondary"] if readiness["preprocess"] and readiness["scoring"] and readiness["checker"] else COLORS["warning"]
+        self.setup_status_label.configure(
+            text=f"Setup readiness: Preprocess {preprocess_status}; Scoring {scoring_status}; Checker {checker_status}. {detail}",
+            text_color=color,
+        )
+
+    def open_setup_assistant(self):
+        if self.setup_assistant_window and self.setup_assistant_window.winfo_exists():
+            self.setup_assistant_window.focus()
+            return
+        self.setup_assistant_window = SetupAssistantWindow(self)
+
+    def maybe_show_setup_assistant(self):
+        if not self.config_valid:
+            self.open_setup_assistant()
 
     def update_progress(self, current_step, total_steps, description="Processing..."):
         """Callback function to update the progress bar and description label."""
@@ -1144,7 +1330,19 @@ class App(ctk.CTk):
             log("Configuration validated successfully.", "info")
             
         # --- Proceed with Grading Task --- 
-        run_tests(self.gui_questions, progress_callback, cancel_event)
+        compile_repair_provider = self.make_compile_repair_provider()
+        run_tests(
+            self.gui_questions,
+            progress_callback,
+            cancel_event,
+            scoring_mode=self.gui_test_scoring_mode,
+            deduction_per_error=self.gui_test_error_deduction,
+            llm_compile_repair_enabled=self.gui_llm_compile_repair_enabled,
+            llm_compile_repair_provider=compile_repair_provider,
+            llm_compile_repair_penalty=self.gui_llm_compile_repair_penalty,
+            llm_compile_repair_max_attempts=self.gui_llm_compile_repair_max_attempts,
+            vs_path_override=self.gui_vs_path,
+        )
         if not (cancel_event and cancel_event.is_set()):
              # Get slim state from checkbox variable
              slim_mode = self.slim_output_var.get()
@@ -1152,7 +1350,17 @@ class App(ctk.CTk):
              
              # Log the modes being used
              mode_str = "per error" if per_error_penalty_mode else "once per student"
-             log(f"Creating Excel output (Slim mode: {slim_mode}, Penalty mode: {mode_str})...", "info")
+             scoring_details = self.gui_test_scoring_mode
+             if self.gui_test_scoring_mode == "per_error_deduction":
+                 scoring_details += f" ({self.gui_test_error_deduction:g} point(s) per failed test)"
+             repair_details = "disabled"
+             if self.gui_llm_compile_repair_enabled:
+                 repair_details = (
+                     f"{self.gui_llm_compile_repair_provider}, "
+                     f"{self.gui_llm_compile_repair_max_attempts} attempt(s), "
+                     f"-{self.gui_llm_compile_repair_penalty:g}"
+                 )
+             log(f"Creating Excel output (Slim mode: {slim_mode}, Penalty mode: {mode_str}, Test scoring: {scoring_details}, Compile repair: {repair_details})...", "info")
              
              # Pass the per_error_penalty parameter
              create_excels(self.gui_questions, self.gui_weights, self.gui_penalty, slim=slim_mode, per_error_penalty=per_error_penalty_mode)
@@ -1180,7 +1388,20 @@ class App(ctk.CTk):
         self.clear_c_button.configure(command=lambda: self.run_task(lambda: clear_c_files(self.gui_questions)))
         self.clear_excels_button.configure(command=lambda: self.run_task(self.task_clear_excels_internal))
         self.clear_build_button.configure(command=lambda: self.run_task(clear_build_files))
+        self.clear_repair_button.configure(command=lambda: self.run_task(lambda: clear_repair_files(self.gui_questions)))
         self.clear_all_button.configure(command=lambda: self.run_task(lambda: clear_all(self.gui_questions)))
+
+    def make_compile_repair_provider(self):
+        if not self.gui_llm_compile_repair_enabled:
+            return None
+        if self.gui_llm_compile_repair_provider == "Fake":
+            return FakeLLMProvider()
+        if not get_google_api_key():
+            raise ValueError(
+                "GOOGLE_API_KEY is not set.\n\n"
+                "Open the Checker Manager for setup instructions, or choose Fake for deterministic tests."
+            )
+        return GeminiProvider(model=self.gui_llm_compile_repair_model or None)
 
     def open_checker_manager(self):
         existing_window = getattr(self, "checker_manager_window", None)
@@ -1249,6 +1470,16 @@ class App(ctk.CTk):
         self.penalty_entry.insert(0, str(self.gui_penalty))
         # Set per-error penalty checkbox
         self.per_error_penalty_var.set(self.gui_per_error_penalty)
+        self.test_scoring_mode_var.set(self.gui_test_scoring_mode)
+        self.test_error_deduction_entry.delete(0, tk.END)
+        self.test_error_deduction_entry.insert(0, str(self.gui_test_error_deduction))
+        self.llm_compile_repair_var.set(self.gui_llm_compile_repair_enabled)
+        self.compile_repair_penalty_entry.delete(0, tk.END)
+        self.compile_repair_penalty_entry.insert(0, str(self.gui_llm_compile_repair_penalty))
+        self.compile_repair_attempts_entry.delete(0, tk.END)
+        self.compile_repair_attempts_entry.insert(0, str(self.gui_llm_compile_repair_max_attempts))
+        self.llm_compile_repair_provider_var.set(self.gui_llm_compile_repair_provider)
+        self.llm_compile_repair_model_var.set(self.gui_llm_compile_repair_model)
         # Set RAR support checkbox
         self.rar_support_var.set(self.gui_rar_support)
         # Set simple naming checkbox
@@ -1293,6 +1524,48 @@ class App(ctk.CTk):
             
         # Get per-error penalty value
         parsed_per_error_penalty = self.per_error_penalty_var.get()
+
+        parsed_test_scoring_mode = self.test_scoring_mode_var.get()
+        if parsed_test_scoring_mode not in {"percentage", "per_error_deduction"}:
+            parse_errors.append(f"Invalid test scoring mode: '{parsed_test_scoring_mode}'.")
+
+        test_error_deduction_str = self.test_error_deduction_entry.get().strip()
+        parsed_test_error_deduction = None
+        try:
+            parsed_test_error_deduction = float(test_error_deduction_str)
+            if parsed_test_error_deduction < 0:
+                parse_errors.append("Test error deduction cannot be negative.")
+                parsed_test_error_deduction = None
+        except ValueError:
+            parse_errors.append(f"Invalid numeric value for test error deduction: '{test_error_deduction_str}'.")
+
+        parsed_compile_repair_enabled = self.llm_compile_repair_var.get()
+        parsed_compile_repair_provider = self.llm_compile_repair_provider_var.get()
+        parsed_compile_repair_model = self.llm_compile_repair_model_var.get().strip()
+        if parsed_compile_repair_provider not in {"Gemini", "Fake"}:
+            parse_errors.append(f"Invalid compile repair provider: '{parsed_compile_repair_provider}'.")
+
+        parsed_compile_repair_penalty = None
+        try:
+            parsed_compile_repair_penalty = float(self.compile_repair_penalty_entry.get().strip())
+            if parsed_compile_repair_penalty < 0:
+                parse_errors.append("Compile repair penalty cannot be negative.")
+                parsed_compile_repair_penalty = None
+        except ValueError:
+            parse_errors.append(
+                f"Invalid numeric value for compile repair penalty: '{self.compile_repair_penalty_entry.get().strip()}'."
+            )
+
+        parsed_compile_repair_attempts = None
+        try:
+            parsed_compile_repair_attempts = int(self.compile_repair_attempts_entry.get().strip())
+            if parsed_compile_repair_attempts < 1:
+                parse_errors.append("Compile repair max attempts must be at least 1.")
+                parsed_compile_repair_attempts = None
+        except ValueError:
+            parse_errors.append(
+                f"Invalid numeric value for compile repair max attempts: '{self.compile_repair_attempts_entry.get().strip()}'."
+            )
         
         # Get RAR support value
         parsed_rar_support = self.rar_support_var.get()
@@ -1352,6 +1625,13 @@ class App(ctk.CTk):
              self.gui_weights = parsed_weights
              self.gui_penalty = parsed_penalty
              self.gui_per_error_penalty = parsed_per_error_penalty
+             self.gui_test_scoring_mode = parsed_test_scoring_mode
+             self.gui_test_error_deduction = parsed_test_error_deduction
+             self.gui_llm_compile_repair_enabled = parsed_compile_repair_enabled
+             self.gui_llm_compile_repair_penalty = parsed_compile_repair_penalty
+             self.gui_llm_compile_repair_max_attempts = parsed_compile_repair_attempts
+             self.gui_llm_compile_repair_provider = parsed_compile_repair_provider
+             self.gui_llm_compile_repair_model = parsed_compile_repair_model
              self.gui_rar_support = parsed_rar_support
              self.gui_simple_naming = self.simple_naming_var.get()
              status_text = "Status: Valid ✓"
@@ -1389,12 +1669,14 @@ class App(ctk.CTk):
                 self.clear_grades_button.configure(state=clear_state)
                 self.clear_output_button.configure(state=clear_state)
                 self.clear_c_button.configure(state=clear_state)
+                self.clear_repair_button.configure(state=clear_state)
                 self.clear_all_button.configure(state=clear_state)
             else:
                 clear_state = "disabled"
                 self.clear_grades_button.configure(state=clear_state)
                 self.clear_output_button.configure(state=clear_state)
                 self.clear_c_button.configure(state=clear_state)
+                self.clear_repair_button.configure(state=clear_state)
                 self.clear_all_button.configure(state=clear_state)
         else:
             # If config is invalid, disable most buttons
@@ -1411,6 +1693,7 @@ class App(ctk.CTk):
             self.clear_grades_button.configure(state=clear_state)
             self.clear_output_button.configure(state=clear_state)
             self.clear_c_button.configure(state=clear_state)
+            self.clear_repair_button.configure(state=clear_state)
             self.clear_all_button.configure(state=clear_state)
             
             # Check preprocess button state separately
@@ -1745,6 +2028,243 @@ class App(ctk.CTk):
             log(f"Simple naming mode {'enabled' if new_state else 'disabled'}. Files will be treated as {'hw[0-9].c' if new_state else 'hw[0-9]_q[0-9].c'}.", "info")
 
 
+class SetupAssistantWindow(ctk.CTkToplevel):
+    """Guided first-run setup that reuses the main app's validation state."""
+
+    def __init__(self, parent: App):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("Setup Assistant")
+        self.geometry("860x620")
+        self.minsize(760, 560)
+        self.transient(parent)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self,
+            text="Setup Assistant",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color=COLORS["primary"],
+            anchor="w",
+        ).grid(row=0, column=0, padx=18, pady=(16, 4), sticky="ew")
+        ctk.CTkLabel(
+            self,
+            text="Follow these steps once per assignment. When the readiness checks pass, continue to the main grader screen.",
+            anchor="w",
+            justify="left",
+        ).grid(row=0, column=0, padx=18, pady=(48, 8), sticky="ew")
+
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=1, column=0, padx=18, pady=10, sticky="nsew")
+        self.tabs = {
+            "Assignment": self.tabview.add("1. Assignment"),
+            "Dependencies": self.tabview.add("2. Dependencies"),
+            "Submissions": self.tabview.add("3. Submissions"),
+            "Options": self.tabview.add("4. Options"),
+            "Readiness": self.tabview.add("5. Readiness"),
+        }
+        for tab in self.tabs.values():
+            tab.grid_columnconfigure(0, weight=1)
+
+        self.question_var = tk.StringVar(value=self._first_question())
+        self.readiness_label = None
+        self.next_button = None
+        self._build_assignment_tab()
+        self._build_dependencies_tab()
+        self._build_submissions_tab()
+        self._build_options_tab()
+        self._build_readiness_tab()
+        self.refresh()
+
+    def _first_question(self):
+        questions = self._question_names()
+        return questions[0] if questions else "Q1"
+
+    def _question_names(self):
+        names = []
+        for row_widgets in self.parent.config_rows:
+            q_name = row_widgets[0].get().strip()
+            if q_name:
+                names.append(q_name)
+        return names or list(self.parent.gui_questions)
+
+    def _section_text(self, parent, text, row):
+        label = ctk.CTkLabel(parent, text=text, anchor="w", justify="left", wraplength=760)
+        label.grid(row=row, column=0, padx=12, pady=(8, 4), sticky="ew")
+        return label
+
+    def _build_assignment_tab(self):
+        tab = self.tabs["Assignment"]
+        self._section_text(
+            tab,
+            "Define the questions and weights on the main screen, then use these actions to create local assignment folders and attach private local assets.",
+            0,
+        )
+        ctk.CTkButton(tab, text="Apply Main-Screen Config", command=self._apply_parent_config).grid(
+            row=1, column=0, padx=12, pady=6, sticky="w"
+        )
+        ctk.CTkButton(tab, text="Create Missing Q*/C Folders", command=self._create_scaffolds).grid(
+            row=2, column=0, padx=12, pady=6, sticky="w"
+        )
+
+        selector_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        selector_frame.grid(row=3, column=0, padx=12, pady=(18, 6), sticky="ew")
+        ctk.CTkLabel(selector_frame, text="Question:").pack(side=tk.LEFT, padx=(0, 8))
+        self.question_menu = ctk.CTkOptionMenu(selector_frame, variable=self.question_var, values=self._question_names() or ["Q1"])
+        self.question_menu.pack(side=tk.LEFT)
+
+        ctk.CTkButton(tab, text="Choose input.txt For Selected Question", command=self._copy_input_file).grid(
+            row=4, column=0, padx=12, pady=6, sticky="w"
+        )
+        ctk.CTkButton(tab, text="Choose original_sol.c For Selected Question", command=self._copy_solution_file).grid(
+            row=5, column=0, padx=12, pady=6, sticky="w"
+        )
+        self.assignment_status_label = self._section_text(tab, "", 6)
+
+    def _build_dependencies_tab(self):
+        tab = self.tabs["Dependencies"]
+        self._section_text(
+            tab,
+            "Validate compiler and optional tools. Grading requires a valid Visual Studio C++ environment. RAR and Gemini are only required when enabled.",
+            0,
+        )
+        ctk.CTkButton(tab, text="Validate Visual Studio Path", command=self.parent.apply_vs_path).grid(
+            row=1, column=0, padx=12, pady=6, sticky="w"
+        )
+        ctk.CTkButton(tab, text="Validate WinRAR/UnRAR Path", command=self.parent.apply_winrar_path).grid(
+            row=2, column=0, padx=12, pady=6, sticky="w"
+        )
+        self.dependencies_status_label = self._section_text(tab, "", 3)
+
+    def _build_submissions_tab(self):
+        tab = self.tabs["Submissions"]
+        self._section_text(
+            tab,
+            "Select the main submissions zip. The assistant will reuse the existing filename detector and show whether preprocessing is ready.",
+            0,
+        )
+        ctk.CTkButton(tab, text="Browse Submissions Zip", command=self._browse_zip).grid(row=1, column=0, padx=12, pady=6, sticky="w")
+        ctk.CTkButton(tab, text="Detect Naming Mode", command=lambda: self.parent.detect_and_apply_naming(show_dialog=True)).grid(
+            row=2, column=0, padx=12, pady=6, sticky="w"
+        )
+        self.submissions_status_label = self._section_text(tab, "", 3)
+
+    def _build_options_tab(self):
+        tab = self.tabs["Options"]
+        self._section_text(
+            tab,
+            "Use the main screen for detailed grading options: penalty mode, test scoring mode, slim Excel output, and LLM compile repair. Click Apply Config after changing them.",
+            0,
+        )
+        ctk.CTkButton(tab, text="Apply Current Options", command=self._apply_parent_config).grid(row=1, column=0, padx=12, pady=6, sticky="w")
+        self.options_status_label = self._section_text(tab, "", 2)
+
+    def _build_readiness_tab(self):
+        tab = self.tabs["Readiness"]
+        self.readiness_label = self._section_text(tab, "", 0)
+        button_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        button_frame.grid(row=1, column=0, padx=12, pady=14, sticky="ew")
+        ctk.CTkButton(button_frame, text="Refresh Checks", command=self.refresh).pack(side=tk.LEFT, padx=(0, 8))
+        self.next_button = ctk.CTkButton(button_frame, text="Next To Main Screen", command=self._continue_to_main)
+        self.next_button.pack(side=tk.LEFT)
+
+    def _apply_parent_config(self):
+        self.parent.apply_gui_configuration()
+        self.refresh()
+
+    def _create_scaffolds(self):
+        for question in self._question_names():
+            os.makedirs(os.path.join(question, "C"), exist_ok=True)
+        self.parent.apply_gui_configuration()
+        self.refresh()
+
+    def _copy_input_file(self):
+        self._copy_assignment_file("input.txt", (("Text files", "*.txt"), ("All files", "*.*")))
+
+    def _copy_solution_file(self):
+        self._copy_assignment_file("original_sol.c", (("C files", "*.c"), ("All files", "*.*")))
+
+    def _copy_assignment_file(self, target_name, filetypes):
+        question = self.question_var.get().strip()
+        if not question:
+            messagebox.showwarning("Question Missing", "Choose a question first.")
+            return
+        source = filedialog.askopenfilename(title=f"Choose {target_name}", filetypes=filetypes)
+        if not source:
+            return
+        os.makedirs(question, exist_ok=True)
+        shutil.copy2(source, os.path.join(question, target_name))
+        self.parent.apply_gui_configuration()
+        self.refresh()
+
+    def _browse_zip(self):
+        self.parent.browse_zip()
+        self.refresh()
+
+    def _continue_to_main(self):
+        readiness = self.parent.get_setup_readiness()
+        if not readiness["assignment"]:
+            messagebox.showwarning("Setup Incomplete", "Fix assignment setup before continuing to the main screen.")
+            return
+        self.parent.update_setup_readiness_banner()
+        self.destroy()
+
+    def refresh(self):
+        question_names = self._question_names()
+        if question_names:
+            self.question_menu.configure(values=question_names)
+            if self.question_var.get() not in question_names:
+                self.question_var.set(question_names[0])
+
+        readiness = self.parent.get_setup_readiness()
+        missing_assignment = []
+        for question in question_names:
+            if not os.path.isdir(os.path.join(question, "C")):
+                missing_assignment.append(f"{question}/C")
+            if not os.path.isfile(os.path.join(question, "input.txt")):
+                missing_assignment.append(f"{question}/input.txt")
+            if not os.path.isfile(os.path.join(question, "original_sol.c")):
+                missing_assignment.append(f"{question}/original_sol.c")
+
+        assignment_text = "Assignment ready." if readiness["assignment"] else "Assignment needs: " + ", ".join(missing_assignment or ["valid folders, files, and weights"])
+        self.assignment_status_label.configure(text=assignment_text, text_color=COLORS["secondary"] if readiness["assignment"] else COLORS["warning"])
+
+        dependency_lines = [
+            f"Python packages: {'ready' if readiness['packages'] else 'missing packages'}",
+            f"Visual Studio: {'ready' if readiness['visual_studio'] else 'needs validation'}",
+            f"RAR support: {'ready/not required' if readiness['rar'] else 'needs WinRAR/UnRAR validation'}",
+            f"Checker config: {'ready/default available' if readiness['checker_config'] else 'needs valid checker configuration'}",
+            f"Gemini API: {'ready' if readiness['gemini_api'] else 'not set; choose Fake/offline mode or set GOOGLE_API_KEY'}",
+            f"Compile repair: {'ready/disabled' if readiness['compile_repair_api'] else 'needs GOOGLE_API_KEY or Fake provider'}",
+        ]
+        self.dependencies_status_label.configure(text="\n".join(dependency_lines))
+
+        zip_path = self.parent.zip_path_var.get().strip()
+        submissions_text = f"Zip: {zip_path or 'not selected'}\nPreprocess: {'ready' if readiness['preprocess'] else 'needs setup'}"
+        self.submissions_status_label.configure(text=submissions_text)
+
+        self.options_status_label.configure(
+            text=(
+                f"Scoring: {self.parent.test_scoring_mode_var.get()}\n"
+                f"Compile repair: {'enabled' if self.parent.llm_compile_repair_var.get() else 'disabled'}\n"
+                "Use the main screen for advanced edits, then return here or watch the readiness banner."
+            )
+        )
+
+        readiness_text = (
+            f"Ready for Preprocess: {'yes' if readiness['preprocess'] else 'no'}\n"
+            f"Ready for Scoring: {'yes' if readiness['scoring'] else 'no'}\n"
+            f"Ready for Checker Manager: {'yes' if readiness['checker'] else 'no'}\n"
+            f"Ready for LLM Checker/Audit: {'yes' if readiness['gemini_api'] else 'no; Fake/manual checker mode is still available'}\n"
+            f"Ready for Compile Repair: {'yes' if readiness['compile_repair_api'] else 'no'}\n\n"
+            "When assignment setup is valid, continue to the main screen. The main action buttons remain gated by these checks."
+        )
+        self.readiness_label.configure(text=readiness_text, text_color=COLORS["secondary"] if readiness["assignment"] else COLORS["warning"])
+        self.next_button.configure(state="normal" if readiness["assignment"] else "disabled")
+        self.parent.update_setup_readiness_banner()
+
+
 class CheckerManagerWindow(ctk.CTkToplevel):
     def __init__(self, parent: App):
         super().__init__(parent)
@@ -1827,10 +2347,15 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.run_audit_button.grid(row=0, column=3, padx=8, pady=8, sticky="ew")
         self.reload_checker_button = ctk.CTkButton(buttons, text="Reload", command=self.load_question_config)
         self.reload_checker_button.grid(row=0, column=4, padx=8, pady=8, sticky="ew")
+        self.auto_current_button = ctk.CTkButton(buttons, text="Auto Setup Current Question", command=self.auto_setup_current_question)
+        self.auto_current_button.grid(row=2, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+        self.auto_all_button = ctk.CTkButton(buttons, text="Auto Setup All Questions", command=self.auto_setup_all_questions)
+        self.auto_all_button.grid(row=2, column=2, columnspan=3, padx=8, pady=(0, 8), sticky="ew")
         ctk.CTkLabel(
             buttons,
             text=(
                 "Recommended flow: Suggest, review/edit JSON, Test Draft, Save Checker, run grading, then Run Audit. "
+                "Auto Setup does Suggest -> Test Draft -> Save, and runs Audit only when grade/Excel outputs already exist. "
                 "The assignment file is optional LLM context, not an audit folder."
             ),
             text_color="gray",
@@ -2056,6 +2581,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
     def run_audit(self):
         self.run_background("Running sampled LLM audit...", self._run_audit_worker, "Preparing LLM audit")
 
+    def auto_setup_current_question(self):
+        self.run_background("Auto-setting checker for current question...", self._auto_setup_current_worker, "Preparing auto setup")
+
+    def auto_setup_all_questions(self):
+        self.run_background("Auto-setting checkers for all questions...", self._auto_setup_all_worker, "Preparing auto setup for all questions")
+
     def run_background(self, status, worker, activity_message=None):
         self.set_status(status)
         if activity_message:
@@ -2147,6 +2678,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             provider = self.make_provider()
             self.after(0, lambda: self.set_llm_activity_step("Parsing assignment context for audit"))
             assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
+            self.ensure_grade_outputs_for_audit(self.parent.gui_questions)
             self.after(0, lambda: self.set_llm_activity_step("Selecting representative graded students"))
             cases = select_audit_cases(self.parent.gui_questions, max_cases=self.get_audit_size())
             checker_configs = self.checker_config.get("questions", {})
@@ -2179,6 +2711,196 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.after(0, lambda: self.set_status(f"Audit finished: {overall}"))
         except Exception as exc:
             self.after(0, lambda captured_exc=exc: self.show_error("Audit Failed", captured_exc))
+
+    def _auto_setup_current_worker(self):
+        try:
+            provider = self.make_provider()
+            assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
+            question = self.question_var.get()
+            result = self.auto_configure_question(question, provider, assignment_context, show_prompt=True)
+            audit_summary = self.run_optional_audit([question], provider, assignment_context)
+            payload = {"question_results": [self.serializable_auto_result(result)], "audit": audit_summary}
+            self.after(0, lambda captured_result=result: self.apply_auto_config_result(captured_result))
+            self.after(0, lambda captured_payload=payload: self.show_json_result(captured_payload))
+            self.after(0, lambda: self.set_status(self.auto_setup_status_message([result], audit_summary)))
+        except Exception as exc:
+            self.after(0, lambda captured_exc=exc: self.show_error("Auto Setup Failed", captured_exc))
+
+    def _auto_setup_all_worker(self):
+        try:
+            provider = self.make_provider()
+            assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
+            results = []
+            for question in self.parent.gui_questions:
+                self.after(0, lambda current_question=question: self.set_llm_activity_step(f"Auto setup for {current_question}"))
+                result = self.auto_configure_question(question, provider, assignment_context, show_prompt=not results)
+                results.append(result)
+            audit_summary = self.run_optional_audit(self.parent.gui_questions, provider, assignment_context)
+            payload = {
+                "question_results": [self.serializable_auto_result(result) for result in results],
+                "audit": audit_summary,
+            }
+            if results:
+                self.after(0, lambda captured_result=results[0]: self.apply_auto_config_result(captured_result))
+            self.after(0, lambda captured_payload=payload: self.show_json_result(captured_payload))
+            self.after(0, lambda: self.set_status(self.auto_setup_status_message(results, audit_summary)))
+        except Exception as exc:
+            self.after(0, lambda captured_exc=exc: self.show_error("Auto Setup All Failed", captured_exc))
+
+    def auto_configure_question(self, question, provider, assignment_context, show_prompt=False):
+        self.after(0, lambda: self.set_llm_activity_step(f"{question}: compiling reference and collecting examples"))
+        original_code, inputs, expected_outputs = self.collect_question_context(question)
+        focused_context = assignment_context_for_question(assignment_context, question)
+        image_count = len(focused_context.images)
+        self.after(0, lambda: self.set_llm_activity_step(f"{question}: building prompt with {image_count} assignment image(s)"))
+        prompt = build_suggestion_prompt(
+            question,
+            original_code,
+            inputs,
+            expected_outputs,
+            focused_context.text,
+            focused_context.images,
+        )
+        if show_prompt:
+            self.after(0, lambda captured_prompt=prompt: self.show_prompt(captured_prompt))
+        self.after(0, lambda: self.set_llm_activity_step(f"{question}: waiting for Gemini suggestion"))
+        suggestion = suggest_checker(
+            question,
+            original_code,
+            inputs,
+            expected_outputs,
+            provider,
+            focused_context.text,
+            focused_context.images,
+        )
+        question_config = None
+        rows = []
+        tests_ok = False
+        warnings = []
+        saved = False
+        if suggestion.status == "supported" and suggestion.checker:
+            question_config = {"checker": suggestion.checker, "config": suggestion.config}
+            self.after(0, lambda: self.set_llm_activity_step(f"{question}: running deterministic checker tests"))
+            rows = run_checker_tests(question_config, expected_outputs)
+            tests_ok, warnings = self.evaluate_checker_test_rows(rows)
+            if tests_ok:
+                self.checker_config.setdefault("questions", {})[question] = question_config
+                save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+                saved = True
+        return {
+            "question": question,
+            "suggestion": suggestion,
+            "question_config": question_config,
+            "test_rows": rows,
+            "tests_ok": tests_ok,
+            "warnings": warnings,
+            "saved": saved,
+        }
+
+    def evaluate_checker_test_rows(self, rows):
+        required_rows = [row for row in rows if row["variant"] in {"exact", "prompted"}]
+        wrong_rows = [row for row in rows if row["variant"] == "wrong"]
+        tests_ok = bool(required_rows) and all(row["passed"] for row in required_rows)
+        warnings = []
+        if any(row["passed"] for row in wrong_rows):
+            warnings.append("One or more synthetic wrong-output rows passed; review manually if this is unexpected.")
+        return tests_ok, warnings
+
+    def run_optional_audit(self, questions, provider, assignment_context):
+        self.ensure_grade_outputs_for_audit(questions)
+        self.after(0, lambda: self.set_llm_activity_step("Selecting representative graded students for audit"))
+        cases = select_audit_cases(questions, max_cases=self.get_audit_size())
+        if not cases:
+            return {
+                "status": "skipped",
+                "reason": "No audit cases found in generated grade/Excel outputs.",
+                "reviewed": 0,
+                "results": [],
+            }
+        focused_context = assignment_context_for_question(assignment_context, cases[0].question)
+        sample_prompt = build_audit_prompt(
+            cases[0],
+            self.checker_config.get("questions", {}).get(cases[0].question, {}),
+            focused_context.text,
+            focused_context.images,
+        )
+        self.after(0, lambda captured_prompt=sample_prompt: self.show_prompt(captured_prompt))
+        self.after(0, lambda captured_cases=cases: self.start_audit_display(captured_cases))
+        self.after(0, lambda: self.set_llm_activity_step(f"Waiting for Gemini audit reviews ({len(cases)} call(s))"))
+        results = audit_cases_with_llm(
+            cases,
+            self.checker_config.get("questions", {}),
+            provider,
+            assignment_context,
+            max_workers=4,
+            progress_callback=lambda result, done, total: self.after(0, lambda: self.add_audit_result(result, done, total)),
+        )
+        return {
+            "status": self.audit_overall_status(results),
+            "reviewed": len(results),
+            "results": [result.__dict__ for result in results],
+        }
+
+    def ensure_grade_outputs_for_audit(self, audit_questions):
+        if self.has_grade_outputs(audit_questions):
+            return
+
+        self.after(0, lambda: self.set_llm_activity_step("No audit outputs found; running deterministic grading first"))
+        config_errors = validate_config(self.parent.gui_questions, self.parent.gui_weights)
+        if config_errors:
+            raise RuntimeError(
+                "Cannot run audit because grading configuration is invalid:\n"
+                + "\n".join(f"- {error}" for error in config_errors)
+            )
+
+        run_tests(
+            self.parent.gui_questions,
+            scoring_mode=self.parent.gui_test_scoring_mode,
+            deduction_per_error=self.parent.gui_test_error_deduction,
+            llm_compile_repair_enabled=self.parent.gui_llm_compile_repair_enabled,
+            llm_compile_repair_provider=self.parent.make_compile_repair_provider(),
+            llm_compile_repair_penalty=self.parent.gui_llm_compile_repair_penalty,
+            llm_compile_repair_max_attempts=self.parent.gui_llm_compile_repair_max_attempts,
+        )
+        self.after(0, lambda: self.set_llm_activity_step("Creating Excel files for audit sampling"))
+        create_excels(
+            self.parent.gui_questions,
+            self.parent.gui_weights,
+            self.parent.gui_penalty,
+            slim=self.parent.slim_output_var.get(),
+            per_error_penalty=self.parent.gui_per_error_penalty,
+        )
+        self.after(0, self.parent.update_excel_button_state)
+
+    def has_grade_outputs(self, questions):
+        return all(os.path.exists(os.path.join(question, f"{question}_grades_to_upload.xlsx")) for question in questions)
+
+    def serializable_auto_result(self, result):
+        suggestion = result["suggestion"]
+        return {
+            "question": result["question"],
+            "suggestion": suggestion.__dict__,
+            "question_config": result["question_config"],
+            "tests_ok": result["tests_ok"],
+            "warnings": result["warnings"],
+            "saved": result["saved"],
+            "test_rows": result["test_rows"],
+        }
+
+    def apply_auto_config_result(self, result):
+        self.question_var.set(result["question"])
+        if result["question_config"]:
+            self.config_textbox.delete("1.0", tk.END)
+            self.config_textbox.insert("1.0", json.dumps(result["question_config"], indent=2, sort_keys=True))
+        if result["test_rows"]:
+            self.show_test_rows(result["test_rows"])
+
+    @staticmethod
+    def auto_setup_status_message(results, audit_summary):
+        saved_count = sum(1 for result in results if result["saved"])
+        total = len(results)
+        audit_status = audit_summary.get("status", "not run")
+        return f"Auto setup saved {saved_count}/{total} checker(s). Audit: {audit_status}"
 
     def collect_question_context(self, question):
         original_path = os.path.join(question, "original_sol.c")

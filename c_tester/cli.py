@@ -3,13 +3,28 @@ import os
 import sys # Import sys for sys.exit
 import zipfile
 import subprocess
-from Process import run_tests
-from CreateExcel import create_excels
-from clear_utils import clear_grades, clear_output, clear_excels, clear_c_files, clear_all, clear_build_files
-from Utils import log
-from preprocess import preprocess_submissions
+from .process import run_tests
+from .create_excel import create_excels
+from .clear_utils import clear_grades, clear_output, clear_excels, clear_c_files, clear_all, clear_build_files, clear_repair_files
+from .utils import log
+from .preprocess import preprocess_submissions
 # Import configuration from the new file
-from configuration import questions, folder_weights, penalty, validate_config, winrar_path, vs_path
+from .configuration import (
+    questions,
+    folder_weights,
+    penalty,
+    validate_config,
+    winrar_path,
+    vs_path,
+    test_scoring_mode,
+    test_error_deduction,
+    llm_compile_repair_enabled,
+    llm_compile_repair_penalty,
+    llm_compile_repair_max_attempts,
+    llm_compile_repair_provider,
+    llm_compile_repair_model,
+)
+from .checker_assistant import FakeLLMProvider, GeminiProvider
 
 # Define your parent folders here - REMOVED, now in configuration.py
 # questions = ["Q1", "Q2"]
@@ -93,7 +108,18 @@ def validate_winrar_path(path):
         log(f"Error validating WinRAR path: {str(e)}", "error")
         return False
 
-def run_grading(questions_to_run, slim_mode=False, per_error_penalty_mode=False):
+def run_grading(
+    questions_to_run,
+    slim_mode=False,
+    per_error_penalty_mode=False,
+    scoring_mode=test_scoring_mode,
+    deduction_per_error=test_error_deduction,
+    compile_repair_enabled=llm_compile_repair_enabled,
+    compile_repair_penalty=llm_compile_repair_penalty,
+    compile_repair_max_attempts=llm_compile_repair_max_attempts,
+    compile_repair_provider_name=llm_compile_repair_provider,
+    compile_repair_model=llm_compile_repair_model,
+):
     """Runs the test and creates the Excel files."""
     # Validate Visual Studio path before grading
     if not validate_vs_path(vs_path):
@@ -101,8 +127,22 @@ def run_grading(questions_to_run, slim_mode=False, per_error_penalty_mode=False)
         sys.exit(1)
         
     log("Starting grading process...", level="info")
+    compile_repair_provider = make_compile_repair_provider(
+        compile_repair_enabled,
+        compile_repair_provider_name,
+        compile_repair_model,
+    )
     # Pass the globally imported questions list from configuration
-    run_tests(questions_to_run)
+    run_tests(
+        questions_to_run,
+        scoring_mode=scoring_mode,
+        deduction_per_error=deduction_per_error,
+        llm_compile_repair_enabled=compile_repair_enabled,
+        llm_compile_repair_provider=compile_repair_provider,
+        llm_compile_repair_penalty=compile_repair_penalty,
+        llm_compile_repair_max_attempts=compile_repair_max_attempts,
+        vs_path_override=vs_path,
+    )
     
     # Use provided per_error_penalty_mode directly (no longer uses config default)
     # The default is now explicitly False (single penalty mode)
@@ -110,12 +150,31 @@ def run_grading(questions_to_run, slim_mode=False, per_error_penalty_mode=False)
     # Log the mode being used
     mode_str = "per error" if per_error_penalty_mode else "once per student"
     log(f"Using penalty mode: {mode_str}", level="info")
+    log(
+        f"Using test scoring mode: {scoring_mode}"
+        + (f" ({deduction_per_error:g} point(s) per failed test)" if scoring_mode == "per_error_deduction" else ""),
+        level="info",
+    )
+    if compile_repair_enabled:
+        log(
+            f"Using LLM compile repair: {compile_repair_provider_name}, "
+            f"max attempts {compile_repair_max_attempts}, penalty {compile_repair_penalty:g}",
+            level="info",
+        )
     
     # Pass the globally imported weights and penalty from configuration
     create_excels(questions_to_run, folder_weights, penalty, slim=slim_mode, per_error_penalty=per_error_penalty_mode)
     log("\n\nDONE, HAPPY GRADING!", level="success")
 
-if __name__ == "__main__":
+
+def make_compile_repair_provider(enabled, provider_name, model):
+    if not enabled:
+        return None
+    if provider_name == "Fake":
+        return FakeLLMProvider()
+    return GeminiProvider(model=model or None)
+
+def main():
     # --- Configuration Validation --- 
     # Validate the imported configuration using the imported validator
     config_errors = validate_config(questions, folder_weights)
@@ -136,6 +195,28 @@ if __name__ == "__main__":
                           help='Generate final_grades.xlsx with only ID and Final_Grade columns.')
     parser_run.add_argument('--per-error-penalty', action='store_true',
                           help='Apply penalty for each submission error (can accumulate).')
+    parser_run.add_argument(
+        '--test-scoring-mode',
+        choices=['percentage', 'per_error_deduction'],
+        default=test_scoring_mode,
+        help='How per-question grades are calculated from failed test cases.',
+    )
+    parser_run.add_argument(
+        '--test-error-deduction',
+        type=float,
+        default=test_error_deduction,
+        help='Points deducted for each failed test case when --test-scoring-mode=per_error_deduction.',
+    )
+    parser_run.add_argument('--llm-compile-repair', action='store_true', default=llm_compile_repair_enabled,
+                          help='Enable LLM compile-only repair for submissions that fail compilation.')
+    parser_run.add_argument('--llm-compile-repair-penalty', type=float, default=llm_compile_repair_penalty,
+                          help='Question-grade points deducted after a successful compile repair.')
+    parser_run.add_argument('--llm-compile-repair-max-attempts', type=int, default=llm_compile_repair_max_attempts,
+                          help='Maximum LLM repair attempts per failed compilation.')
+    parser_run.add_argument('--llm-compile-repair-provider', choices=['Gemini', 'Fake'], default=llm_compile_repair_provider,
+                          help='Provider used for compile repair.')
+    parser_run.add_argument('--llm-compile-repair-model', default=llm_compile_repair_model,
+                          help='Gemini model override for compile repair.')
     # Removed the --single-penalty option since it's now the default
 
     # Preprocess command
@@ -152,7 +233,8 @@ if __name__ == "__main__":
     clear_subparsers.add_parser('c', help='Clear contents of all <Question>/C folders.')
     clear_subparsers.add_parser('excels', help='Delete all *.xlsx files.')
     clear_subparsers.add_parser('build', help='Delete all build files (*.exe, *.obj).')
-    clear_subparsers.add_parser('all', help='Clear grades, output, excel, and build files.')
+    clear_subparsers.add_parser('repair', help='Clear generated LLM compile-repair files.')
+    clear_subparsers.add_parser('all', help='Clear grades, output, repair, excel, and build files.')
 
     args = parser.parse_args()
 
@@ -161,8 +243,29 @@ if __name__ == "__main__":
         # Default mode is single penalty (per_error_penalty=False)
         per_error_penalty_mode = args.per_error_penalty
             
+        if args.test_error_deduction < 0:
+            log("Error: --test-error-deduction cannot be negative.", level="error")
+            sys.exit(1)
+        if args.llm_compile_repair_penalty < 0:
+            log("Error: --llm-compile-repair-penalty cannot be negative.", level="error")
+            sys.exit(1)
+        if args.llm_compile_repair_max_attempts < 1:
+            log("Error: --llm-compile-repair-max-attempts must be at least 1.", level="error")
+            sys.exit(1)
+
         # Pass the imported config to run_grading
-        run_grading(questions, slim_mode=args.slim, per_error_penalty_mode=per_error_penalty_mode)
+        run_grading(
+            questions,
+            slim_mode=args.slim,
+            per_error_penalty_mode=per_error_penalty_mode,
+            scoring_mode=args.test_scoring_mode,
+            deduction_per_error=args.test_error_deduction,
+            compile_repair_enabled=args.llm_compile_repair,
+            compile_repair_penalty=args.llm_compile_repair_penalty,
+            compile_repair_max_attempts=args.llm_compile_repair_max_attempts,
+            compile_repair_provider_name=args.llm_compile_repair_provider,
+            compile_repair_model=args.llm_compile_repair_model,
+        )
     elif args.command == 'preprocess':
         # Check if zip path exists
         if not os.path.exists(args.zip_path):
@@ -191,6 +294,12 @@ if __name__ == "__main__":
             clear_excels()
         elif args.clear_command == 'build':
             clear_build_files()
+        elif args.clear_command == 'repair':
+            clear_repair_files(questions)
         elif args.clear_command == 'all':
             clear_all(questions)
     # No need for else: parser.print_help() because 'command' is required
+
+
+if __name__ == "__main__":
+    main()

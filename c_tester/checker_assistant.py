@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 import pandas as pd
 
-from semantic_grading import available_checker_templates, compare_output_with_config
+from .semantic_grading import available_checker_templates, compare_output_with_config
 
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
@@ -174,6 +174,36 @@ class FakeLLMProvider:
 
     def complete_json(self, prompt: str, _images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None) -> dict:
         lower_prompt = prompt.lower()
+        if '"task": "compile_fix"' in lower_prompt:
+            try:
+                payload = json.loads(prompt)
+                original_code = str(payload.get("original_code", ""))
+                current_error = str(payload.get("current_compile_error", ""))
+            except json.JSONDecodeError:
+                original_code = prompt
+                current_error = prompt
+            if "too_bad" in original_code.lower() or "ambiguous" in current_error.lower():
+                return {
+                    "status": "too_bad",
+                    "too_bad": True,
+                    "fixed_code": "",
+                    "compile_issue": "The compile failure is tied to unclear missing logic.",
+                    "fix_reason": "code cannot be made to compile without guessing the student's intended logic.",
+                    "changes_made": "",
+                    "risk_note": "Compile-only repair is unsafe.",
+                }
+            fixed_code = original_code.replace("/* FAKE_FIX_SEMICOLON */", ";")
+            fixed_code = fixed_code.replace("return 0\n}", "return 0;\n}")
+            fixed_code = fixed_code.replace("return 0\r\n}", "return 0;\n}")
+            return {
+                "status": "fixed_candidate",
+                "too_bad": False,
+                "fixed_code": fixed_code,
+                "compile_issue": "A compile-only syntax fix is needed.",
+                "fix_reason": "added missing syntax required for compilation.",
+                "changes_made": "added missing semicolon",
+                "risk_note": "",
+            }
         if '"task": "audit_score"' in lower_prompt:
             return {
                 "verdict": "looks_correct",

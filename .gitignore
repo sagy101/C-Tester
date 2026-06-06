@@ -6,11 +6,18 @@ __pycache__/
 */output/*
 */C/*
 */grade/*
+*/llm_fixed/*
+*/llm_fixed_output/*
 .vscode/
+Q*/input.txt
+Q*/original_sol.c
+*.git/
 
 # files types
 *.xlsx
 *.zip
+*.rar
+*.pdf
 *.exe
 *.obj
 *.csv

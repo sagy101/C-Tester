@@ -8,7 +8,7 @@ import io
 from typing import Callable, Optional
 import json
 
-import configuration  # Add missing import for json
+from . import configuration  # Add missing import for json
 
 try:
     from tqdm import tqdm
@@ -27,7 +27,7 @@ except ImportError:
         def update(self, n=1):
             pass
 
-from Utils import log
+from .utils import log
 
 STANDARD_C_RE = re.compile(r'q(\d+).*\.c$', re.IGNORECASE)
 SIMPLE_C_RE = re.compile(r'^hw\d+\.c$', re.IGNORECASE)
