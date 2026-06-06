@@ -295,7 +295,8 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                         "passed",
                     )
                     status_texts = " ".join(child.cget("text") for child in window.checker_state_frame.winfo_children())
-                    self.assertIn("Q1: audit passed", status_texts)
+                    self.assertIn("Q1: audited", status_texts)
+                    self.assertEqual({int(child.grid_info()["row"]) for child in window.checker_state_frame.winfo_children()}, {0})
                     self.assertIn("audited: Q1", app.checker_status_summary())
                     app.update_setup_readiness_banner()
                     self.assertIn("audited: Q1", app.checker_status_label.cget("text"))

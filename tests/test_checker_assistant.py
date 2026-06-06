@@ -8,6 +8,7 @@ from c_tester.checker_assistant import (
     FakeLLMProvider,
     assignment_context_for_question,
     audit_cases_with_llm,
+    parse_json_object,
     run_checker_tests,
     suggest_checker,
 )
@@ -123,6 +124,20 @@ class TestCheckerAssistant(unittest.TestCase):
         self.assertEqual(suggestion.checker, "last_integer")
         self.assertEqual(provider.images, [image])
         self.assertIn("target_question_number", provider.prompt)
+
+    def test_parse_json_object_accepts_trailing_text(self):
+        parsed = parse_json_object('{"summary": "ok", "deduction_is_plausible": true}\nExtra explanation')
+
+        self.assertEqual(parsed["summary"], "ok")
+        self.assertTrue(parsed["deduction_is_plausible"])
+
+    def test_parse_json_object_accepts_fenced_json_with_extra_object(self):
+        parsed = parse_json_object(
+            '```json\n{"summary": "ok", "risk_note": "brace in string } stays"}\n```\n{"ignored": true}'
+        )
+
+        self.assertEqual(parsed["summary"], "ok")
+        self.assertEqual(parsed["risk_note"], "brace in string } stays")
 
 
 if __name__ == "__main__":

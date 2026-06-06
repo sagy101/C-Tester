@@ -262,16 +262,62 @@ class FakeLLMProvider:
 
 
 def parse_json_object(text: str) -> dict:
+    text = strip_json_fence(text.strip())
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            raise
-        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        candidate = extract_first_json_object_text(text)
+        if not candidate:
+            raise exc
+        parsed = json.loads(candidate)
     if not isinstance(parsed, dict):
         raise ValueError("LLM response must be a JSON object")
     return parsed
+
+
+def strip_json_fence(text: str) -> str:
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def extract_first_json_object_text(text: str) -> str:
+    start = text.find("{")
+    if start == -1:
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string or char == '"':
+            in_string, escaped, consumed = advance_json_string_state(char, in_string, escaped)
+            if consumed:
+                continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return ""
+
+
+def advance_json_string_state(char: str, in_string: bool, escaped: bool) -> tuple[bool, bool, bool]:
+    if not in_string:
+        return True, False, True
+    if escaped:
+        return True, False, True
+    if char == "\\":
+        return True, True, True
+    if char == '"':
+        return False, False, True
+    return True, False, True
 
 
 def parse_assignment_file(path: str | None) -> str:
