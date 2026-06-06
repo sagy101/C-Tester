@@ -8,6 +8,7 @@ __pycache__/
 */grade/*
 */llm_fixed/*
 */llm_fixed_output/*
+*/review/*
 .vscode/
 Q*/input.txt
 Q*/original_sol.c

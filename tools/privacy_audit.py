@@ -21,6 +21,7 @@ PRIVATE_PATTERNS = [
         r"^Q\d+/original_sol_output\.txt$",
         r"(^|/)llm_fixed(/|$)",
         r"(^|/)llm_fixed_output(/|$)",
+        r"(^|/)review(/|$)",
         r"(^|/)submit_error\.txt$",
         r"(^|/)repair_report\.json$",
         r"grades_to_upload",
@@ -61,6 +62,14 @@ def audit_staged() -> list[str]:
     return private_matches(run_git(["diff", "--cached", "--name-only", "--diff-filter=ACMRT"]))
 
 
+def describe_scope(args: argparse.Namespace) -> tuple[str, str]:
+    if args.staged:
+        return "staged files", ""
+    if args.history:
+        return "history", f" in {args.ref}"
+    return "tip", f" for {args.ref}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Audit Git refs for private grader artifacts.")
     parser.add_argument("ref", nargs="?", default="HEAD", help="Git ref to audit, e.g. HEAD or origin/master.")
@@ -73,16 +82,13 @@ def main() -> int:
     else:
         matches = audit_history(args.ref) if args.history else audit_tip(args.ref)
 
+    scope, target = describe_scope(args)
     if matches:
-        scope = "staged files" if args.staged else ("history" if args.history else "tip")
-        target = "" if args.staged else f" in {args.ref}"
         print(f"Private-pattern matches found{target} {scope}:")
         for match in matches:
             print(match)
         return 1
 
-    scope = "staged files" if args.staged else ("history" if args.history else "tip")
-    target = "" if args.staged else f" for {args.ref}"
     print(f"Privacy audit OK{target} {scope}.")
     return 0
 

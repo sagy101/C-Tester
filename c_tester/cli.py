@@ -5,9 +5,10 @@ import zipfile
 import subprocess
 from .process import run_tests
 from .create_excel import create_excels
-from .clear_utils import clear_grades, clear_output, clear_excels, clear_c_files, clear_all, clear_build_files, clear_repair_files
+from .clear_utils import clear_grades, clear_output, clear_excels, clear_c_files, clear_all, clear_build_files, clear_repair_files, clear_review_files
 from .utils import log
 from .preprocess import preprocess_submissions
+from . import configuration
 # Import configuration from the new file
 from .configuration import (
     questions,
@@ -234,7 +235,8 @@ def main():
     clear_subparsers.add_parser('excels', help='Delete all *.xlsx files.')
     clear_subparsers.add_parser('build', help='Delete all build files (*.exe, *.obj).')
     clear_subparsers.add_parser('repair', help='Clear generated LLM compile-repair files.')
-    clear_subparsers.add_parser('all', help='Clear grades, output, repair, excel, and build files.')
+    clear_subparsers.add_parser('reviews', help='Clear generated post-scoring LLM review files.')
+    clear_subparsers.add_parser('all', help='Clear grades, output, repair, reviews, excel, and build files.')
 
     args = parser.parse_args()
 
@@ -280,8 +282,8 @@ def main():
             log("Cannot proceed with RAR support due to invalid WinRAR path.", "error")
             sys.exit(1)
              
-        # Pass imported questions list
-        preprocess_submissions(args.zip_path, questions, rar_support=args.rar_support, winrar_path=winrar_path, use_simple_naming=args.simple_naming)
+        configuration.use_simple_naming = args.simple_naming
+        preprocess_submissions(args.zip_path, questions, rar_support=args.rar_support, winrar_path=winrar_path)
     elif args.command == 'clear':
         # Pass imported questions list
         if args.clear_command == 'grades':
@@ -296,6 +298,8 @@ def main():
             clear_build_files()
         elif args.clear_command == 'repair':
             clear_repair_files(questions)
+        elif args.clear_command == 'reviews':
+            clear_review_files(questions)
         elif args.clear_command == 'all':
             clear_all(questions)
     # No need for else: parser.print_help() because 'command' is required

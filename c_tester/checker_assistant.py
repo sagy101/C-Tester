@@ -210,6 +210,32 @@ class FakeLLMProvider:
                 "risk": "low",
                 "reason": "Deterministic fake provider accepts the supplied audit package.",
             }
+        if '"task": "review_score_deduction"' in lower_prompt:
+            try:
+                payload = json.loads(prompt)
+                failed_cases = payload.get("failed_cases", [])
+            except json.JSONDecodeError:
+                failed_cases = []
+            failed_inputs = [str(case.get("input_value", "")) for case in failed_cases if isinstance(case, dict)]
+            return {
+                "summary": "The fake reviewer grouped the supplied failures as one deterministic grading issue.",
+                "deduction_is_plausible": True,
+                "root_causes": [
+                    {
+                        "issue": "The output differs from the expected format or value for the listed inputs.",
+                        "failed_inputs": failed_inputs,
+                        "deduction_impact": f"{len(failed_inputs)} failed input(s) contributed to the shown deduction.",
+                    }
+                ],
+                "inline_comments": [
+                    {
+                        "line": 1,
+                        "comment": "Start by checking the branch or formatting responsible for the first failed case.",
+                    }
+                ],
+                "fix_to_full_score": "Make the output match the expected behavior for every failed input.",
+                "risk_note": "",
+            }
         if "divisor" in lower_prompt:
             return {
                 "status": "supported",

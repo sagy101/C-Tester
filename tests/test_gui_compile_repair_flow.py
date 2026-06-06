@@ -14,6 +14,7 @@ class TestGuiCompileRepairFlow(unittest.TestCase):
                 os.chdir(temp_dir)
                 self._create_minimal_homework()
                 os.environ["C_TESTER_SKIP_STARTUP_VALIDATION"] = "1"
+                os.environ["C_TESTER_SUPPRESS_TK_BGERRORS"] = "1"
                 from c_tester import gui
 
                 app = gui.App()
@@ -38,9 +39,10 @@ class TestGuiCompileRepairFlow(unittest.TestCase):
                     self.assertEqual(kwargs["vs_path_override"], app.gui_vs_path)
                     create_excels_mock.assert_called_once()
                 finally:
-                    app.destroy()
+                    app.shutdown_for_tests()
             finally:
                 os.environ.pop("C_TESTER_SKIP_STARTUP_VALIDATION", None)
+                os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
                 os.chdir(original_cwd)
 
     def _create_minimal_homework(self):

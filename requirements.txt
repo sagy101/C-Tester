@@ -3,6 +3,8 @@ et_xmlfile
 numpy
 openpyxl
 pandas
+Pillow
+Pygments
 pymupdf
 pypdf
 python-docx

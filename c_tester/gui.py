@@ -92,6 +92,15 @@ import re # Import regex module
 import shutil
 import time
 
+try:
+    from pygments import lex
+    from pygments.lexers import CLexer
+    from pygments.token import Comment, Keyword, Name, Number, String
+except ImportError:
+    lex = None
+    CLexer = None
+    Comment = Keyword = Name = Number = String = None
+
 # Import backend functions & default config
 # Import defaults from configuration.py now
 from .configuration import questions as default_questions
@@ -129,6 +138,13 @@ from .checker_assistant import (
     select_audit_cases,
     suggest_checker,
 )
+from .post_scoring_review import (
+    ReviewCase,
+    build_score_review_prompt,
+    load_review_cases,
+    review_cases_with_llm,
+    default_grading_policy,
+)
 from .semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config
 from .clear_utils import (
     clear_grades,
@@ -138,6 +154,7 @@ from .clear_utils import (
     clear_all,
     clear_build_files,
     clear_repair_files,
+    clear_review_files,
 )
 from .utils import log # For direct logging if needed, though most comes via redirect
 
@@ -159,6 +176,7 @@ COLORS = {
     "border": "#bdc3c7",        # Border color
     "hover": "#2980b9",         # Hover color for buttons
 }
+FAKE_PROVIDER_LABEL = "Fake/Offline"
 
 class GuiStream(io.StringIO):
     """A custom stream to redirect stdout/stderr to a CTkTextbox."""
@@ -212,6 +230,8 @@ class GuiStream(io.StringIO):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+        if os.getenv("C_TESTER_SUPPRESS_TK_BGERRORS"):
+            self.tk.eval("proc bgerror {msg} {}")
 
         self.title("C Auto Grader")
         self.geometry("1200x900")  # Increased height from 800 to 900
@@ -220,7 +240,7 @@ class App(ctk.CTk):
         # Add application icon (if available)
         try:
             self.iconbitmap("app_icon.ico")  # You'd need to create this icon file
-        except:
+        except tk.TclError:
             pass  # Silently fail if icon not found
 
         # Configure grid layout
@@ -258,6 +278,7 @@ class App(ctk.CTk):
         self.cancel_event = None
         self.config_rows = []  # To store row widgets [q_entry, w_entry]
         self.setup_assistant_window = None
+        self.score_review_window = None
 
         # --- Frames with enhanced styling --- 
         # Top frame with a subtle header background
@@ -660,6 +681,19 @@ class App(ctk.CTk):
         )
         self.open_excel_button.grid(row=4, column=0, padx=15, pady=(0, 8))
 
+        self.score_review_button = ctk.CTkButton(
+            self.grading_frame,
+            text="🔎 LLM Score Review",
+            command=self.open_post_scoring_review,
+            height=32,
+            width=200,
+            corner_radius=6,
+            hover=True,
+            border_spacing=6,
+            state="disabled"
+        )
+        self.score_review_button.grid(row=5, column=0, padx=15, pady=(0, 8))
+
         self.open_folder_button = ctk.CTkButton(
             self.grading_frame,
             text="📂 Open Output Folder",
@@ -670,7 +704,7 @@ class App(ctk.CTk):
             hover=True,
             border_spacing=6
         )
-        self.open_folder_button.grid(row=5, column=0, padx=15, pady=(0, 15))
+        self.open_folder_button.grid(row=6, column=0, padx=15, pady=(0, 15))
 
         # Section 3: Clear Actions
         self.clear_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -755,6 +789,17 @@ class App(ctk.CTk):
             hover=True
         )
         self.clear_repair_button.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+
+        self.clear_review_button = ctk.CTkButton(
+            self.clear_frame,
+            text="Clear Reviews",
+            command=lambda: self.run_task(lambda: clear_review_files(self.gui_questions)),
+            height=button_height,
+            width=button_width,
+            corner_radius=button_corner,
+            hover=True
+        )
+        self.clear_review_button.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
         
         self.clear_all_button = ctk.CTkButton(
             self.clear_frame, 
@@ -767,7 +812,7 @@ class App(ctk.CTk):
             corner_radius=button_corner,
             hover=True
         )
-        self.clear_all_button.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.clear_all_button.grid(row=5, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 
         # Section 4: Dependencies - Now placed in row 1, spanning columns 1-3
         self.dependencies_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -968,16 +1013,17 @@ class App(ctk.CTk):
         # Store active buttons to disable during tasks
         self.active_buttons = [
             self.browse_button, self.preprocess_button, self.run_button, self.checker_manager_button,
-            self.open_excel_button, self.open_folder_button,
+            self.open_excel_button, self.score_review_button, self.open_folder_button,
             self.clear_grades_button, self.clear_output_button, self.clear_c_button,
-            self.clear_excels_button, self.clear_build_button, self.clear_repair_button, self.clear_all_button
+            self.clear_excels_button, self.clear_build_button, self.clear_repair_button,
+            self.clear_review_button, self.clear_all_button
         ]
 
         self.setup_button_commands() # Bind commands AFTER initial validation might disable them
 
         # --- Populate initial config & Validate --- 
         self.populate_config_fields()
-        self.apply_gui_configuration() # Validate initial config
+        self.apply_gui_configuration(show_dialogs=False) # Validate initial config without blocking startup
         
         # Perform initial validation of VS and WinRAR paths when the GUI starts
         # Use after() to ensure GUI is fully initialized first
@@ -1087,9 +1133,22 @@ class App(ctk.CTk):
         # Enable/disable cancel button based on task running
         self.cancel_button.configure(state="normal" if state == "disabled" else "disabled")
 
+    def shutdown_for_tests(self):
+        """Drain pending Tk work before tests destroy the root window."""
+        try:
+            self.update()
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
     def update_excel_button_state(self):
         state = "normal" if os.path.exists("final_grades.xlsx") else "disabled"
         self.open_excel_button.configure(state=state)
+        self.score_review_button.configure(state=state)
 
     def open_final_excel(self):
         excel_path = os.path.abspath("final_grades.xlsx")
@@ -1181,8 +1240,12 @@ class App(ctk.CTk):
         self.setup_assistant_window = SetupAssistantWindow(self)
 
     def maybe_show_setup_assistant(self):
-        if not self.config_valid:
-            self.open_setup_assistant()
+        readiness = self.get_setup_readiness()
+        if readiness["scoring"]:
+            return
+        if os.path.exists("final_grades.xlsx"):
+            return
+        self.open_setup_assistant()
 
     def update_progress(self, current_step, total_steps, description="Processing..."):
         """Callback function to update the progress bar and description label."""
@@ -1244,7 +1307,7 @@ class App(ctk.CTk):
         except Exception as e:
             if not cancel_event.is_set(): # Don't show error popup if cancelled
                 import traceback
-                log(f"\n--- TASK FAILED --- \n", level="error")
+                log("\n--- TASK FAILED --- \n", level="error")
                 log(traceback.format_exc(), level="error")
                 messagebox.showerror("Task Error", f"An error occurred: {e}")
             else:
@@ -1382,6 +1445,7 @@ class App(ctk.CTk):
         # Section 2: Grading
         self.run_button.configure(command=lambda: self.run_task(self.task_run_grading_internal))
         self.checker_manager_button.configure(command=self.open_checker_manager)
+        self.score_review_button.configure(command=self.open_post_scoring_review)
         # Section 3: Clear Actions
         self.clear_grades_button.configure(command=lambda: self.run_task(lambda: clear_grades(self.gui_questions)))
         self.clear_output_button.configure(command=lambda: self.run_task(lambda: clear_output(self.gui_questions)))
@@ -1389,6 +1453,7 @@ class App(ctk.CTk):
         self.clear_excels_button.configure(command=lambda: self.run_task(self.task_clear_excels_internal))
         self.clear_build_button.configure(command=lambda: self.run_task(clear_build_files))
         self.clear_repair_button.configure(command=lambda: self.run_task(lambda: clear_repair_files(self.gui_questions)))
+        self.clear_review_button.configure(command=lambda: self.run_task(lambda: clear_review_files(self.gui_questions)))
         self.clear_all_button.configure(command=lambda: self.run_task(lambda: clear_all(self.gui_questions)))
 
     def make_compile_repair_provider(self):
@@ -1410,6 +1475,17 @@ class App(ctk.CTk):
             return
         self.checker_manager_window = CheckerManagerWindow(self)
         self.checker_manager_window.show_on_top()
+
+    def open_post_scoring_review(self):
+        existing_window = getattr(self, "score_review_window", None)
+        if existing_window is not None and existing_window.winfo_exists():
+            existing_window.show_on_top()
+            return
+        if not os.path.exists("final_grades.xlsx"):
+            messagebox.showwarning("No Final Grades", "Run grading first so final_grades.xlsx exists.")
+            return
+        self.score_review_window = PostScoringReviewWindow(self)
+        self.score_review_window.show_on_top()
 
     def _add_config_row(self, question_name="", weight=""):
         """Adds a row of entry widgets and binds KeyRelease event."""
@@ -1485,7 +1561,7 @@ class App(ctk.CTk):
         # Set simple naming checkbox
         self.simple_naming_var.set(self.gui_simple_naming)
 
-    def apply_gui_configuration(self):
+    def apply_gui_configuration(self, show_dialogs=True):
         """Parses, validates, updates state, resets dirty flag and UI."""
         parsed_questions = []
         parsed_weights = {}
@@ -1571,7 +1647,8 @@ class App(ctk.CTk):
         parsed_rar_support = self.rar_support_var.get()
 
         if parse_errors:
-            messagebox.showerror("Configuration Parse Error", "\n".join(parse_errors))
+            if show_dialogs:
+                messagebox.showerror("Configuration Parse Error", "\n".join(parse_errors))
             self.config_status_label.configure(text="Status: Invalid Input", text_color=COLORS["danger"])
             self.config_valid = False
             self.config_dirty = True  # Still dirty, needs fixing
@@ -1617,7 +1694,8 @@ class App(ctk.CTk):
                  else:
                      formatted_errors.append(f"• {error}")
              
-             messagebox.showwarning("Configuration Validation Error", "\n\n".join(formatted_errors))
+             if show_dialogs:
+                 messagebox.showwarning("Configuration Validation Error", "\n\n".join(formatted_errors))
         else:
              self.config_valid = True
              self.config_dirty = False  # Applied successfully
@@ -1670,6 +1748,7 @@ class App(ctk.CTk):
                 self.clear_output_button.configure(state=clear_state)
                 self.clear_c_button.configure(state=clear_state)
                 self.clear_repair_button.configure(state=clear_state)
+                self.clear_review_button.configure(state=clear_state)
                 self.clear_all_button.configure(state=clear_state)
             else:
                 clear_state = "disabled"
@@ -1677,6 +1756,7 @@ class App(ctk.CTk):
                 self.clear_output_button.configure(state=clear_state)
                 self.clear_c_button.configure(state=clear_state)
                 self.clear_repair_button.configure(state=clear_state)
+                self.clear_review_button.configure(state=clear_state)
                 self.clear_all_button.configure(state=clear_state)
         else:
             # If config is invalid, disable most buttons
@@ -1694,10 +1774,12 @@ class App(ctk.CTk):
             self.clear_output_button.configure(state=clear_state)
             self.clear_c_button.configure(state=clear_state)
             self.clear_repair_button.configure(state=clear_state)
+            self.clear_review_button.configure(state=clear_state)
             self.clear_all_button.configure(state=clear_state)
             
             # Check preprocess button state separately
             self.check_preprocess_button_state()
+        self.update_excel_button_state()
 
     def browse_vs_path(self):
         filepath = filedialog.askopenfilename(
@@ -1957,7 +2039,7 @@ class App(ctk.CTk):
             else:
                 self.after(0, lambda: self._handle_initial_vs_validation_success())
                 
-        except Exception as e:
+        except Exception:
             self.after(0, lambda: self._handle_initial_vs_validation_failure())
 
     def _handle_initial_vs_validation_success(self):
@@ -2000,7 +2082,7 @@ class App(ctk.CTk):
             
             # Success
             self.after(0, lambda: self._handle_initial_winrar_validation_success())
-        except Exception as e:
+        except Exception:
             self.after(0, lambda: self._handle_initial_winrar_validation_failure())
 
     def _handle_initial_winrar_validation_success(self):
@@ -2265,6 +2347,388 @@ class SetupAssistantWindow(ctk.CTkToplevel):
         self.parent.update_setup_readiness_banner()
 
 
+class PostScoringReviewWindow(ctk.CTkToplevel):
+    """Review scored rows with an LLM while keeping student identity out of prompts."""
+
+    def __init__(self, parent: App):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("Post-Scoring LLM Review")
+        self.geometry("1250x820")
+        self.minsize(1050, 700)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+
+        self.provider_var = tk.StringVar(value="Gemini")
+        self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+        self.status_var = tk.StringVar(value="Loading scored rows...")
+        self.only_deductions_var = tk.BooleanVar(value=True)
+        self.cases: list[ReviewCase] = []
+        self.visible_cases: list[ReviewCase] = []
+        self.selected_vars: dict[tuple[str, str], tk.BooleanVar] = {}
+        self.current_case: ReviewCase | None = None
+        self.review_running = False
+
+        top = ctk.CTkFrame(self, corner_radius=8)
+        top.grid(row=0, column=0, padx=12, pady=12, sticky="ew")
+        top.grid_columnconfigure(7, weight=1)
+
+        ctk.CTkLabel(top, text="LLM Provider:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.provider_menu = ctk.CTkOptionMenu(
+            top,
+            values=[FAKE_PROVIDER_LABEL, "Gemini"],
+            variable=self.provider_var,
+            command=lambda _value: self.update_gemini_key_status(),
+        )
+        self.provider_menu.grid(row=0, column=1, padx=8, pady=8, sticky="w")
+
+        ctk.CTkLabel(top, text="Gemini model:").grid(row=0, column=2, padx=8, pady=8, sticky="w")
+        self.model_menu = ctk.CTkOptionMenu(
+            top,
+            values=[self.gemini_model_var.get(), "gemini-2.0-flash", "gemini-1.5-flash"],
+            variable=self.gemini_model_var,
+        )
+        self.model_menu.grid(row=0, column=3, padx=8, pady=8, sticky="ew")
+
+        self.only_deductions_checkbox = ctk.CTkCheckBox(
+            top,
+            text="Show rows below 100 only",
+            variable=self.only_deductions_var,
+            command=self.render_table,
+        )
+        self.only_deductions_checkbox.grid(row=0, column=4, padx=8, pady=8, sticky="w")
+
+        self.refresh_button = ctk.CTkButton(top, text="Refresh Rows", command=self.reload_cases)
+        self.refresh_button.grid(row=0, column=5, padx=8, pady=8, sticky="ew")
+
+        self.review_selected_button = ctk.CTkButton(top, text="Review Selected", command=self.review_selected)
+        self.review_selected_button.grid(row=0, column=6, padx=8, pady=8, sticky="ew")
+
+        self.key_status_label = ctk.CTkLabel(top, text="", anchor="w", justify="left")
+        self.key_status_label.grid(row=1, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+
+        self.status_label = ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left")
+        self.status_label.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
+
+        body = ctk.CTkFrame(self, corner_radius=8)
+        body.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=2)
+        body.grid_rowconfigure(0, weight=1)
+
+        self.table_frame = ctk.CTkScrollableFrame(body, corner_radius=6)
+        self.table_frame.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
+        self.table_frame.grid_columnconfigure(4, weight=1)
+
+        detail = ctk.CTkTabview(body, corner_radius=6)
+        detail.grid(row=0, column=1, padx=8, pady=8, sticky="nsew")
+        for tab_name in ["Code", "Review", "Failures", "Prompt"]:
+            detail.add(tab_name)
+
+        self.code_textbox = ctk.CTkTextbox(detail.tab("Code"), wrap="none")
+        self.code_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._configure_code_tags()
+
+        self.review_textbox = ctk.CTkTextbox(detail.tab("Review"), wrap="word")
+        self.review_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.review_textbox.tag_config("summary", foreground=COLORS["primary"])
+        self.review_textbox.tag_config("warning", foreground=COLORS["warning"])
+        self.review_textbox.tag_config("good", foreground=COLORS["secondary"])
+
+        self.failures_textbox = ctk.CTkTextbox(detail.tab("Failures"), wrap="word")
+        self.failures_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        self.prompt_textbox = ctk.CTkTextbox(detail.tab("Prompt"), wrap="word")
+        self.prompt_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        self.update_gemini_key_status()
+        self.reload_cases()
+
+    def show_on_top(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.attributes("-topmost", True)
+        self.after(250, lambda: self.attributes("-topmost", False))
+
+    def close_window(self):
+        self.parent.score_review_window = None
+        self.destroy()
+
+    def update_gemini_key_status(self):
+        using_gemini = self.provider_var.get() == "Gemini"
+        has_key = bool(get_google_api_key())
+        if using_gemini and not has_key:
+            self.key_status_label.configure(
+                text=f"Gemini key is not configured. Choose {FAKE_PROVIDER_LABEL} for deterministic testing or set GOOGLE_API_KEY.",
+                text_color=COLORS["warning"],
+            )
+            self.review_selected_button.configure(state="disabled")
+        else:
+            self.key_status_label.configure(
+                text="Ready. Reviewed rows are locked and require deleting their review JSON to re-run.",
+                text_color=COLORS["secondary"],
+            )
+            self.review_selected_button.configure(state="normal" if not self.review_running else "disabled")
+
+    def reload_cases(self):
+        try:
+            self.cases = load_review_cases(self.parent.gui_questions, grading_policy=self.active_grading_policy())
+        except Exception as exc:
+            self.status_var.set(f"Could not load review rows: {exc}")
+            self.cases = []
+        self.selected_vars.clear()
+        self.render_table()
+        if self.visible_cases:
+            self.show_case(self.visible_cases[0])
+        else:
+            self.clear_detail()
+
+    def render_table(self):
+        for child in self.table_frame.winfo_children():
+            child.destroy()
+        headers = ["Select", "Question", "Score", "Final", "Status", "Notes"]
+        for col, header in enumerate(headers):
+            ctk.CTkLabel(self.table_frame, text=header, font=ctk.CTkFont(weight="bold")).grid(row=0, column=col, padx=4, pady=4, sticky="w")
+
+        self.visible_cases = [
+            case for case in self.cases
+            if (not self.only_deductions_var.get() or case.question_score < 100 or case.notes)
+        ]
+        reviewed = sum(1 for case in self.visible_cases if case.reviewed)
+        self.status_var.set(f"Loaded {len(self.visible_cases)} row(s), {reviewed} already reviewed.")
+
+        for row_index, case in enumerate(self.visible_cases, start=1):
+            key = (case.question, case.student_id)
+            var = self.selected_vars.setdefault(key, tk.BooleanVar(value=False))
+            checkbox = ctk.CTkCheckBox(self.table_frame, text="", variable=var, width=28)
+            checkbox.configure(state="disabled" if case.reviewed else "normal")
+            checkbox.grid(row=row_index, column=0, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=case.question).grid(row=row_index, column=1, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=f"{case.question_score:g}").grid(row=row_index, column=2, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=f"{case.final_grade:g}").grid(row=row_index, column=3, padx=4, pady=3, sticky="w")
+            status_text = "Reviewed" if case.reviewed else case.code_source.title()
+            status_color = COLORS["secondary"] if case.reviewed else COLORS["primary"]
+            ctk.CTkButton(
+                self.table_frame,
+                text=status_text,
+                width=92,
+                fg_color=status_color,
+                command=lambda selected_case=case: self.show_case(selected_case),
+            ).grid(row=row_index, column=4, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.table_frame, text=self._shorten(case.notes or case.grade_text, 80), anchor="w", justify="left").grid(row=row_index, column=5, padx=4, pady=3, sticky="ew")
+
+    def review_selected(self):
+        if self.review_running:
+            return
+        selected = [
+            case for case in self.visible_cases
+            if self.selected_vars.get((case.question, case.student_id), tk.BooleanVar(value=False)).get() and not case.reviewed
+        ]
+        if not selected:
+            messagebox.showinfo("No Rows Selected", "Select one or more unlocked rows to review.")
+            return
+        try:
+            provider = self.make_provider()
+        except Exception as exc:
+            messagebox.showerror("LLM Setup Error", str(exc))
+            return
+        self.review_running = True
+        self.review_selected_button.configure(state="disabled")
+        self.status_var.set(f"Reviewing {len(selected)} selected row(s)...")
+        threading.Thread(target=self._review_worker, args=(selected, provider), daemon=True).start()
+
+    def _review_worker(self, selected: list[ReviewCase], provider):
+        try:
+            review_cases_with_llm(selected, provider, max_workers=2, progress_callback=self._review_progress)
+            self.after(0, self._review_finished)
+        except Exception as exc:
+            self.after(0, lambda captured_exc=exc: self._review_failed(captured_exc))
+
+    def _review_progress(self, result, done, total):
+        self.after(0, lambda: self.status_var.set(f"Reviewed {done}/{total}: {result.question} {result.anonymized_label}"))
+
+    def _review_finished(self):
+        self.review_running = False
+        self.reload_cases()
+        self.update_gemini_key_status()
+        self.status_var.set("Review complete. Reviewed rows are now locked.")
+
+    def _review_failed(self, exc):
+        self.review_running = False
+        self.update_gemini_key_status()
+        self.status_var.set(f"Review failed: {exc}")
+        messagebox.showerror("Review Failed", str(exc))
+
+    def make_provider(self):
+        if self.provider_var.get() == FAKE_PROVIDER_LABEL:
+            return FakeLLMProvider()
+        if not get_google_api_key():
+            raise ValueError(f"GOOGLE_API_KEY is not set. Choose {FAKE_PROVIDER_LABEL} or configure Gemini first.")
+        return GeminiProvider(model=self.gemini_model_var.get() or None)
+
+    def active_grading_policy(self):
+        policy = default_grading_policy()
+        policy["test_case_scoring"]["mode"] = self.parent.gui_test_scoring_mode
+        policy["test_case_scoring"]["deduction_per_failed_input"] = self.parent.gui_test_error_deduction
+        policy["test_case_scoring"]["per_error_deduction_formula"] = (
+            f"max(0, 100 - {self.parent.gui_test_error_deduction:g} * failed_tests) "
+            "when mode is per_error_deduction"
+        )
+        policy["submission_error_penalty"]["points_per_error"] = self.parent.gui_penalty
+        policy["submission_error_penalty"]["mode"] = (
+            "cumulative_per_error" if self.parent.gui_per_error_penalty else "once_per_student"
+        )
+        policy["compile_repair"]["enabled"] = self.parent.gui_llm_compile_repair_enabled
+        policy["compile_repair"]["penalty_after_successful_repair"] = self.parent.gui_llm_compile_repair_penalty
+        policy["compile_repair"]["max_attempts"] = self.parent.gui_llm_compile_repair_max_attempts
+        return policy
+
+    def show_case(self, case: ReviewCase):
+        self.current_case = case
+        self._set_text(self.code_textbox, self._numbered_code(case.code_text))
+        self._highlight_code(case.code_text)
+        self._set_text(self.failures_textbox, self._format_failures(case))
+        self._set_text(self.prompt_textbox, build_score_review_prompt(case))
+        saved_response = (case.saved_review or {}).get("response") if case.saved_review else None
+        self._set_text(self.review_textbox, self._format_review(saved_response, case))
+
+    def clear_detail(self):
+        for textbox in [self.code_textbox, self.review_textbox, self.failures_textbox, self.prompt_textbox]:
+            self._set_text(textbox, "")
+
+    def _format_review(self, response: dict | None, case: ReviewCase) -> str:
+        if not response:
+            return (
+                f"{case.question} {case.anonymized_label}\n"
+                f"Score: {case.question_score:g}, Final: {case.final_grade:g}\n"
+                f"Code source: {case.code_source}\n\n"
+                "Select this row and click Review Selected to ask the LLM for an explanation."
+            )
+        lines = [
+            f"{case.question} {case.anonymized_label}",
+            f"Deduction plausible: {response.get('deduction_is_plausible')}",
+            "",
+            "Summary:",
+            str(response.get("summary", "")),
+            "",
+            "Root causes:",
+        ]
+        for cause in response.get("root_causes", []) or []:
+            lines.append(f"- {cause.get('issue', '')}")
+            lines.append(f"  Inputs: {', '.join(map(str, cause.get('failed_inputs', []) or []))}")
+            lines.append(f"  Impact: {cause.get('deduction_impact', '')}")
+        lines.extend(["", "Inline comments:"])
+        for comment in response.get("inline_comments", []) or []:
+            line = comment.get("line")
+            prefix = f"Line {line}: " if line else ""
+            lines.append(f"- {prefix}{comment.get('comment', '')}")
+        lines.extend(["", "Fix to full score:", str(response.get("fix_to_full_score", ""))])
+        if response.get("risk_note"):
+            lines.extend(["", "Risk note:", str(response.get("risk_note", ""))])
+        return "\n".join(lines)
+
+    def _format_failures(self, case: ReviewCase) -> str:
+        lines = [
+            f"Question: {case.question}",
+            f"Score: {case.question_score:g}",
+            f"Notes: {case.notes}",
+            f"Code source: {case.code_source}",
+            f"Code path: {case.code_path}",
+            "",
+        ]
+        if case.repair_metadata:
+            lines.extend(["Repair metadata:", json.dumps(case.repair_metadata, indent=2, ensure_ascii=False), ""])
+        if not case.failed_cases:
+            lines.append("No parsed discrepancy blocks were found in the grade text.")
+        for index, failure in enumerate(case.failed_cases, start=1):
+            lines.extend(
+                [
+                    f"Failed case {index}",
+                    f"Input: {failure.input_value}",
+                    f"Expected: {failure.expected_output}",
+                    f"Actual: {failure.actual_output}",
+                    f"Reason: {failure.reason}",
+                    "",
+                ]
+            )
+        if case.student_output_text:
+            lines.extend(["Student output by input:", case.student_output_text, ""])
+        if case.expected_output_text:
+            lines.extend(["Expected/reference output by input:", case.expected_output_text, ""])
+        lines.extend(["Raw grade text:", case.grade_text])
+        return "\n".join(lines)
+
+    def _configure_code_tags(self):
+        self.code_textbox.tag_config("keyword", foreground=COLORS["primary"])
+        self.code_textbox.tag_config("name", foreground=COLORS["text_dark"])
+        self.code_textbox.tag_config("comment", foreground=COLORS["secondary"])
+        self.code_textbox.tag_config("string", foreground=COLORS["warning"])
+        self.code_textbox.tag_config("number", foreground=COLORS["accent"])
+
+    def _highlight_code(self, code: str):
+        if lex and CLexer:
+            self._highlight_code_with_pygments(code)
+            return
+        keywords = {"int", "return", "if", "else", "for", "while", "do", "void", "float", "double", "char", "include", "define"}
+        lines = code.splitlines()
+        for idx, line in enumerate(lines, start=1):
+            comment_col = line.find("//")
+            if comment_col >= 0:
+                self.code_textbox.tag_add("comment", f"{idx}.{comment_col + 5}", f"{idx}.end")
+            for match in re.finditer(r'"[^"]*"', line):
+                self.code_textbox.tag_add("string", f"{idx}.{match.start() + 5}", f"{idx}.{match.end() + 5}")
+            for match in re.finditer(r"\b[A-Za-z_]\w*\b", line):
+                if match.group(0) in keywords:
+                    self.code_textbox.tag_add("keyword", f"{idx}.{match.start() + 5}", f"{idx}.{match.end() + 5}")
+
+    def _highlight_code_with_pygments(self, code: str):
+        line = 1
+        column = 5
+        for token_type, value in lex(code, CLexer()):
+            start_line, start_column = line, column
+            for char in value:
+                if char == "\n":
+                    line += 1
+                    column = 5
+                else:
+                    column += 1
+            tag = self._pygments_tag(token_type)
+            if tag and value:
+                self.code_textbox.tag_add(tag, f"{start_line}.{start_column}", f"{line}.{column}")
+
+    @staticmethod
+    def _pygments_tag(token_type):
+        if token_type in Keyword:
+            return "keyword"
+        if token_type in Comment:
+            return "comment"
+        if token_type in String:
+            return "string"
+        if token_type in Number:
+            return "number"
+        if token_type in Name:
+            return "name"
+        return None
+
+    def _set_text(self, textbox, text: str):
+        textbox.configure(state="normal")
+        textbox.delete("1.0", tk.END)
+        textbox.insert("1.0", text or "")
+        textbox.configure(state="disabled")
+
+    @staticmethod
+    def _numbered_code(code: str) -> str:
+        return "\n".join(f"{index:>3}: {line}" for index, line in enumerate(code.splitlines(), start=1))
+
+    @staticmethod
+    def _shorten(text: str, limit: int) -> str:
+        compact = " ".join(str(text).split())
+        return compact if len(compact) <= limit else compact[: limit - 3] + "..."
+
+
 class CheckerManagerWindow(ctk.CTkToplevel):
     def __init__(self, parent: App):
         super().__init__(parent)
@@ -2301,7 +2765,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         ctk.CTkLabel(top, text="LLM Provider:").grid(row=0, column=2, padx=8, pady=8, sticky="w")
         self.provider_menu = ctk.CTkOptionMenu(
             top,
-            values=["Fake/Offline", "Gemini"],
+            values=[FAKE_PROVIDER_LABEL, "Gemini"],
             variable=self.provider_var,
             command=lambda _value: self.update_gemini_key_status(),
         )
