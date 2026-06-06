@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -63,6 +64,13 @@ def main() -> int:
             settle(app)
             capture_widget(setup, "setup_assistant.png")
 
+            checker = gui.CheckerManagerWindow(app)
+            checker.geometry("1100x780+100+50")
+            checker.provider_var.set(gui.FAKE_PROVIDER_LABEL)
+            checker.update_gemini_key_status()
+            settle(app)
+            capture_widget(checker, "checker_manager.png")
+
             review = gui.PostScoringReviewWindow(app)
             review.geometry("1250x820+120+60")
             review.provider_var.set(gui.FAKE_PROVIDER_LABEL)
@@ -73,6 +81,7 @@ def main() -> int:
             capture_widget(review, "post_scoring_review.png")
 
             review.destroy()
+            checker.destroy()
             setup.destroy()
             app.shutdown_for_tests()
             print(f"Saved README screenshots under {DOCS_DIR}")
@@ -141,6 +150,38 @@ def create_sample_project() -> None:
             }
         ]
     ).to_excel("final_grades.xlsx", index=False)
+    Path("checker_config.json").write_text(
+        json.dumps(
+            {
+                "questions": {
+                    "Q1": {
+                        "checker": "divisors",
+                        "config": {
+                            "allow_prompt_numbers": True,
+                            "zero_requires_no_divisors_message": True,
+                        },
+                        "metadata": {
+                            "saved": True,
+                            "test_status": "passed",
+                            "audit_status": "passed",
+                            "audit_reviewed": 1,
+                        },
+                    },
+                    "Q2": {
+                        "checker": "reverse_integer",
+                        "config": {"answer_position": "last_integer"},
+                        "metadata": {
+                            "saved": True,
+                            "test_status": "passed",
+                            "audit_status": "skipped",
+                        },
+                    },
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def capture_widget(widget, filename: str) -> None:
