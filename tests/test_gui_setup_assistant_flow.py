@@ -29,6 +29,44 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                 os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
                 os.chdir(original_cwd)
 
+    def test_main_and_setup_layout_have_no_known_overlaps(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_minimal_homework()
+                os.environ["C_TESTER_SKIP_STARTUP_VALIDATION"] = "1"
+                os.environ["C_TESTER_SUPPRESS_TK_BGERRORS"] = "1"
+                from c_tester import gui
+
+                app = gui.App()
+                app.withdraw()
+                try:
+                    self.assertEqual(int(app.log_frame.grid_rowconfigure(0)["weight"]), 0)
+                    self.assertEqual(int(app.log_frame.grid_rowconfigure(1)["weight"]), 0)
+                    self.assertTrue(app.console_collapsed)
+                    app.toggle_console()
+                    self.assertGreaterEqual(int(app.log_frame.grid_rowconfigure(1)["weight"]), 1)
+                    self.assertFalse(app.console_collapsed)
+                    self.assertEqual(str(app.compile_repair_frame.master), str(app.scoring_options_frame))
+                    self.assertEqual(str(app.clear_frame.master), str(app.maintenance_frame))
+
+                    setup = gui.SetupAssistantWindow(app)
+                    setup.withdraw()
+                    try:
+                        self.assertEqual(int(setup.title_label.grid_info()["row"]), 0)
+                        self.assertEqual(int(setup.subtitle_label.grid_info()["row"]), 1)
+                        self.assertEqual(int(setup.global_status_frame.grid_info()["row"]), 2)
+                        self.assertTrue(setup.global_status_label.cget("text"))
+                    finally:
+                        setup.destroy()
+                finally:
+                    app.shutdown_for_tests()
+            finally:
+                os.environ.pop("C_TESTER_SKIP_STARTUP_VALIDATION", None)
+                os.environ.pop("C_TESTER_SUPPRESS_TK_BGERRORS", None)
+                os.chdir(original_cwd)
+
     def test_setup_readiness_tracks_assignment_zip_and_api_requirements(self):
         original_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as temp_dir:
