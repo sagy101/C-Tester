@@ -126,6 +126,7 @@ from .checker_assistant import (
     DEFAULT_GEMINI_MODEL,
     FakeLLMProvider,
     GeminiProvider,
+    SuggestionResult,
     assignment_context_for_question,
     audit_cases_with_llm,
     available_checker_templates,
@@ -177,6 +178,7 @@ COLORS = {
     "hover": "#2980b9",         # Hover color for buttons
 }
 FAKE_PROVIDER_LABEL = "Fake/Offline"
+GEMINI_FALLBACK_MODELS = ("gemini-2.0-flash", "gemini-1.5-flash")
 
 class GuiStream(io.StringIO):
     """A custom stream to redirect stdout/stderr to a CTkTextbox."""
@@ -338,6 +340,7 @@ class App(ctk.CTk):
         self.setup_status_frame = ctk.CTkFrame(self.top_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.setup_status_frame.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="ew")
         self.setup_status_frame.grid_columnconfigure(0, weight=1)
+        self.setup_status_frame.grid_rowconfigure((0, 1), weight=0)
         self.setup_status_label = ctk.CTkLabel(
             self.setup_status_frame,
             text="Setup readiness: checking...",
@@ -345,8 +348,25 @@ class App(ctk.CTk):
             justify="left",
             wraplength=900,
         )
-        self.setup_status_label.grid(row=0, column=0, padx=12, pady=8, sticky="ew")
+        self.setup_status_label.grid(row=0, column=0, padx=12, pady=(8, 0), sticky="ew")
+        self.checker_status_label = ctk.CTkLabel(
+            self.setup_status_frame,
+            text="Checker audit: checking...",
+            anchor="w",
+            justify="left",
+            wraplength=900,
+        )
+        self.checker_status_label.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
         self.setup_status_frame.bind("<Configure>", self._resize_setup_status_label)
+        self.global_apply_config_button = ctk.CTkButton(
+            self.setup_status_frame,
+            text="Apply Config",
+            command=self.apply_gui_configuration,
+            width=140,
+            height=30,
+            corner_radius=6,
+        )
+        self.global_apply_config_button.grid(row=0, column=1, rowspan=2, padx=(12, 6), pady=8, sticky="e")
         self.setup_assistant_button = ctk.CTkButton(
             self.setup_status_frame,
             text="Setup Assistant",
@@ -355,7 +375,7 @@ class App(ctk.CTk):
             height=30,
             corner_radius=6,
         )
-        self.setup_assistant_button.grid(row=0, column=1, padx=12, pady=8, sticky="e")
+        self.setup_assistant_button.grid(row=0, column=2, rowspan=2, padx=(6, 12), pady=8, sticky="e")
 
         # Section 0: Configuration
         self.config_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -419,11 +439,12 @@ class App(ctk.CTk):
             self.test_scoring_frame,
             variable=self.test_scoring_mode_var,
             values=["percentage", "per_error_deduction"],
-            command=lambda _choice: self.mark_config_dirty(),
+            command=lambda _choice: self.on_test_scoring_mode_changed(),
             width=170,
         )
         self.test_scoring_menu.grid(row=0, column=1, padx=(0, 10), pady=3, sticky="ew")
-        ctk.CTkLabel(self.test_scoring_frame, text="Deduct per failed test:", anchor="w").grid(row=1, column=0, padx=(0, 10), pady=3, sticky="w")
+        self.test_error_deduction_label = ctk.CTkLabel(self.test_scoring_frame, text="Deduct per failed test:", anchor="w")
+        self.test_error_deduction_label.grid(row=1, column=0, padx=(0, 10), pady=3, sticky="w")
         self.test_error_deduction_entry = ctk.CTkEntry(self.test_scoring_frame, width=60, border_width=1)
         self.test_error_deduction_entry.grid(row=1, column=1, padx=(0, 10), pady=3, sticky="w")
         self.test_error_deduction_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
@@ -461,13 +482,13 @@ class App(ctk.CTk):
         )
         self.compile_repair_provider_menu.grid(row=2, column=1, padx=(0, 10), pady=3, sticky="w")
         ctk.CTkLabel(self.compile_repair_frame, text="Model:").grid(row=2, column=2, padx=(0, 5), pady=3, sticky="w")
-        self.compile_repair_model_entry = ctk.CTkEntry(
+        self.compile_repair_model_menu = ctk.CTkOptionMenu(
             self.compile_repair_frame,
-            textvariable=self.llm_compile_repair_model_var,
-            border_width=1,
+            variable=self.llm_compile_repair_model_var,
+            values=self.default_model_options(self.gui_llm_compile_repair_model),
+            command=lambda _choice: self.mark_config_dirty(),
         )
-        self.compile_repair_model_entry.grid(row=2, column=3, padx=(0, 10), pady=3, sticky="ew")
-        self.compile_repair_model_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        self.compile_repair_model_menu.grid(row=2, column=3, padx=(0, 10), pady=3, sticky="ew")
         
         # Buttons with improved styling and spacing
         self.config_buttons_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
@@ -662,7 +683,7 @@ class App(ctk.CTk):
         self.run_button = ctk.CTkButton(
             self.grading_frame, 
             text="📝 Run Grading", 
-            command=lambda: self.run_task(self.task_run_grading_internal),
+            command=self.start_grading,
             height=36,
             width=200,  # Make button wider
             corner_radius=6,
@@ -1057,6 +1078,7 @@ class App(ctk.CTk):
 
         # Store active buttons to disable during tasks
         self.active_buttons = [
+            self.apply_config_button, self.global_apply_config_button,
             self.browse_button, self.preprocess_button, self.run_button, self.checker_manager_button,
             self.open_excel_button, self.score_review_button, self.open_folder_button,
             self.clear_grades_button, self.clear_output_button, self.clear_c_button,
@@ -1173,6 +1195,7 @@ class App(ctk.CTk):
             button.configure(state=state)
         if state == "normal":
             self.update_excel_button_state()
+            self.update_dependent_button_states()
         # Special handling for entry?
         # self.zip_entry.configure(state=state)
         # Enable/disable cancel button based on task running
@@ -1209,7 +1232,9 @@ class App(ctk.CTk):
         self.score_review_button.configure(state=state)
 
     def _resize_setup_status_label(self, event):
-        self.setup_status_label.configure(wraplength=max(300, event.width - 190))
+        wraplength = max(300, event.width - 330)
+        self.setup_status_label.configure(wraplength=wraplength)
+        self.checker_status_label.configure(wraplength=wraplength)
 
     def open_final_excel(self):
         excel_path = os.path.abspath("final_grades.xlsx")
@@ -1265,6 +1290,30 @@ class App(ctk.CTk):
             "grading": scoring_ready,
         }
 
+    def checker_status_summary(self):
+        checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
+        question_configs = checker_config.get("questions", {}) if isinstance(checker_config, dict) else {}
+        audited = []
+        needs_audit = []
+        needs_checker = []
+        for question in self.gui_questions:
+            question_config = question_configs.get(question) or question_configs.get(question.upper())
+            metadata = question_config.get("metadata", {}) if isinstance(question_config, dict) else {}
+            if metadata.get("audit_status") == "passed":
+                audited.append(question)
+            elif question_config:
+                needs_audit.append(question)
+            else:
+                needs_checker.append(question)
+        statuses = []
+        if audited:
+            statuses.append(f"audited: {', '.join(audited)}")
+        if needs_audit:
+            statuses.append(f"needs audit: {', '.join(needs_audit)}")
+        if needs_checker:
+            statuses.append(f"needs checker: {', '.join(needs_checker)}")
+        return "; ".join(statuses) if statuses else "no configured questions"
+
     def update_setup_readiness_banner(self):
         if not hasattr(self, "setup_status_label"):
             return
@@ -1291,6 +1340,10 @@ class App(ctk.CTk):
         color = COLORS["secondary"] if readiness["preprocess"] and readiness["scoring"] and readiness["checker"] else COLORS["warning"]
         self.setup_status_label.configure(
             text=f"Setup readiness: Preprocess {preprocess_status}; Scoring {scoring_status}; Checker {checker_status}. {detail}",
+            text_color=color,
+        )
+        self.checker_status_label.configure(
+            text=f"Checker audit: {self.checker_status_summary()}",
             text_color=color,
         )
 
@@ -1392,6 +1445,44 @@ class App(ctk.CTk):
         self.current_task_thread = threading.Thread(target=self.task_wrapper, args=(task_func, self.cancel_event), daemon=True)
         self.current_task_thread.start()
 
+    def start_grading(self):
+        if self.config_dirty:
+            self.apply_gui_configuration(show_dialogs=True)
+        if not self.config_valid or self.config_dirty:
+            messagebox.showwarning(
+                "Apply Configuration First",
+                "Fix/apply the current configuration before running grading. "
+                "This includes scoring mode and LLM compile repair options.",
+            )
+            return
+        self.run_task(self.task_run_grading_internal)
+
+    @staticmethod
+    def default_model_options(current_model=""):
+        models = [current_model, os.getenv("GEMINI_MODEL", ""), DEFAULT_GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]
+        unique_models = []
+        for model in models:
+            if model and model not in unique_models:
+                unique_models.append(model)
+        return unique_models or [DEFAULT_GEMINI_MODEL]
+
+    def on_test_scoring_mode_changed(self):
+        self.update_test_error_deduction_state()
+        self.mark_config_dirty()
+
+    def update_test_error_deduction_state(self):
+        enabled = self.test_scoring_mode_var.get() == "per_error_deduction"
+        state = "normal" if enabled else "disabled"
+        color = COLORS["text_light"] if ctk.get_appearance_mode() == "Dark" else COLORS["text_dark"]
+        if not enabled:
+            color = "gray"
+        self.test_error_deduction_entry.configure(state=state)
+        self.test_error_deduction_label.configure(text_color=color)
+
+    def configure_apply_buttons(self, **kwargs):
+        self.apply_config_button.configure(**kwargs)
+        self.global_apply_config_button.configure(**kwargs)
+
     # --- Specific Task Functions (Internal implementations called by run_task) ---
     # These now accept the callback/event args if needed
     def task_preprocess_internal(self, progress_callback=None, cancel_event=None):
@@ -1448,7 +1539,7 @@ class App(ctk.CTk):
             self.config_dirty = True # Force user to re-apply
             self.after(10, self.update_dependent_button_states) # Update UI after returning
             self.after(10, lambda: self.config_status_label.configure(text="Status: INVALID", text_color=COLORS["danger"])) 
-            self.after(10, lambda: self.apply_config_button.configure(border_color=COLORS["danger"], border_width=2))
+            self.after(10, lambda: self.configure_apply_buttons(border_color=COLORS["danger"], border_width=2))
             return # Stop the task
         else:
             log("Configuration validated successfully.", "info")
@@ -1504,7 +1595,7 @@ class App(ctk.CTk):
         # Section 1: Preprocessing
         self.preprocess_button.configure(command=lambda: self.run_task(self.task_preprocess_internal))
         # Section 2: Grading
-        self.run_button.configure(command=lambda: self.run_task(self.task_run_grading_internal))
+        self.run_button.configure(command=self.start_grading)
         self.checker_manager_button.configure(command=self.open_checker_manager)
         self.score_review_button.configure(command=self.open_post_scoring_review)
         # Section 3: Clear Actions
@@ -1580,7 +1671,7 @@ class App(ctk.CTk):
         self.config_dirty = True
         self.config_status_label.configure(text="Status: Unapplied changes", text_color=COLORS["warning"])
         # Highlight Apply button (e.g., border color)
-        self.apply_config_button.configure(border_color=COLORS["warning"], border_width=2) 
+        self.configure_apply_buttons(border_color=COLORS["warning"], border_width=2) 
         # Disable run buttons when dirty
         self.preprocess_button.configure(state="disabled")
         self.run_button.configure(state="disabled")
@@ -1610,6 +1701,7 @@ class App(ctk.CTk):
         self.test_scoring_mode_var.set(self.gui_test_scoring_mode)
         self.test_error_deduction_entry.delete(0, tk.END)
         self.test_error_deduction_entry.insert(0, str(self.gui_test_error_deduction))
+        self.update_test_error_deduction_state()
         self.llm_compile_repair_var.set(self.gui_llm_compile_repair_enabled)
         self.compile_repair_penalty_entry.delete(0, tk.END)
         self.compile_repair_penalty_entry.insert(0, str(self.gui_llm_compile_repair_penalty))
@@ -1617,6 +1709,7 @@ class App(ctk.CTk):
         self.compile_repair_attempts_entry.insert(0, str(self.gui_llm_compile_repair_max_attempts))
         self.llm_compile_repair_provider_var.set(self.gui_llm_compile_repair_provider)
         self.llm_compile_repair_model_var.set(self.gui_llm_compile_repair_model)
+        self.compile_repair_model_menu.configure(values=self.default_model_options(self.gui_llm_compile_repair_model))
         # Set RAR support checkbox
         self.rar_support_var.set(self.gui_rar_support)
         # Set simple naming checkbox
@@ -1713,7 +1806,7 @@ class App(ctk.CTk):
             self.config_status_label.configure(text="Status: Invalid Input", text_color=COLORS["danger"])
             self.config_valid = False
             self.config_dirty = True  # Still dirty, needs fixing
-            self.apply_config_button.configure(border_color=COLORS["danger"], border_width=2)  # Error border
+            self.configure_apply_buttons(border_color=COLORS["danger"], border_width=2)  # Error border
             self.update_dependent_button_states()
             return
 
@@ -1780,12 +1873,12 @@ class App(ctk.CTk):
 
         self.config_status_label.configure(text=status_text, text_color=status_color)
         # Reset Apply button appearance
-        self.apply_config_button.configure(border_color=apply_border_color, border_width=apply_border_width)
+        self.configure_apply_buttons(border_color=apply_border_color, border_width=apply_border_width)
         self.update_dependent_button_states()
 
     def update_dependent_button_states(self):
         """Enable/disable buttons based on config validity with enhanced visual feedback."""
-        if self.config_valid:
+        if self.config_valid and not self.config_dirty:
             # Check the preprocess button state separately
             self.check_preprocess_button_state()
             
@@ -2485,7 +2578,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         ctk.CTkLabel(top, text="Gemini model:").grid(row=0, column=2, padx=8, pady=8, sticky="w")
         self.model_menu = ctk.CTkOptionMenu(
             top,
-            values=[self.gemini_model_var.get(), "gemini-2.0-flash", "gemini-1.5-flash"],
+            values=App.default_model_options(self.gemini_model_var.get()),
             variable=self.gemini_model_var,
         )
         self.model_menu.grid(row=0, column=3, padx=8, pady=8, sticky="ew")
@@ -2904,13 +2997,14 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4, weight=1)
 
         self.checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
+        self.latest_checker_test_status = {}
         self.assignment_path_var = tk.StringVar(value="")
         self.provider_var = tk.StringVar(value="Gemini")
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
-        self.gemini_model_values = [self.gemini_model_var.get(), "gemini-2.0-flash", "gemini-1.5-flash"]
+        self.gemini_model_values = App.default_model_options(self.gemini_model_var.get())
         self.audit_size_var = tk.StringVar(value="15")
         self.question_var = tk.StringVar(value=parent.gui_questions[0] if parent.gui_questions else "Q1")
 
@@ -3006,8 +3100,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.llm_activity_started_at = None
         self.llm_activity_step = "Idle"
 
+        self.checker_state_frame = ctk.CTkFrame(self, corner_radius=8)
+        self.checker_state_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self.checker_state_frame.grid_columnconfigure(0, weight=1)
+
         self.tabview = ctk.CTkTabview(self, corner_radius=8)
-        self.tabview.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self.tabview.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="nsew")
         for tab_name in ["Configure", "Test Results", "Audit", "Prompt / Response"]:
             self.tabview.add(tab_name)
 
@@ -3081,11 +3179,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.response_textbox.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
 
         self.status_label = ctk.CTkLabel(self, text="Ready", anchor="w")
-        self.status_label.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self.status_label.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="ew")
 
         self.load_question_config()
         self.show_available_checkers()
         self.update_gemini_key_status()
+        self.refresh_checker_status_strip()
 
     def show_on_top(self):
         self.deiconify()
@@ -3178,11 +3277,79 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.gemini_model_var.set(flash_models[0] if flash_models else models[0])
         self.set_status(f"Loaded {len(models)} Gemini models")
 
+    def refresh_checker_status_strip(self):
+        for child in self.checker_state_frame.winfo_children():
+            child.destroy()
+        ctk.CTkLabel(
+            self.checker_state_frame,
+            text="Checker readiness",
+            font=ctk.CTkFont(weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=8, pady=(8, 4), sticky="w")
+        ctk.CTkLabel(
+            self.checker_state_frame,
+            text="Green means the checker was saved and audit passed. Yellow means saved/tested but still needs grading/audit. Red needs action.",
+            text_color="gray",
+            anchor="w",
+            justify="left",
+        ).grid(row=1, column=0, padx=8, pady=(0, 4), sticky="ew")
+        for index, question in enumerate(self.parent.gui_questions or ["Q1"], start=2):
+            status_text, status_color = self.checker_status_for_question(question)
+            ctk.CTkLabel(
+                self.checker_state_frame,
+                text=status_text,
+                text_color=status_color,
+                anchor="w",
+                justify="left",
+            ).grid(row=index, column=0, padx=8, pady=2, sticky="ew")
+
+    def checker_status_for_question(self, question):
+        question_config = self.checker_config.get("questions", {}).get(question) or self.checker_config.get("questions", {}).get(question.upper())
+        if not question_config:
+            return f"{question}: checker not configured yet", COLORS["danger"]
+        metadata = question_config.get("metadata", {}) if isinstance(question_config, dict) else {}
+        checker_name = question_config.get("checker", "unknown")
+        audit_status = metadata.get("audit_status", "not_run")
+        test_status = metadata.get("test_status", "not_run")
+        if audit_status == "passed":
+            return f"{question}: audit passed, checker saved ({checker_name})", COLORS["secondary"]
+        if audit_status in {"flagged", "error"}:
+            return f"{question}: audit {audit_status}; review checker before trusting scores ({checker_name})", COLORS["danger"]
+        if test_status == "passed":
+            return f"{question}: checker saved and draft tests passed; run grading/audit next ({checker_name})", COLORS["warning"]
+        return f"{question}: checker saved; run Test Draft then Audit ({checker_name})", COLORS["warning"]
+
+    def update_checker_metadata(self, question, **metadata_updates):
+        question_config = self.checker_config.setdefault("questions", {}).setdefault(question, {"checker": "exact", "config": {}})
+        metadata = question_config.setdefault("metadata", {})
+        metadata.update(metadata_updates)
+        save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+        self.after(0, self.refresh_checker_status_strip)
+        self.after(0, self.parent.update_setup_readiness_banner)
+
+    def mark_checker_saved(self, question, question_config, test_status="not_run"):
+        existing_metadata = {}
+        existing_config = self.checker_config.get("questions", {}).get(question, {})
+        if isinstance(existing_config, dict):
+            existing_metadata = existing_config.get("metadata", {})
+        saved_config = dict(question_config)
+        saved_config["metadata"] = {
+            **existing_metadata,
+            "saved": True,
+            "test_status": test_status,
+            "audit_status": "not_run",
+        }
+        self.checker_config.setdefault("questions", {})[question] = saved_config
+        save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+        self.after(0, self.refresh_checker_status_strip)
+        self.after(0, self.parent.update_setup_readiness_banner)
+
     def load_question_config(self):
         question = self.question_var.get()
         question_config = self.checker_config.get("questions", {}).get(question, {"checker": "exact", "config": {}})
         self.config_textbox.delete("1.0", tk.END)
-        self.config_textbox.insert("1.0", json.dumps(question_config, indent=2, sort_keys=True))
+        editable_config = {key: value for key, value in question_config.items() if key != "metadata"}
+        self.config_textbox.insert("1.0", json.dumps(editable_config, indent=2, sort_keys=True))
         self.set_status(f"Loaded checker config for {question}")
 
     def save_current_checker(self):
@@ -3196,9 +3363,10 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             messagebox.showerror("Unknown Checker", f"Checker '{checker_name}' is not available.")
             return
         question = self.question_var.get()
-        self.checker_config.setdefault("questions", {})[question] = question_config
-        save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
-        self.set_status(f"Saved checker for {question}")
+        test_status = self.latest_checker_test_status.get(question, "not_run")
+        self.mark_checker_saved(question, question_config, test_status=test_status)
+        next_step = "Run grading, then Run Audit." if test_status == "passed" else "Run Test Draft, then grading/audit."
+        self.set_status(f"Saved checker for {question}. Next: {next_step}")
         messagebox.showinfo("Checker Saved", f"Saved checker config for {question}.")
 
     def suggest_with_llm(self):
@@ -3297,8 +3465,18 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             question = self.question_var.get()
             _, _inputs, expected_outputs = self.collect_question_context(question)
             rows = run_checker_tests(question_config, expected_outputs)
+            tests_ok, warnings = self.evaluate_checker_test_rows(rows)
+            self.latest_checker_test_status[question] = "passed" if tests_ok else "failed"
+            if question in self.checker_config.get("questions", {}):
+                self.update_checker_metadata(
+                    question,
+                    test_status=self.latest_checker_test_status[question],
+                    audit_status="not_run",
+                    test_warnings=warnings,
+                )
             self.after(0, lambda: self.show_test_rows(rows))
-            self.after(0, lambda: self.set_status(f"Checker test finished: {len(rows)} rows"))
+            status = "passed" if tests_ok else "needs review"
+            self.after(0, lambda: self.set_status(f"Checker test {status}: {len(rows)} rows"))
         except Exception as exc:
             self.after(0, lambda captured_exc=exc: self.show_error("Checker Test Failed", captured_exc))
 
@@ -3331,6 +3509,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 progress_callback=lambda result, done, total: self.after(0, lambda: self.add_audit_result(result, done, total)),
             )
             overall = self.audit_overall_status(results)
+            self.record_audit_results(results, overall)
             payload = {
                 "overall": overall,
                 "reviewed": len(results),
@@ -3362,15 +3541,27 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             results = []
             for question in self.parent.gui_questions:
                 self.after(0, lambda current_question=question: self.set_llm_activity_step(f"Auto setup for {current_question}"))
-                result = self.auto_configure_question(question, provider, assignment_context, show_prompt=not results)
+                try:
+                    result = self.auto_configure_question(question, provider, assignment_context, show_prompt=not results)
+                except Exception as exc:
+                    result = self.failed_auto_config_result(question, exc)
                 results.append(result)
-            audit_summary = self.run_optional_audit(self.parent.gui_questions, provider, assignment_context)
+            try:
+                audit_summary = self.run_optional_audit(self.parent.gui_questions, provider, assignment_context)
+            except Exception as exc:
+                audit_summary = {
+                    "status": "error",
+                    "reason": str(exc),
+                    "reviewed": 0,
+                    "results": [],
+                }
             payload = {
                 "question_results": [self.serializable_auto_result(result) for result in results],
                 "audit": audit_summary,
             }
-            if results:
-                self.after(0, lambda captured_result=results[0]: self.apply_auto_config_result(captured_result))
+            first_displayable = next((result for result in results if result["question_config"] or result["test_rows"]), None)
+            if first_displayable:
+                self.after(0, lambda captured_result=first_displayable: self.apply_auto_config_result(captured_result))
             self.after(0, lambda captured_payload=payload: self.show_json_result(captured_payload))
             self.after(0, lambda: self.set_status(self.auto_setup_status_message(results, audit_summary)))
         except Exception as exc:
@@ -3413,8 +3604,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             rows = run_checker_tests(question_config, expected_outputs)
             tests_ok, warnings = self.evaluate_checker_test_rows(rows)
             if tests_ok:
-                self.checker_config.setdefault("questions", {})[question] = question_config
-                save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+                self.mark_checker_saved(question, question_config, test_status="passed")
                 saved = True
         return {
             "question": question,
@@ -3424,6 +3614,27 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             "tests_ok": tests_ok,
             "warnings": warnings,
             "saved": saved,
+            "error": "",
+        }
+
+    @staticmethod
+    def failed_auto_config_result(question, exc):
+        return {
+            "question": question,
+            "suggestion": SuggestionResult(
+                status="error",
+                question=question,
+                checker=None,
+                config={},
+                confidence=0.0,
+                reason=str(exc),
+            ),
+            "question_config": None,
+            "test_rows": [],
+            "tests_ok": False,
+            "warnings": [f"{question}: auto setup failed: {exc}"],
+            "saved": False,
+            "error": str(exc),
         }
 
     def evaluate_checker_test_rows(self, rows):
@@ -3440,6 +3651,9 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.after(0, lambda: self.set_llm_activity_step("Selecting representative graded students for audit"))
         cases = select_audit_cases(questions, max_cases=self.get_audit_size())
         if not cases:
+            for question in questions:
+                if question in self.checker_config.get("questions", {}):
+                    self.update_checker_metadata(question, audit_status="skipped")
             return {
                 "status": "skipped",
                 "reason": "No audit cases found in generated grade/Excel outputs.",
@@ -3464,11 +3678,36 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             max_workers=4,
             progress_callback=lambda result, done, total: self.after(0, lambda: self.add_audit_result(result, done, total)),
         )
+        status = self.audit_overall_status(results)
+        self.record_audit_results(results, status)
         return {
-            "status": self.audit_overall_status(results),
+            "status": status,
             "reviewed": len(results),
             "results": [result.__dict__ for result in results],
         }
+
+    def record_audit_results(self, results, overall_status):
+        if not results:
+            for question in self.parent.gui_questions:
+                if question in self.checker_config.get("questions", {}):
+                    self.update_checker_metadata(question, audit_status="skipped")
+            return
+        results_by_question = {}
+        for result in results:
+            results_by_question.setdefault(result.question, []).append(result)
+        for question, question_results in results_by_question.items():
+            if all(result.status == "passed" for result in question_results):
+                audit_status = "passed"
+            elif any(result.status == "error" for result in question_results):
+                audit_status = "error"
+            else:
+                audit_status = "flagged"
+            self.update_checker_metadata(
+                question,
+                audit_status=audit_status,
+                audit_reviewed=len(question_results),
+                audit_reasons=[result.reason for result in question_results],
+            )
 
     def ensure_grade_outputs_for_audit(self, audit_questions):
         if self.has_grade_outputs(audit_questions):
@@ -3490,6 +3729,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             llm_compile_repair_provider=self.parent.make_compile_repair_provider(),
             llm_compile_repair_penalty=self.parent.gui_llm_compile_repair_penalty,
             llm_compile_repair_max_attempts=self.parent.gui_llm_compile_repair_max_attempts,
+            vs_path_override=self.parent.gui_vs_path,
         )
         self.after(0, lambda: self.set_llm_activity_step("Creating Excel files for audit sampling"))
         create_excels(
@@ -3513,6 +3753,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             "tests_ok": result["tests_ok"],
             "warnings": result["warnings"],
             "saved": result["saved"],
+            "error": result.get("error", ""),
             "test_rows": result["test_rows"],
         }
 
@@ -3528,17 +3769,22 @@ class CheckerManagerWindow(ctk.CTkToplevel):
     def auto_setup_status_message(results, audit_summary):
         saved_count = sum(1 for result in results if result["saved"])
         total = len(results)
+        failed = [result["question"] for result in results if result.get("error")]
         audit_status = audit_summary.get("status", "not run")
-        return f"Auto setup saved {saved_count}/{total} checker(s). Audit: {audit_status}"
+        failed_text = f"; failed: {', '.join(failed)}" if failed else ""
+        return f"Auto setup saved {saved_count}/{total} checker(s){failed_text}. Audit: {audit_status}"
 
     def collect_question_context(self, question):
-        original_path = os.path.join(question, "original_sol.c")
-        with open(original_path, "r", encoding="utf-8", errors="ignore") as original_file:
-            original_code = original_file.read()
-        inputs = read_inputs_from_file(question)[:8]
-        setup_visual_studio_environment()
-        expected_outputs = get_ground_truth(question, inputs)
-        return original_code, inputs, expected_outputs
+        try:
+            original_path = os.path.join(question, "original_sol.c")
+            with open(original_path, "r", encoding="utf-8", errors="ignore") as original_file:
+                original_code = original_file.read()
+            inputs = read_inputs_from_file(question)[:8]
+            setup_visual_studio_environment(self.parent.gui_vs_path)
+            expected_outputs = get_ground_truth(question, inputs)
+            return original_code, inputs, expected_outputs
+        except Exception as exc:
+            raise RuntimeError(f"{question}: failed to collect reference outputs: {exc}") from exc
 
     def make_provider(self):
         if self.provider_var.get() == "Gemini":

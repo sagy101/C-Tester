@@ -69,6 +69,10 @@ This project automates the batch grading of multiple C programs. It sets up the 
 
 ![Setup Assistant Screenshot](docs/setup_assistant.png)
 
+**Checker Manager with Audit Status:**
+
+![Checker Manager Screenshot](docs/checker_manager.png)
+
 **Post-Scoring LLM Review Screen:**
 
 ![Post-Scoring LLM Review Screen](docs/post_scoring_review.png)
@@ -395,7 +399,7 @@ Suitable for scripting or users preferring the command line. Uses the static con
 
 The GUI has three separate LLM workflows:
 
-* **Checker Manager:** Suggests semantic checker JSON, tests it against ground-truth outputs, saves per-question checker configuration, and can sample already graded rows for audit. It can use Gemini or Fake/Offline.
+* **Checker Manager:** Suggests semantic checker JSON, tests it against ground-truth outputs, saves per-question checker configuration, and can sample already graded rows for audit. It shows colored per-question readiness states so the grader can see which checkers are saved, tested, audit-passed, or still need action. It can use Gemini or Fake/Offline.
 * **LLM Compile Repair:** During grading, compile failures can be repaired with bounded compile-only LLM attempts. The original student file is never overwritten; candidates go under `Q*/llm_fixed/`, repaired outputs under `Q*/llm_fixed_output/`, and the Excel comments include the repair note and penalty.
 * **LLM Score Review:** After grading, opens a score/notes table. The grader selects rows, and the LLM receives anonymized code, parsed failed inputs, raw student output, expected/reference output, grade text, Excel fields without `ID_number`, notes, active grading policy, and compile-repair metadata with IDs redacted. It returns a concise summary, grouped root causes, inline code comments, and a suggested fix to reach full score.
 
