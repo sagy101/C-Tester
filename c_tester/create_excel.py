@@ -81,6 +81,27 @@ def extract_compilation_repair_note(text):
     return None
 
 
+def extract_structural_check_status(text):
+    match = re.search(r'^Structural Check:\s*(.*)$', text, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def extract_structural_penalty(text):
+    match = re.search(r'^Structural Penalty:\s*-?(\d+(?:\.\d+)?)', text, re.MULTILINE)
+    if match:
+        return float(match.group(1))
+    return 0
+
+
+def extract_structural_notes(text):
+    match = re.search(r'^Structural Notes:\s*(.*)$', text, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
 def extract_timeouts(text):
     """
     Extracts the number of timeouts from the text.
@@ -176,7 +197,14 @@ def calculate_submission_penalty(reason, penalty_value, per_error_penalty):
     return 1, penalty_value, penalty_text
 
 
-def build_grade_calculation_comment(row, grade_columns, repair_penalty_columns, weighted_subtotal, final_grade):
+def build_grade_calculation_comment(
+    row,
+    grade_columns,
+    repair_penalty_columns,
+    structural_penalty_columns,
+    weighted_subtotal,
+    final_grade,
+):
     lines = ["Grade Calculation:"]
     for grade_column in grade_columns:
         question_name, weight = parse_grade_column_name(grade_column)
@@ -184,10 +212,18 @@ def build_grade_calculation_comment(row, grade_columns, repair_penalty_columns, 
             continue
         grade_value = float(row[grade_column])
         contribution = grade_value * weight / 100
-        repair_note = repair_calculation_note(row, question_name, repair_penalty_columns)
+        notes = [
+            note
+            for note in [
+                repair_calculation_note(row, question_name, repair_penalty_columns),
+                structural_calculation_note(row, question_name, structural_penalty_columns),
+            ]
+            if note
+        ]
+        note_text = f" ({'; '.join(notes)})" if notes else ""
         lines.append(
             f"{question_name}: {format_grade_number(grade_value)} x {format_grade_number(weight)}% = "
-            f"{contribution:.2f}{repair_note}"
+            f"{contribution:.2f}{note_text}"
         )
 
     penalty_amount = float(row.get(SUBMISSION_PENALTY_AMOUNT_COLUMN, 0) or 0)
@@ -214,7 +250,17 @@ def repair_calculation_note(row, question_name, repair_penalty_columns):
     repair_penalty_value = float(row.get(penalty_column, 0) or 0)
     if repair_penalty_value <= 0:
         return ""
-    return f" (includes compile repair penalty -{format_grade_number(repair_penalty_value)})"
+    return f"includes compile repair penalty -{format_grade_number(repair_penalty_value)}"
+
+
+def structural_calculation_note(row, question_name, structural_penalty_columns):
+    penalty_column = f"Structural_Penalty_{question_name}"
+    if penalty_column not in structural_penalty_columns:
+        return ""
+    structural_penalty_value = float(row.get(penalty_column, 0) or 0)
+    if structural_penalty_value <= 0:
+        return ""
+    return f"includes structural penalty -{format_grade_number(structural_penalty_value)}"
 
 
 def parse_submit_errors(error_file="submit_error.txt") -> dict[str, str]:
@@ -345,6 +391,9 @@ def create_excel_for_grades(parent_folders):
             repair_attempts = extract_compilation_repair_attempts(text)
             repair_penalty = extract_compilation_repair_penalty(text)
             repair_note = extract_compilation_repair_note(text)
+            structural_status = extract_structural_check_status(text)
+            structural_penalty = extract_structural_penalty(text)
+            structural_notes = extract_structural_notes(text)
             
             rows.append([
                 student_id,
@@ -359,6 +408,9 @@ def create_excel_for_grades(parent_folders):
                 repair_attempts,
                 repair_penalty,
                 repair_note,
+                structural_status,
+                structural_penalty,
+                structural_notes,
             ])
 
         # Create a DataFrame with the new column
@@ -375,6 +427,9 @@ def create_excel_for_grades(parent_folders):
             "Compilation_Repair_Attempts",
             "Compilation_Repair_Penalty",
             "Compilation_Repair_Note",
+            "Structural_Check_Status",
+            "Structural_Penalty",
+            "Structural_Notes",
         ])
 
         # Write the per-question Excel
@@ -389,6 +444,8 @@ def create_excel_for_grades(parent_folders):
                 "Timeout_Inputs",
                 "Compilation_Repair_Status",
                 "Compilation_Repair_Note",
+                "Structural_Check_Status",
+                "Structural_Notes",
             ])
         log(f"Created file: {output_excel} with {len(df)} records.", level="success")
 
@@ -456,6 +513,9 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
             "Compilation_Repair_Attempts": f"Compilation_Repair_Attempts_{folder}",
             "Compilation_Repair_Penalty": f"Compilation_Repair_Penalty_{folder}",
             "Compilation_Repair_Note": f"Compilation_Repair_Note_{folder}",
+            "Structural_Check_Status": f"Structural_Check_Status_{folder}",
+            "Structural_Penalty": f"Structural_Penalty_{folder}",
+            "Structural_Notes": f"Structural_Notes_{folder}",
         })
         if final_df is None:
             final_df = df_temp
@@ -474,11 +534,15 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
     repair_attempt_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Attempts_")]
     repair_penalty_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Penalty_")]
     repair_note_columns = [col for col in final_df.columns if col.startswith("Compilation_Repair_Note_")]
+    structural_status_columns = [col for col in final_df.columns if col.startswith("Structural_Check_Status_")]
+    structural_penalty_columns = [col for col in final_df.columns if col.startswith("Structural_Penalty_")]
+    structural_note_columns = [col for col in final_df.columns if col.startswith("Structural_Notes_")]
 
     final_df[grade_columns] = final_df[grade_columns].fillna(0)
     final_df[timeout_columns] = final_df[timeout_columns].fillna(0)
     final_df[repair_attempt_columns] = final_df[repair_attempt_columns].fillna(0)
     final_df[repair_penalty_columns] = final_df[repair_penalty_columns].fillna(0)
+    final_df[structural_penalty_columns] = final_df[structural_penalty_columns].fillna(0)
     for col in compile_columns:
         final_df[col] = final_df[col].where(final_df[col].notna(), False).astype(bool)
     for col in original_compile_columns:
@@ -490,6 +554,8 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
     for col in timeout_input_columns:
         final_df[col] = final_df[col].fillna("")  # Fill missing timeout inputs with empty string
     for col in repair_status_columns + repair_note_columns:
+        final_df[col] = final_df[col].fillna("")
+    for col in structural_status_columns + structural_note_columns:
         final_df[col] = final_df[col].fillna("")
 
     # Calculate initial final weighted grade
@@ -565,6 +631,7 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                 row,
                 grade_columns,
                 repair_penalty_columns,
+                structural_penalty_columns,
                 row[WEIGHTED_SUBTOTAL_COLUMN],
                 row[FINAL_GRADE_COLUMN],
             )
@@ -613,6 +680,22 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                         repair_notes_list.append(f"{q_name}: {repair_note}")
         if repair_notes_list:
             comments_parts.append("Compilation Repair: " + "; ".join(repair_notes_list))
+
+        structural_notes_list = []
+        for col_name in structural_status_columns:
+            status = row[col_name]
+            if status and status != "passed":
+                q_name_match = re.match(r'Structural_Check_Status_(Q\d+)', col_name)
+                if q_name_match:
+                    q_name = q_name_match.group(1)
+                    structural_penalty_value = row.get(f"Structural_Penalty_{q_name}", 0)
+                    structural_note = row.get(f"Structural_Notes_{q_name}", "")
+                    note_text = f": {structural_note}" if structural_note else ""
+                    structural_notes_list.append(
+                        f"{q_name}: {status} (-{structural_penalty_value:g}){note_text}"
+                    )
+        if structural_notes_list:
+            comments_parts.append("Non-Recursive Solution Checks: " + "; ".join(structural_notes_list))
         
         # 2. Add Timeout Cases
         timeout_cases_list = []

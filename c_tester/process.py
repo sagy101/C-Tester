@@ -31,7 +31,8 @@ from .utils import log
 from .utils import VERBOSITY_LEVEL
 from .configuration import vs_path  # Import vs_path from configuration
 from .compile_repair import CompileRepairResult, repair_compilation_failure
-from .semantic_grading import compare_output
+from .semantic_grading import compare_output, get_question_checker_config
+from .structural_analysis import StructuralCheckResult, analyze_source_file
 
 
 def setup_visual_studio_environment(vs_path_override=None):
@@ -285,10 +286,16 @@ def apply_repair_penalty(grade_value, repair_result):
     return grade_value
 
 
+def apply_structural_penalty(grade_value, structural_result: StructuralCheckResult | None):
+    if structural_result and structural_result.checked and not structural_result.passed and structural_result.penalty:
+        return max(0, grade_value - structural_result.penalty)
+    return grade_value
+
+
 def write_repair_metadata(grade_file, repair_result: CompileRepairResult | None):
     if not repair_result:
         return
-    grade_file.write(f"Original Compilation Error: yes\n")
+    grade_file.write("Original Compilation Error: yes\n")
     grade_file.write(f"Compilation Repair: {repair_result.status}\n")
     grade_file.write(f"Compilation Repair Attempts: {repair_result.attempts}\n")
     grade_file.write(f"Compilation Repair Penalty: -{format_grade_value(repair_result.repair_penalty)}\n")
@@ -305,6 +312,7 @@ def write_grade(
     scoring_mode="percentage",
     deduction_per_error=0,
     repair_result: CompileRepairResult | None = None,
+    structural_result: StructuralCheckResult | None = None,
 ):
     try:
         with open(grade_path, "w", encoding="utf-8") as grade_file:
@@ -322,7 +330,8 @@ def write_grade(
                         scoring_mode,
                         deduction_per_error,
                     )
-                    effective_grade = apply_repair_penalty(grade_value, repair_result)
+                    after_repair_grade = apply_repair_penalty(grade_value, repair_result)
+                    effective_grade = apply_structural_penalty(after_repair_grade, structural_result)
                     grade_file.write(f"Grade: {format_grade_value(effective_grade)}%\n")
                     grade_file.write(f"({calculation_text})\n")
                     if repair_result and repair_result.fixed:
@@ -331,6 +340,18 @@ def write_grade(
                             f" - {format_grade_value(repair_result.repair_penalty)}"
                             f" = {format_grade_value(effective_grade)}%)\n"
                         )
+                    if structural_result and structural_result.checked:
+                        status = "passed" if structural_result.passed else "failed"
+                        grade_file.write(f"Structural Check: {status}\n")
+                        if structural_result.reason:
+                            grade_file.write(f"Structural Notes: {structural_result.reason}\n")
+                        if not structural_result.passed and structural_result.penalty:
+                            grade_file.write(f"Structural Penalty: -{format_grade_value(structural_result.penalty)}\n")
+                            grade_file.write(
+                                f"(Structural check adjusted grade: {format_grade_value(after_repair_grade)}"
+                                f" - {format_grade_value(structural_result.penalty)}"
+                                f" = {format_grade_value(effective_grade)}%)\n"
+                            )
                     
                     # Add Wrong Inputs line if there were discrepancies
                     if discrepancies:
@@ -404,6 +425,8 @@ def execute_and_grade(
         sol_file.writelines(lines_to_write)
 
     correct_count, discrepancies, total = compare_outputs(ground_truth, actual_outputs, question_name)
+    source_path = os.path.join(os.path.dirname(executable), file)
+    structural_result = analyze_source_file(source_path, question_name, get_question_checker_config(question_name))
     write_grade(
         grade_path,
         correct_count,
@@ -413,6 +436,7 @@ def execute_and_grade(
         timeout_count,
         scoring_mode,
         deduction_per_error,
+        structural_result=structural_result,
     )
 
     return executable
@@ -447,6 +471,11 @@ def execute_repaired_and_grade(
         sol_file.writelines(lines_to_write)
 
     correct_count, discrepancies, total = compare_outputs(ground_truth, actual_outputs, question_name)
+    structural_result = analyze_source_file(
+        repair_result.fixed_code_path,
+        question_name,
+        get_question_checker_config(question_name),
+    )
     write_grade(
         grade_path,
         correct_count,
@@ -457,6 +486,7 @@ def execute_repaired_and_grade(
         scoring_mode,
         deduction_per_error,
         repair_result,
+        structural_result,
     )
 
     return executable
@@ -565,7 +595,6 @@ def process_folder(
 
     # --- Ground Truth --- 
     log(f"Generating ground truth for {folder_name}...", "info")
-    ground_truth_desc = f"[{folder_name}] Ground Truth"
     ground_truth = get_ground_truth(folder_name, inputs, progress_callback, cancel_event)
     if cancel_event and cancel_event.is_set(): return "cancelled"
     if not ground_truth: return "error"
@@ -586,7 +615,6 @@ def process_folder(
 
     # --- Compilation --- 
     log(f"Compiling student files in {folder_name}...", "info")
-    compile_desc = f"[{folder_name}] Compiling"
     compiled, compile_errors = parallel_compile_files(c_files_dir, c_files_to_process, progress_callback, cancel_event)
     if cancel_event and cancel_event.is_set(): return "cancelled"
 
@@ -722,8 +750,6 @@ def process_all_questions(
     llm_compile_repair_max_attempts: int = 3,
 ) -> list:
     results = []
-    total_questions = len(questions_arr)
-    description = "Overall Question Progress"
     for i, question in enumerate(questions_arr):
         if cancel_event and cancel_event.is_set():
             log("Processing all questions cancelled.", "warning", verbosity=1)

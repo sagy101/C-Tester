@@ -151,6 +151,7 @@ from .post_scoring_review import (
     default_grading_policy,
 )
 from .semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config
+from .structural_analysis import structural_requirements_errors
 from .clear_utils import (
     clear_grades,
     clear_output,
@@ -653,7 +654,7 @@ class App(ctk.CTk):
         self.simple_naming_help_frame.grid(row=7, column=0, padx=15, pady=(0, 5), sticky="w")
         self.simple_naming_help_label = ctk.CTkLabel(
             self.simple_naming_help_frame, 
-            text="Auto-detected; plain hw123.c maps to Q1",
+            text="Auto-detected; one C file is copied to all configured questions",
             font=("", 10),
             text_color="gray"
         )
@@ -1139,7 +1140,11 @@ class App(ctk.CTk):
         if recommendation == "simple":
             self.simple_naming_var.set(True)
             self.naming_detection_label.configure(
-                text=f"Detected simple naming: {counts['simple']} file(s). Plain hw123.c files will be mapped to Q1.",
+                text=(
+                    f"Detected simple naming: {counts['simple']} file(s). "
+                    "When multiple questions are configured and a submission has one real C file, "
+                    "preprocess copies it to every question."
+                ),
                 text_color=COLORS["secondary"],
             )
         elif recommendation == "standard":
@@ -1152,8 +1157,8 @@ class App(ctk.CTk):
             self.simple_naming_var.set(False)
             message = (
                 f"Mixed naming detected: {counts['standard']} standard file(s) and {counts['simple']} simple file(s). "
-                "Preprocess will handle both: hw123_qN.c goes to QN, plain hw123.c goes to Q1. "
-                "If a plain file was meant for Q2 or another question, rename it to include _qN before preprocessing."
+                "Preprocess handles both: hw123_qN.c goes to QN; a single plain C file in a multi-question "
+                "submission is copied to every configured question."
             )
             self.naming_detection_label.configure(text=message, text_color=COLORS["warning"])
             if show_dialog:
@@ -3465,6 +3470,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         test_status = metadata.get("test_status", "not_run")
         if audit_status == "passed":
             return f"{question}: audited", COLORS["secondary"]
+        if audit_status == "partial":
+            return f"{question}: audit partial", COLORS["warning"]
         if audit_status in {"flagged", "error"}:
             return f"{question}: audit {audit_status}", COLORS["danger"]
         if test_status == "passed":
@@ -3481,6 +3488,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         test_status = metadata.get("test_status", "not_run")
         if audit_status == "passed":
             return f"{question}: audit passed, checker saved ({checker_name})", COLORS["secondary"]
+        if audit_status == "partial":
+            return f"{question}: audit partial; some LLM reviews errored but none flagged ({checker_name})", COLORS["warning"]
         if audit_status in {"flagged", "error"}:
             return f"{question}: audit {audit_status}; review checker before trusting scores ({checker_name})", COLORS["danger"]
         if test_status == "passed":
@@ -3529,6 +3538,11 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         checker_name = question_config.get("checker")
         if checker_name not in available_checker_templates():
             messagebox.showerror("Unknown Checker", f"Checker '{checker_name}' is not available.")
+            return
+        structural_errors = structural_requirements_errors(question_config)
+        if structural_errors:
+            messagebox.showerror("Structural Requirement Needs Input", "\n".join(structural_errors))
+            self.set_status("Structural requirement needs a deduction before saving.")
             return
         question = self.question_var.get()
         test_status = self.latest_checker_test_status.get(question, "not_run")
@@ -3768,10 +3782,14 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         saved = False
         if suggestion.status == "supported" and suggestion.checker:
             question_config = {"checker": suggestion.checker, "config": suggestion.config}
+            if suggestion.structural_requirements:
+                question_config["structural_requirements"] = suggestion.structural_requirements
             self.after(0, lambda: self.set_llm_activity_step(f"{question}: running deterministic checker tests"))
             rows = run_checker_tests(question_config, expected_outputs)
             tests_ok, warnings = self.evaluate_checker_test_rows(rows)
-            if tests_ok:
+            structural_errors = structural_requirements_errors(question_config)
+            warnings.extend(structural_errors)
+            if tests_ok and not structural_errors:
                 self.mark_checker_saved(question, question_config, test_status="passed")
                 saved = True
         return {
@@ -3864,8 +3882,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         for result in results:
             results_by_question.setdefault(result.question, []).append(result)
         for question, question_results in results_by_question.items():
-            if all(result.status == "passed" for result in question_results):
+            if any(result.status == "flagged" for result in question_results):
+                audit_status = "flagged"
+            elif all(result.status == "passed" for result in question_results):
                 audit_status = "passed"
+            elif any(result.status == "passed" for result in question_results):
+                audit_status = "partial"
             elif any(result.status == "error" for result in question_results):
                 audit_status = "error"
             else:
@@ -3874,6 +3896,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 question,
                 audit_status=audit_status,
                 audit_reviewed=len(question_results),
+                audit_errors=sum(1 for result in question_results if result.status == "error"),
                 audit_reasons=[result.reason for result in question_results],
             )
 
@@ -3986,10 +4009,16 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.set_status("LLM did not find a supported checker")
             return
         question_config = {"checker": suggestion.checker, "config": suggestion.config}
+        if suggestion.structural_requirements:
+            question_config["structural_requirements"] = suggestion.structural_requirements
         self.config_textbox.delete("1.0", tk.END)
         self.config_textbox.insert("1.0", json.dumps(question_config, indent=2, sort_keys=True))
         self.show_json_result(suggestion.__dict__)
-        self.set_status(f"Suggested {suggestion.checker}; click Save Checker to apply")
+        structural_errors = structural_requirements_errors(question_config)
+        if structural_errors:
+            self.set_status(f"Suggested {suggestion.checker}; fill mandatory structural deduction before saving")
+        else:
+            self.set_status(f"Suggested {suggestion.checker}; click Save Checker to apply")
         self.tabview.set("Configure")
 
     def show_available_checkers(self):

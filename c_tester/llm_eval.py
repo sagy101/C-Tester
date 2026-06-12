@@ -8,12 +8,38 @@ import json
 import sys
 from typing import Any, Callable
 
-from .checker_assistant import AuditCase, FakeLLMProvider, GeminiProvider, LLMProvider, build_audit_prompt, build_suggestion_prompt
-from .compile_repair import build_compile_fix_prompt
-from .post_scoring_review import ReviewCase, ReviewFailure, build_score_review_prompt, default_grading_policy
+from .checker_assistant import (
+    AUDIT_RESPONSE_SCHEMA,
+    SUGGEST_CHECKER_RESPONSE_SCHEMA,
+    AuditCase,
+    FakeLLMProvider,
+    GeminiProvider,
+    LLMProvider,
+    build_audit_prompt,
+    build_suggestion_prompt,
+    complete_json_with_schema,
+)
+from .compile_repair import COMPILE_FIX_RESPONSE_SCHEMA, build_compile_fix_prompt
+from .post_scoring_review import (
+    SCORE_REVIEW_RESPONSE_SCHEMA,
+    ReviewCase,
+    ReviewFailure,
+    build_score_review_prompt,
+    default_grading_policy,
+)
 
 
 ALL_ENDPOINTS = ("compile_fix", "review_score_deduction", "suggest_checker", "audit_score")
+JUDGE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "passed": {"type": "boolean"},
+        "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["passed", "risk", "reason"],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True)
@@ -73,7 +99,8 @@ class EvalFakeProvider(FakeLLMProvider):
     def __init__(self):
         self.current_case: EvalCase | None = None
 
-    def complete_json(self, prompt: str, images=None) -> dict:
+    def complete_json(self, prompt: str, images=None, response_schema=None) -> dict:
+        del response_schema
         del images
         if '"task": "llm_eval_judge"' in prompt:
             return {"passed": True, "risk": "low", "reason": "Fake judge accepts deterministic eval output."}
@@ -220,7 +247,7 @@ def run_llm_judge_gate(
         return GateResult("llm_judge", False, "LLM judge requested but no judge provider was configured")
     judge_prompt = build_judge_prompt(case, response)
     try:
-        judge_response = judge_provider.complete_json(judge_prompt)
+        judge_response = complete_json_with_schema(judge_provider, judge_prompt, response_schema=JUDGE_RESPONSE_SCHEMA)
     except Exception as exc:
         return GateResult("llm_judge", False, f"Judge provider failed: {type(exc).__name__}: {exc}")
     passed = bool(judge_response.get("passed", False))
@@ -267,7 +294,7 @@ def redact_eval_input(value: Any) -> Any:
 
 def invoke_compile_fix(provider: LLMProvider, case: EvalCase) -> tuple[str, dict[str, Any]]:
     prompt = build_compile_fix_prompt(case.input["original_code"], case.input["compile_error"], [])
-    return prompt, provider.complete_json(prompt)
+    return prompt, complete_json_with_schema(provider, prompt, response_schema=COMPILE_FIX_RESPONSE_SCHEMA)
 
 
 def invoke_score_review(provider: LLMProvider, case: EvalCase) -> tuple[str, dict[str, Any]]:
@@ -291,7 +318,7 @@ def invoke_score_review(provider: LLMProvider, case: EvalCase) -> tuple[str, dic
         grading_policy=case.input.get("grading_policy", default_grading_policy()),
     )
     prompt = build_score_review_prompt(review_case)
-    return prompt, provider.complete_json(prompt)
+    return prompt, complete_json_with_schema(provider, prompt, response_schema=SCORE_REVIEW_RESPONSE_SCHEMA)
 
 
 def invoke_suggest_checker(provider: LLMProvider, case: EvalCase) -> tuple[str, dict[str, Any]]:
@@ -302,7 +329,7 @@ def invoke_suggest_checker(provider: LLMProvider, case: EvalCase) -> tuple[str, 
         case.input.get("expected_outputs", []),
         case.input.get("assignment_text", ""),
     )
-    return prompt, provider.complete_json(prompt)
+    return prompt, complete_json_with_schema(provider, prompt, response_schema=SUGGEST_CHECKER_RESPONSE_SCHEMA)
 
 
 def invoke_audit_score(provider: LLMProvider, case: EvalCase) -> tuple[str, dict[str, Any]]:
@@ -316,7 +343,7 @@ def invoke_audit_score(provider: LLMProvider, case: EvalCase) -> tuple[str, dict
         final_fields={"ID_number": "123456789", **case.input.get("final_fields", {})},
     )
     prompt = build_audit_prompt(audit_case, case.input.get("checker_config", {}), case.input.get("assignment_text", ""))
-    return prompt, provider.complete_json(prompt)
+    return prompt, complete_json_with_schema(provider, prompt, response_schema=AUDIT_RESPONSE_SCHEMA)
 
 
 ENDPOINTS = {

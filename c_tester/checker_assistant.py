@@ -78,12 +78,14 @@ CHECKER_AUDIT_EVAL_CASES = {
         "Perfect score, grade text, output, checker result, and Excel fields agree.",
         "Wrong-input count, comments, and assigned score match the configured checker failures.",
         "Compile repair succeeded and the final score reflects the configured repair penalty and repair note.",
+        "Structural recursion/loop checks were enforced when configured, and the score/comments reflect any structural penalty.",
         "Submission penalties in final fields match naming, RAR, missing-file, or nested-folder notes.",
     ],
     "flagged_when": [
         "Assigned score conflicts with wrong-input count or checker pass/fail evidence.",
         "Excel comments, timeout fields, compile-error flags, or wrong-input fields contradict the grade text.",
         "Final weighted grade does not match question scores, weights, or submission penalties when those fields are present.",
+        "Structural check status, structural penalty, grade text, or final comments contradict each other.",
         "Checker configuration is unsupported or appears mismatched to the assignment intent and would hide mistakes.",
     ],
     "uncertain_when": [
@@ -91,6 +93,41 @@ CHECKER_AUDIT_EVAL_CASES = {
         "Student output, grade text, or expected/reference output is missing or truncated.",
         "The case depends on assignment-specific intent not visible in the selected-question context.",
     ],
+}
+AUDIT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["looks_correct", "flagged", "uncertain"]},
+        "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["verdict", "risk", "reason"],
+    "additionalProperties": False,
+}
+SUGGEST_CHECKER_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["supported", "no_supported_checker"]},
+        "checker": {"type": "string", "nullable": True},
+        "config": {"type": "object"},
+        "structural_requirements": {
+            "type": "object",
+            "properties": {
+                "requires_recursion": {"type": "boolean", "nullable": True},
+                "entry_functions": {"type": "array", "items": {"type": "string"}, "nullable": True},
+                "allow_recursive_helpers": {"type": "boolean", "nullable": True},
+                "forbid_loops": {"type": "boolean", "nullable": True},
+                "deduction": {"type": "number", "nullable": True},
+                "deduction_required": {"type": "boolean", "nullable": True},
+                "reason": {"type": "string", "nullable": True},
+            },
+            "nullable": True,
+        },
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["status", "checker", "config", "confidence", "reason"],
+    "additionalProperties": False,
 }
 
 
@@ -130,6 +167,7 @@ class SuggestionResult:
     config: dict
     confidence: float
     reason: str
+    structural_requirements: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -169,7 +207,12 @@ class AssignmentContext:
 
 
 class LLMProvider(Protocol):
-    def complete_json(self, prompt: str, images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None) -> dict:
+    def complete_json(
+        self,
+        prompt: str,
+        images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+        response_schema: dict | None = None,
+    ) -> dict:
         """Return a JSON object from an LLM prompt."""
 
 
@@ -182,7 +225,12 @@ class GeminiProvider:
         if not self.api_key:
             raise ValueError("GOOGLE_API_KEY is not set")
 
-    def complete_json(self, prompt: str, images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None) -> dict:
+    def complete_json(
+        self,
+        prompt: str,
+        images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+        response_schema: dict | None = None,
+    ) -> dict:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:"
             f"generateContent?key={self.api_key}"
@@ -197,9 +245,12 @@ class GeminiProvider:
                     }
                 }
             )
+        generation_config = {"responseMimeType": "application/json"}
+        if response_schema:
+            generation_config["responseSchema"] = gemini_response_schema(response_schema)
         payload = {
             "contents": [{"parts": parts}],
-            "generationConfig": {"responseMimeType": "application/json"},
+            "generationConfig": generation_config,
         }
         request = urllib.request.Request(
             url,
@@ -210,11 +261,28 @@ class GeminiProvider:
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Gemini request failed: {exc}; {error_body[:1000]}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Gemini request failed: {exc}") from exc
 
         text = body["candidates"][0]["content"]["parts"][0]["text"]
         return parse_json_object(text)
+
+
+def gemini_response_schema(schema: Any) -> Any:
+    """Return the subset of JSON schema accepted by Gemini responseSchema."""
+    unsupported_keys = {"additionalProperties", "$schema"}
+    if isinstance(schema, dict):
+        return {
+            key: gemini_response_schema(value)
+            for key, value in schema.items()
+            if key not in unsupported_keys
+        }
+    if isinstance(schema, list):
+        return [gemini_response_schema(item) for item in schema]
+    return schema
 
 
 def list_gemini_models(api_key: str | None = None) -> list[str]:
@@ -239,10 +307,32 @@ def list_gemini_models(api_key: str | None = None) -> list[str]:
     return sorted(model_names)
 
 
+def complete_json_with_schema(
+    provider: LLMProvider,
+    prompt: str,
+    images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+    response_schema: dict | None = None,
+) -> dict:
+    if response_schema is None:
+        return provider.complete_json(prompt, images)
+    try:
+        return provider.complete_json(prompt, images, response_schema=response_schema)
+    except TypeError as exc:
+        if "response_schema" not in str(exc):
+            raise
+        return provider.complete_json(prompt, images)
+
+
 class FakeLLMProvider:
     """Deterministic provider for tests and offline demos."""
 
-    def complete_json(self, prompt: str, _images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None) -> dict:
+    def complete_json(
+        self,
+        prompt: str,
+        _images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+        response_schema: dict | None = None,
+    ) -> dict:
+        del response_schema
         lower_prompt = prompt.lower()
         if '"task": "compile_fix"' in lower_prompt:
             try:
@@ -313,6 +403,7 @@ class FakeLLMProvider:
                 "config": {"allow_prompt_numbers": True, "zero_requires_no_divisors_message": True},
                 "confidence": 0.9,
                 "reason": "The expected outputs describe divisors.",
+                "structural_requirements": {},
             }
         if "reverse" in lower_prompt:
             return {
@@ -321,6 +412,7 @@ class FakeLLMProvider:
                 "config": {"answer_position": "last_integer"},
                 "confidence": 0.9,
                 "reason": "The expected outputs describe reversing an integer.",
+                "structural_requirements": {},
             }
         return {
             "status": "no_supported_checker",
@@ -328,6 +420,7 @@ class FakeLLMProvider:
             "config": {},
             "confidence": 0.0,
             "reason": "No deterministic fake match found.",
+            "structural_requirements": {},
         }
 
 
@@ -554,12 +647,16 @@ def extract_question_assignment_text(text: str, question: str) -> str:
         return text[:12000]
 
     matches = list(question_heading_matches(text))
+    preamble = text[: matches[0][1]].strip() if matches else ""
     for index, match in enumerate(matches):
         if match[0] != question_number:
             continue
         start = match[1]
         end = matches[index + 1][1] if index + 1 < len(matches) else len(text)
-        return text[start:end].strip()[:12000]
+        question_text = text[start:end].strip()
+        if preamble:
+            return f"Global assignment instructions:\n{preamble}\n\nSelected question:\n{question_text}"[:12000]
+        return question_text[:12000]
     return text[:12000]
 
 
@@ -611,22 +708,53 @@ def build_suggestion_prompt(
             "the reference outputs. Select exactly one available checker template and only supported "
             "configuration options. Prefer the simplest checker that validates the semantic answer while ignoring harmless "
             "prompts/labels/spacing. Do not invent code, regular expressions, checker names, or unsupported options. "
+            "Each input string is the full stdin sent to the program, not necessarily the mathematical argument. "
+            "Some assignments use routing/menu fields before the actual question argument. "
+            "For those multi-integer/menu inputs, do not choose checkers that derive the answer directly from the raw stdin "
+            "unless that checker can be configured with input_integer_index to point at the actual task argument. "
+            "If no input-derived checker safely matches the task, compare the reference output answer, usually with "
+            "last_integer for one numeric Result value. "
             "If no available checker can safely validate the task, return status no_supported_checker. When uncertain, "
-            "lower confidence and explain what manual review is needed."
+            "lower confidence and explain what manual review is needed. If the selected question requires recursion, "
+            "forbids loops, or gives an explicit structural penalty, include structural_requirements. Derive deduction "
+            "only from explicit assignment text such as 'non-recursive gets 0'. If the assignment requires recursion "
+            "but does not state the deduction, set deduction to null and deduction_required to true so the grader can "
+            "fill the mandatory value manually."
         ),
         "decision_guidance": {
             "exact": "Use only when exact output format is required.",
             "normalized_text": "Use for mostly textual answers where case/punctuation are irrelevant.",
-            "last_integer": "Use for tasks with one numeric answer at the end, such as factorial, sum, max, count, gcd, or lcm.",
+            "last_integer": (
+                "Use for tasks with one numeric answer at the end, such as factorial, sum, max, count, gcd, lcm, "
+                "binary-as-digits, digit reductions, or a series value. Prefer this for menu/routing-style stdin "
+                "when the final answer is printed as Result = <number>."
+            ),
             "integer_list": "Use for sequences/lists like Fibonacci, primes, sorted arrays, or printed array values.",
-            "divisors": "Use only for divisor-list tasks.",
-            "reverse_integer": "Use only for reversing integer digits.",
+            "divisors": (
+                "Use only for divisor-list tasks when the raw stdin value is the number whose divisors are expected. "
+                "If stdin includes routing/menu fields, set input_integer_index to the argument integer. "
+                "Do not use it for unrelated numeric transformations."
+            ),
+            "reverse_integer": (
+                "Use only for reversing integer digits when the raw stdin value is the number being reversed. "
+                "If stdin includes routing/menu fields, set input_integer_index to the argument integer. "
+                "Do not use it for digit-sum/digit-reduction tasks."
+            ),
             "no_supported_checker": "Use for unsupported needs such as floating-point tolerance, multi-column structure, or mixed semantic fields.",
         },
         "response_schema": {
             "status": "supported | no_supported_checker",
             "checker": "checker name or null",
             "config": "object",
+            "structural_requirements": {
+                "requires_recursion": "boolean, true only when assignment requires recursion",
+                "entry_functions": "array of function names to inspect, e.g. ['q_2']",
+                "allow_recursive_helpers": "boolean, true when helper recursion is acceptable",
+                "forbid_loops": "boolean, true when loops are disallowed",
+                "deduction": "number of points to deduct, or null when mandatory manual input is needed",
+                "deduction_required": "boolean, true when deduction could not be derived from assignment text",
+                "reason": "short explanation grounded in the assignment text",
+            },
             "confidence": "0.0-1.0",
             "reason": "short explanation of why this checker is safe and what output it validates",
         },
@@ -644,7 +772,12 @@ def suggest_checker(
     assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
 ) -> SuggestionResult:
     prompt = build_suggestion_prompt(question, original_code, inputs, expected_outputs, assignment_text, assignment_images)
-    response = provider.complete_json(prompt, assignment_images)
+    response = complete_json_with_schema(provider, prompt, assignment_images, SUGGEST_CHECKER_RESPONSE_SCHEMA)
+    structural_requirements = merge_structural_requirements(
+        question,
+        response.get("structural_requirements") if isinstance(response.get("structural_requirements"), dict) else {},
+        assignment_text,
+    )
     return SuggestionResult(
         status=str(response.get("status", "no_supported_checker")),
         question=question,
@@ -652,7 +785,80 @@ def suggest_checker(
         config=response.get("config") if isinstance(response.get("config"), dict) else {},
         confidence=float(response.get("confidence", 0.0) or 0.0),
         reason=str(response.get("reason", "")),
+        structural_requirements=structural_requirements,
     )
+
+
+def merge_structural_requirements(question: str, existing: dict | None, assignment_text: str = "") -> dict:
+    merged = dict(existing or {})
+    inferred = infer_structural_requirements(question, assignment_text)
+    if not inferred:
+        normalize_structural_requirement_flags(merged)
+        return merged
+
+    if not (merged.get("requires_recursion") or merged.get("forbid_loops")):
+        normalize_structural_requirement_flags(inferred)
+        return inferred
+
+    for key, value in inferred.items():
+        if merged.get(key) in (None, "", [], {}):
+            merged[key] = value
+    normalize_structural_requirement_flags(merged)
+    return merged
+
+
+def normalize_structural_requirement_flags(requirements: dict):
+    deduction = requirements.get("deduction", requirements.get("penalty"))
+    try:
+        float(deduction)
+    except (TypeError, ValueError):
+        return
+    requirements["deduction_required"] = False
+
+
+def infer_structural_requirements(question: str, assignment_text: str = "") -> dict:
+    normalized = " ".join(str(assignment_text or "").lower().split())
+    has_recursion_requirement = any(
+        phrase in normalized
+        for phrase in [
+            "recursion",
+            "recursive",
+            "non-recursive",
+            "רקורס",
+        ]
+    )
+    if not has_recursion_requirement:
+        return {}
+
+    zero_deduction = any(
+        phrase in normalized
+        for phrase in [
+            "will receive credit",
+            "will not receive credit",
+            "receive 0",
+            "gets 0",
+            "get 0",
+            "יקבל 0",
+            "0 !",
+            "0!",
+        ]
+    )
+    question_number = question_number_from_name(question)
+    requirements = {
+        "requires_recursion": True,
+        "entry_functions": [f"q_{question_number}"] if question_number is not None else [],
+        "allow_recursive_helpers": True,
+        "forbid_loops": "loop" in normalized or "for/while" in normalized or "while" in normalized or "for" in normalized,
+        "deduction_required": not zero_deduction,
+        "reason": "Assignment text requires recursive implementation.",
+    }
+    if zero_deduction:
+        requirements["deduction"] = 100
+        requirements["deduction_required"] = False
+        requirements["reason"] = "Assignment states non-recursive solutions receive 0."
+    else:
+        requirements["deduction"] = None
+    return requirements
 
 
 def run_checker_tests(checker_config: dict, inputs_and_expected: list[tuple[str, str]], max_cases: int = 8) -> list[dict]:
@@ -682,6 +888,7 @@ def run_checker_tests(checker_config: dict, inputs_and_expected: list[tuple[str,
 
 def select_audit_cases(questions: list[str], max_cases: int = 15) -> list[AuditCase]:
     cases_by_bucket = _empty_audit_buckets()
+    cases_by_question = {question: _empty_audit_buckets() for question in questions}
     final_df = _read_excel_if_exists("final_grades.xlsx")
     final_by_id = _rows_by_id(final_df)
 
@@ -689,9 +896,18 @@ def select_audit_cases(questions: list[str], max_cases: int = 15) -> list[AuditC
         grade_excel = os.path.join(question, f"{question}_grades_to_upload.xlsx")
         question_df = _read_excel_if_exists(grade_excel)
         for _, row in question_df.iterrows():
-            _add_case_to_buckets(cases_by_bucket, _make_audit_case(question, row, final_by_id))
+            case = _make_audit_case(question, row, final_by_id)
+            _add_case_to_buckets(cases_by_bucket, case)
+            _add_case_to_buckets(cases_by_question[question], case)
 
-    return _take_bucketed_cases(cases_by_bucket, max_cases)
+    selected = []
+    if max_cases >= len(questions):
+        for question in questions:
+            question_pick = _take_bucketed_cases(cases_by_question[question], 1)
+            if question_pick and len(selected) < max_cases:
+                selected.append(question_pick[0])
+
+    return _take_bucketed_cases(cases_by_bucket, max_cases, selected)
 
 
 def _empty_audit_buckets() -> dict[str, list[AuditCase]]:
@@ -725,8 +941,12 @@ def _add_case_to_buckets(cases_by_bucket: dict[str, list[AuditCase]], case: Audi
         cases_by_bucket[bucket].append(case)
 
 
-def _take_bucketed_cases(cases_by_bucket: dict[str, list[AuditCase]], max_cases: int) -> list[AuditCase]:
-    selected = []
+def _take_bucketed_cases(
+    cases_by_bucket: dict[str, list[AuditCase]],
+    max_cases: int,
+    selected: list[AuditCase] | None = None,
+) -> list[AuditCase]:
+    selected = list(selected or [])
     while len(selected) < max_cases and any(cases_by_bucket.values()):
         for bucket in cases_by_bucket:
             if cases_by_bucket[bucket] and len(selected) < max_cases:
@@ -765,7 +985,7 @@ def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider
     focused_context = assignment_context_for_question(assignment_context, case.question)
     prompt = build_audit_prompt(case, checker_config, focused_context.text, focused_context.images)
     try:
-        response = provider.complete_json(prompt, focused_context.images)
+        response = _complete_audit_json_with_retry(provider, prompt, focused_context.images)
         verdict = str(response.get("verdict", "uncertain"))
         risk = str(response.get("risk", "medium"))
         reason = str(response.get("reason", ""))
@@ -776,6 +996,25 @@ def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider
         reason = str(exc)
         status = "error"
     return AuditResult(case.student_id, case.question, status, verdict, risk, reason)
+
+
+def _complete_audit_json_with_retry(
+    provider: LLMProvider,
+    prompt: str,
+    images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+) -> dict:
+    try:
+        return complete_json_with_schema(provider, prompt, images, AUDIT_RESPONSE_SCHEMA)
+    except Exception as first_error:
+        retry_prompt = (
+            f"{prompt}\n\n"
+            "The previous response could not be parsed as JSON. Return one valid JSON object only, with no markdown, "
+            "no comments, and no trailing text. Required keys: verdict, risk, reason."
+        )
+        try:
+            return complete_json_with_schema(provider, retry_prompt, images, AUDIT_RESPONSE_SCHEMA)
+        except Exception as second_error:
+            raise RuntimeError(f"{first_error}; retry failed: {second_error}") from second_error
 
 
 def build_audit_prompt(
@@ -804,7 +1043,8 @@ def build_audit_prompt(
                 f"Focus only on {case.question}. If assignment text or images contain multiple questions, ignore other "
                 "question sections. Check whether the assigned score and Excel fields are consistent with the grade text, "
                 "student output, checker configuration, and selected-question assignment intent. Verify comments, penalties, compile-error flags, timeout "
-                "fields, wrong-input fields, and final weighted grade fields when present. Do not change the grade. "
+                "fields, wrong-input fields, structural recursion/loop check fields, structural penalties, and final weighted grade fields "
+                "when present. Do not change the grade. "
                 "Return looks_correct only when the fields are internally consistent and the grading decision appears "
                 "reasonable. Return flagged for likely scoring/Excel mistakes. Return uncertain when more human review "
                 "is needed."
@@ -812,8 +1052,12 @@ def build_audit_prompt(
             "response_schema": {
                 "verdict": "looks_correct | flagged | uncertain",
                 "risk": "low | medium | high",
-                "reason": "specific reason grounded in the provided fields",
+                "reason": "one short plain-text sentence under 350 characters; no newlines",
             },
+            "strict_json_rules": (
+                "Return exactly one JSON object with exactly the keys verdict, risk, and reason. "
+                "The reason value must be one JSON string: escape quotes and do not include markdown, lists, nested objects, or line breaks."
+            ),
         },
         ensure_ascii=False,
         indent=2,

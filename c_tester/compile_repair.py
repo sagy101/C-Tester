@@ -7,7 +7,7 @@ import json
 import os
 from typing import Callable, Protocol
 
-from .checker_assistant import LLMProvider
+from .checker_assistant import LLMProvider, complete_json_with_schema
 
 
 COMPILE_REPAIR_SYSTEM_PROMPT = (
@@ -109,6 +109,30 @@ COMPILE_REPAIR_VALIDATION_EXAMPLES = {
         "custom helper is referenced but neither its body nor intended behavior is present",
         "unrelated fragments have no clear entry point or data flow",
     ],
+}
+COMPILE_FIX_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["fixed_candidate", "too_bad"]},
+        "too_bad": {"type": "boolean"},
+        "fixed_code": {"type": "string"},
+        "compile_issue": {"type": "string"},
+        "fix_reason": {"type": "string"},
+        "changes_made": {"type": "string"},
+        "risk_note": {"type": "string"},
+        "decision_check": {"type": "string"},
+    },
+    "required": [
+        "status",
+        "too_bad",
+        "fixed_code",
+        "compile_issue",
+        "fix_reason",
+        "changes_made",
+        "risk_note",
+        "decision_check",
+    ],
+    "additionalProperties": False,
 }
 
 TOO_BAD_EXCEL_NOTE = "code cannot be made to compile without guessing the student's intended logic."
@@ -263,7 +287,7 @@ def repair_compilation_failure(
         report_repair_progress(progress_callback, f"repair attempt {attempt_number}/{max_attempts}")
 
         prompt = build_compile_fix_prompt(original_code, current_compile_error, attempts)
-        response = provider.complete_json(prompt)
+        response = complete_json_with_schema(provider, prompt, response_schema=COMPILE_FIX_RESPONSE_SCHEMA)
         suggestion = parse_compile_fix_response(response)
         if suggestion.too_bad:
             result, current_compile_error, should_continue = handle_too_bad_suggestion(

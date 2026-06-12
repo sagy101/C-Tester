@@ -1,6 +1,9 @@
 import unittest
+import os
+import tempfile
 
-from c_tester.process import calculate_grade
+from c_tester.process import calculate_grade, write_grade
+from c_tester.structural_analysis import StructuralCheckResult
 
 
 class TestGradingModes(unittest.TestCase):
@@ -38,6 +41,32 @@ class TestGradingModes(unittest.TestCase):
         )
 
         self.assertEqual(grade, 97)
+
+    def test_write_grade_applies_structural_penalty(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            grade_path = os.path.join(temp_dir, "student.txt")
+            write_grade(
+                grade_path,
+                correct_count=5,
+                total=5,
+                discrepancies=[],
+                compile_error=None,
+                structural_result=StructuralCheckResult(
+                    checked=True,
+                    passed=False,
+                    penalty=100,
+                    reason="Non-recursive solution check failed: no required recursive call was found.",
+                ),
+            )
+
+            with open(grade_path, "r", encoding="utf-8") as grade_file:
+                text = grade_file.read()
+
+        self.assertIn("Grade: 0%", text)
+        self.assertIn("Structural Check: failed", text)
+        self.assertIn("Structural Penalty: -100", text)
+        self.assertIn("Non-recursive solution check failed", text)
+        self.assertIn("Structural check adjusted grade: 100 - 100 = 0%", text)
 
 
 if __name__ == "__main__":

@@ -12,12 +12,53 @@ from typing import Any
 
 import pandas as pd
 
-from .checker_assistant import LLMProvider
+from .checker_assistant import LLMProvider, complete_json_with_schema
 from . import configuration
 
 
 MAX_PROMPT_TEXT = 12000
 DEFAULT_MAX_FAILED_CASES = 12
+SCORE_REVIEW_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "deduction_is_plausible": {"type": "boolean"},
+        "root_causes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "issue": {"type": "string"},
+                    "failed_inputs": {"type": "array", "items": {"type": "string"}},
+                    "deduction_impact": {"type": "string"},
+                },
+                "required": ["issue", "failed_inputs", "deduction_impact"],
+            },
+        },
+        "inline_comments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "line": {"type": "integer", "nullable": True},
+                    "comment": {"type": "string"},
+                },
+                "required": ["line", "comment"],
+            },
+        },
+        "fix_to_full_score": {"type": "string"},
+        "risk_note": {"type": "string"},
+    },
+    "required": [
+        "summary",
+        "deduction_is_plausible",
+        "root_causes",
+        "inline_comments",
+        "fix_to_full_score",
+        "risk_note",
+    ],
+    "additionalProperties": False,
+}
 COMMON_INTRO_C_LOGIC_RUBRIC = {
     "assignment_instead_of_comparison": (
         "Code compiles but uses assignment in a condition, for example if (x = 5) instead of if (x == 5). "
@@ -224,7 +265,7 @@ def save_review_result(case: ReviewCase, response: dict[str, Any]) -> ReviewResu
 def _review_one_case(case: ReviewCase, provider: LLMProvider) -> ReviewResult:
     prompt = build_score_review_prompt(case)
     try:
-        response = provider.complete_json(prompt)
+        response = complete_json_with_schema(provider, prompt, response_schema=SCORE_REVIEW_RESPONSE_SCHEMA)
     except Exception as exc:
         response = {
             "summary": f"Review failed: {exc}",

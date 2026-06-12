@@ -46,12 +46,22 @@ CHECKER_TEMPLATES = {
         "config_schema": {
             "allow_prompt_numbers": {"type": "boolean", "default": True},
             "zero_requires_no_divisors_message": {"type": "boolean", "default": True},
+            "input_integer_index": {
+                "type": "integer",
+                "default": -1,
+                "description": "Which integer from stdin is the task argument; -1 means last integer.",
+            },
         },
     },
     "reverse_integer": {
         "description": "Compare output to the integer input reversed like the reference C solution.",
         "config_schema": {
             "answer_position": {"type": "enum", "values": ["last_integer"], "default": "last_integer"},
+            "input_integer_index": {
+                "type": "integer",
+                "default": -1,
+                "description": "Which integer from stdin is the task argument; -1 means last integer.",
+            },
         },
     },
 }
@@ -105,7 +115,7 @@ def compare_output_with_config(checker_config: dict, input_value: str, expected_
     if checker_name == "integer_list":
         return _compare_integer_list(expected_clean, actual_clean, config)
 
-    numeric_input = _parse_integer_input(input_value)
+    numeric_input = _parse_integer_input(input_value, config)
     if numeric_input is None:
         return ComparisonResult(False, "input is not an integer", expected_clean, actual_clean)
 
@@ -161,7 +171,15 @@ def _extract_ints(output: str) -> list[int]:
     return [int(match) for match in re.findall(r"-?\d+", output)]
 
 
-def _parse_integer_input(input_value: str) -> int | None:
+def _parse_integer_input(input_value: str, config: dict | None = None) -> int | None:
+    input_numbers = _extract_ints(str(input_value))
+    if input_numbers:
+        index = (config or {}).get("input_integer_index", -1)
+        try:
+            index = int(index)
+            return input_numbers[index]
+        except (ValueError, IndexError):
+            return None
     try:
         return int(str(input_value).strip())
     except ValueError:

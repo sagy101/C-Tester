@@ -1,6 +1,6 @@
 import unittest
 
-from c_tester.semantic_grading import compare_output
+from c_tester.semantic_grading import compare_output, compare_output_with_config
 
 
 class TestSemanticGrading(unittest.TestCase):
@@ -60,6 +60,40 @@ class TestSemanticGrading(unittest.TestCase):
         result = compare_output("Q2", "1200", "Reverse of the number is: 21", "answer: 21")
 
         self.assertTrue(result.passed)
+
+    def test_input_derived_checkers_can_use_selected_stdin_integer(self):
+        divisors_result = compare_output_with_config(
+            {
+                "checker": "divisors",
+                "config": {
+                    "allow_prompt_numbers": True,
+                    "zero_requires_no_divisors_message": True,
+                    "input_integer_index": 1,
+                },
+            },
+            "7 6",
+            "Divisors: 1 2 3 6",
+            "Choose question\nDivisors: 1 2 3 6",
+        )
+        reverse_result = compare_output_with_config(
+            {"checker": "reverse_integer", "config": {"input_integer_index": 1}},
+            "2 125",
+            "Reverse is 521",
+            "Result = 521",
+        )
+
+        self.assertTrue(divisors_result.passed)
+        self.assertTrue(reverse_result.passed)
+
+    def test_input_derived_checkers_reject_wrong_stdin_integer_index(self):
+        result = compare_output_with_config(
+            {"checker": "reverse_integer", "config": {"input_integer_index": 0}},
+            "2 125",
+            "Reverse is 521",
+            "Result = 521",
+        )
+
+        self.assertFalse(result.passed)
 
     def test_timeout_is_never_semantic_match(self):
         result = compare_output("Q2", "125", "Reverse of the number is: 521", "Timeout")

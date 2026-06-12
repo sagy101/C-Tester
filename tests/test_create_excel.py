@@ -179,6 +179,38 @@ class TestCreateExcelParsing(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_final_comments_show_structural_penalty_in_question_breakdown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(temp_dir)
+                folder_data = {
+                    "Q1": self._grade_df("123456789", 100),
+                    "Q2": self._grade_df(
+                        "123456789",
+                        0,
+                        structural_status="failed",
+                        structural_penalty=100,
+                        structural_notes=(
+                            "Non-recursive solution check failed: no required recursive call "
+                            "was found from 'q_2'."
+                        ),
+                    ),
+                }
+
+                result = compute_final_grades(folder_data, {"Q1": 50, "Q2": 50}, penalty=5, slim=True)
+
+                self.assertEqual(result.loc[0, "Final_Grade"], 50)
+                comments = result.loc[0, "Comments"]
+                self.assertIn("Q2: 0 x 50% = 0.00 (includes structural penalty -100)", comments)
+                self.assertIn(
+                    "Non-Recursive Solution Checks: Q2: failed (-100): "
+                    "Non-recursive solution check failed: no required recursive call was found from 'q_2'.",
+                    comments,
+                )
+            finally:
+                os.chdir(original_cwd)
+
     @staticmethod
     def _grade_df(
         student_id,
@@ -190,6 +222,9 @@ class TestCreateExcelParsing(unittest.TestCase):
         repair_attempts=0,
         repair_penalty=0,
         repair_note="",
+        structural_status="",
+        structural_penalty=0,
+        structural_notes="",
     ):
         return pd.DataFrame(
             [
@@ -206,6 +241,9 @@ class TestCreateExcelParsing(unittest.TestCase):
                     "Compilation_Repair_Attempts": repair_attempts,
                     "Compilation_Repair_Penalty": repair_penalty,
                     "Compilation_Repair_Note": repair_note,
+                    "Structural_Check_Status": structural_status,
+                    "Structural_Penalty": structural_penalty,
+                    "Structural_Notes": structural_notes,
                 }
             ]
         )
