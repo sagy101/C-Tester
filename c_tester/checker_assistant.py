@@ -20,7 +20,7 @@ import pandas as pd
 from .semantic_grading import available_checker_templates, compare_output_with_config
 
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 MAX_ASSIGNMENT_IMAGES = 8
 CHECKER_SUGGESTION_EVAL_CASES = {
     "common_supported": [

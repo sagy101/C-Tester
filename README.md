@@ -394,7 +394,7 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   The LLM returns JSON with a short summary, whether the deduction looks plausible, grouped root causes, concrete failed-input examples, inline line comments, fix guidance to reach full score, and a risk note.
     *   Shows the code in a readable monospace view with a separate non-copying line-number gutter, failed inputs, expected/actual outputs, and the LLM explanation with inline line comments.
     *   Provides a **Reviewed Code** tab that inserts clearly labeled `REVIEWER COMMENT` lines beside relevant code without confusing them with the student's own comments.
-    *   Provides a **Review Lab** for one selected row: edit a scratch copy of the student's code in the same highlighted code renderer, run custom inputs or all grading inputs against both `original_sol.c` and the current code, inspect side-by-side outputs and styled unified diffs, and ask the LLM to apply the reviewer guidance. The lab does not overwrite the original student file.
+    *   Provides a **Review Lab** for one selected row: edit a scratch copy of the student's code in the same highlighted code renderer, run custom inputs or all grading inputs against both `original_sol.c` and the current code, inspect side-by-side outputs and styled unified diffs, and ask the LLM to apply the reviewer guidance. The lab shows separate LLM, compile, and run indicators, asks for the smallest question-specific fix that passes the inputs, and does not overwrite the original student file.
     *   Saves each review under `Q*/review/ID.json`; reviewed rows are locked until those generated review files are cleared.
 
 ### Advanced LLM Features
@@ -403,9 +403,9 @@ The GUI has three separate LLM workflows:
 
 * **Checker Manager:** Suggests semantic checker JSON, tests it against ground-truth outputs, saves per-question checker configuration, and can sample already graded rows for audit. It shows colored per-question readiness states so the grader can see which checkers are saved, tested, audit-passed, or still need action. It can use Gemini or Fake/Offline.
 * **LLM Compile Repair:** During grading, compile failures can be repaired with bounded compile-only LLM attempts. The original student file is never overwritten; candidates go under `Q*/llm_fixed/`, repaired outputs under `Q*/llm_fixed_output/`, and the Excel comments include the repair note and penalty.
-* **LLM Score Review:** After grading, opens a score/notes table. The grader selects rows, and the LLM receives anonymized code, parsed failed inputs, raw student output, expected/reference output, grade text, Excel fields without `ID_number`, notes, active grading policy, and compile-repair metadata with IDs redacted. It returns a concise summary, grouped root causes with failed-input examples, inline code comments, and a suggested fix to reach full score. The Review Lab can use that context to generate a scratch fix, run it against all grading inputs, and retry with remaining failures.
+* **LLM Score Review:** After grading, opens a score/notes table. The grader selects rows, and the LLM receives anonymized code, parsed failed inputs, raw student output, expected/reference output, grade text, Excel fields without `ID_number`, notes, active grading policy, and compile-repair metadata with IDs redacted. It returns a concise summary, grouped root causes with failed-input examples, inline code comments, and a minimal question-specific fix to reach full score. The Review Lab can use that context to generate a scratch fix, run it against all grading inputs, and retry with remaining failures.
 
-The default Gemini model is `gemini-3.5-flash` through `DEFAULT_GEMINI_MODEL`; use the GUI model picker or `GEMINI_MODEL` environment variable to choose another model available to your key. Fake/Offline is deterministic and intended for regression tests and demos, not real grading judgment.
+The default Gemini model is `gemini-flash-latest` through `DEFAULT_GEMINI_MODEL`; use the GUI model picker or `GEMINI_MODEL` environment variable to choose another model available to your key. Fake/Offline is deterministic and intended for regression tests and demos, not real grading judgment.
 
 #### LLM Endpoint Evals
 
@@ -420,7 +420,7 @@ python -m c_tester.llm_eval --provider fake
 Run against Gemini when `GOOGLE_API_KEY` is set:
 
 ```bash
-python -m c_tester.llm_eval --provider gemini --model gemini-3.5-flash --json-output llm_eval_report.json
+python -m c_tester.llm_eval --provider gemini --model gemini-flash-latest --json-output llm_eval_report.json
 ```
 
 Filter to a single endpoint or case while iterating:

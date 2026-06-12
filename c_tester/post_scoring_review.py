@@ -220,7 +220,8 @@ def build_score_review_prompt(case: ReviewCase) -> str:
             "If notes or final_fields mention preprocessing/submission errors such as RAR extraction, naming, missing files, or nested subfolder issues, explain them as submission penalties rather than code-output failures. "
             "If code_source is repaired, include the compile_repair penalty from grading_policy and repair_metadata when explaining the final deduction. "
             "Describe why the observed deductions are plausible or where a grader should double-check. "
-            "Suggest the smallest conceptual fix needed to reach a perfect score. "
+            "Suggest the smallest question-specific fix needed to pass all inputs for this question. "
+            "Do not recommend style cleanup, refactors, rewrites, or edits to unrelated questions unless they are required for this question to pass. "
             "Return inline comments using 1-based line numbers from student_code when possible."
         ),
         "response_schema": {
@@ -247,7 +248,7 @@ def build_score_review_prompt(case: ReviewCase) -> str:
                     "comment": "brief code comment",
                 }
             ],
-            "fix_to_full_score": "concise fix guidance",
+            "fix_to_full_score": "minimal question-specific fix guidance; no unrelated cleanup",
             "risk_note": "uncertainty or empty string",
         },
     }

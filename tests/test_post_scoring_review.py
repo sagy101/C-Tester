@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -7,9 +8,16 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from c_tester.checker_assistant import FakeLLMProvider
+from c_tester.checker_assistant import FakeLLMProvider, GeminiProvider, complete_json_with_schema
 from c_tester.clear_utils import clear_review_files
-from c_tester.post_scoring_review import build_score_review_prompt, load_review_cases, review_cases_with_llm
+from c_tester.post_scoring_review import (
+    ReviewCase,
+    ReviewFailure,
+    build_score_review_prompt,
+    default_grading_policy,
+    load_review_cases,
+    review_cases_with_llm,
+)
 from tools.privacy_audit import private_matches
 
 
@@ -58,6 +66,8 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertIn("question_focus", prompt)
                 self.assertIn("Focus strictly on Q1", prompt)
                 self.assertIn("Do not critique unrelated question functions", prompt)
+                self.assertIn("smallest question-specific fix", prompt)
+                self.assertIn("Do not recommend style cleanup", prompt)
                 self.assertIn("expected_output", prompt)
                 self.assertIn("actual_output", prompt)
                 self.assertIn("why_it_failed", prompt)
@@ -176,6 +186,198 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertIn("// REVIEWER COMMENT: This is the line-specific reviewer explanation.", reviewed_code)
                 self.assertIn("// General reviewer comments:", reviewed_code)
                 self.assertGreaterEqual(len(comment_lines), 3)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_review_lab_fix_prompt_includes_retry_failures(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                case = load_review_cases(["Q1"])[0]
+                review_cases_with_llm([case], FakeLLMProvider(), max_workers=1)
+                reviewed_case = load_review_cases(["Q1"])[0]
+
+                from c_tester import gui
+
+                lab = object.__new__(gui.ReviewLabWindow)
+                lab.case = reviewed_case
+                lab.original_code = reviewed_case.code_text
+                lab.last_run_results = [
+                    {
+                        "input": "0",
+                        "expected": "0 has no Divisors!",
+                        "actual": "bad",
+                        "passed": False,
+                        "reason": "zero input must explicitly state there are no divisors",
+                    },
+                    {
+                        "input": "1",
+                        "expected": "ok",
+                        "actual": "ok",
+                        "passed": True,
+                        "reason": "",
+                    },
+                ]
+
+                payload = lab._fix_prompt_payload("int main(){printf(\"bad\");return 0;}")
+
+                self.assertEqual(payload["task"], "apply_review_fix")
+                self.assertEqual(payload["question"], "Q1")
+                self.assertIn("Fix only behavior for Q1", payload["scope"])
+                self.assertIn("REVIEWER FIX", payload["instructions"])
+                self.assertIn("smallest edit set", payload["instructions"])
+                self.assertIn("Do not perform style cleanup", payload["instructions"])
+                self.assertIn("reviewer_output", payload)
+                self.assertEqual(len(payload["remaining_failures_after_last_run"]), 1)
+                self.assertEqual(payload["remaining_failures_after_last_run"][0]["input"], "0")
+                self.assertEqual(payload["deterministic_failed_cases"][0]["input_value"], "0")
+                self.assertNotIn("123456789", json.dumps(payload))
+            finally:
+                os.chdir(original_cwd)
+
+    def test_fake_provider_returns_apply_review_fix_payload(self):
+        response = FakeLLMProvider().complete_json(
+            json.dumps(
+                {
+                    "task": "apply_review_fix",
+                    "current_code": "int main(){return 0;}",
+                }
+            )
+        )
+
+        self.assertIn("fixed_code", response)
+        self.assertIn("REVIEWER FIX", response["fixed_code"])
+        self.assertIn("changes_made", response)
+        self.assertIn("tests_to_run", response)
+
+    def test_review_lab_diff_tags_classify_unified_diff_lines(self):
+        from c_tester import gui
+
+        self.assertEqual(gui.ReviewLabWindow._diff_tag_for_line("--- before.c"), "diff_header")
+        self.assertEqual(gui.ReviewLabWindow._diff_tag_for_line("+++ after.c"), "diff_header")
+        self.assertEqual(gui.ReviewLabWindow._diff_tag_for_line("@@ -1 +1 @@"), "diff_hunk")
+        self.assertEqual(gui.ReviewLabWindow._diff_tag_for_line("+added"), "diff_add")
+        self.assertEqual(gui.ReviewLabWindow._diff_tag_for_line("-removed"), "diff_remove")
+        self.assertEqual(gui.ReviewLabWindow._diff_tag_for_line("# Reason: mismatch"), "diff_note")
+        self.assertEqual(gui.ReviewLabWindow._diff_tag_for_line(" unchanged"), "")
+
+    @unittest.skipUnless(
+        os.getenv("RUN_REAL_GEMINI_REVIEW_LAB_TESTS") == "1" and os.getenv("GOOGLE_API_KEY"),
+        "Set RUN_REAL_GEMINI_REVIEW_LAB_TESTS=1 and GOOGLE_API_KEY to run real Gemini review-lab integration.",
+    )
+    def test_real_gemini_fix_compiles_and_passes_review_lab_inputs(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                os.makedirs("Q1", exist_ok=True)
+                with open(os.path.join("Q1", "original_sol.c"), "w", encoding="utf-8") as reference_file:
+                    reference_file.write(
+                        "#include <stdio.h>\n"
+                        "int main(void) {\n"
+                        "    int n;\n"
+                        "    if (scanf(\"%d\", &n) != 1) return 0;\n"
+                        "    printf(\"%d\\n\", n * 2);\n"
+                        "    return 0;\n"
+                        "}\n"
+                    )
+                with open("checker_config.json", "w", encoding="utf-8") as checker_file:
+                    json.dump({"questions": {"Q1": {"checker": "exact", "config": {}}}}, checker_file)
+
+                from c_tester import configuration, gui
+                from c_tester.process import setup_visual_studio_environment
+
+                setup_visual_studio_environment(configuration.vs_path)
+                if not (shutil.which("cl.exe") or shutil.which("cl")):
+                    self.skipTest("MSVC cl.exe is not available after loading the configured Visual Studio environment.")
+
+                broken_code = (
+                    "#include <stdio.h>\n"
+                    "int main(void) {\n"
+                    "    int n;\n"
+                    "    if (scanf(\"%d\", &n) != 1) return 0;\n"
+                    "    printf(\"%d\\n\", n + 1);\n"
+                    "    return 0;\n"
+                    "}\n"
+                )
+                case = ReviewCase(
+                    student_id="123456789",
+                    anonymized_label="student_001",
+                    question="Q1",
+                    question_score=0,
+                    final_grade=0,
+                    notes="Q1 failed because the student prints n + 1 instead of n * 2.",
+                    grade_text="Input: 2\nExpected: 4\nActual: 3\nInput: 5\nExpected: 10\nActual: 6\n",
+                    student_output_text="Input: 2\nOutput: 3\nInput: 5\nOutput: 6\n",
+                    expected_output_text="Input: 2\nOutput: 4\nInput: 5\nOutput: 10\n",
+                    code_path=os.path.join("Q1", "C", "123456789.c"),
+                    code_text=broken_code,
+                    code_source="original",
+                    failed_cases=(
+                        ReviewFailure("2", "4", "3", "student added one instead of doubling"),
+                        ReviewFailure("5", "10", "6", "student added one instead of doubling"),
+                    ),
+                    grading_policy=default_grading_policy(),
+                    saved_review={
+                        "response": {
+                            "summary": "The code computes n + 1, but Q1 expects doubling the input.",
+                            "root_causes": [
+                                {
+                                    "issue": "Wrong arithmetic operation.",
+                                    "failed_inputs": ["2", "5"],
+                                    "deduction_impact": "Every tested input gets the wrong numeric result.",
+                                    "examples": [
+                                        {
+                                            "input": "2",
+                                            "expected_output": "4",
+                                            "actual_output": "3",
+                                            "why_it_failed": "2 should be doubled to 4, not incremented to 3.",
+                                        }
+                                    ],
+                                }
+                            ],
+                            "inline_comments": [
+                                {
+                                    "line": 5,
+                                    "comment": "Change the expression from n + 1 to n * 2 for Q1.",
+                                }
+                            ],
+                            "fix_to_full_score": "Replace n + 1 with n * 2 and keep the same input/output format.",
+                        }
+                    },
+                )
+                lab = object.__new__(gui.ReviewLabWindow)
+                lab.case = case
+                lab.original_code = broken_code
+                lab.parent_app = type("ParentApp", (), {"gui_vs_path": configuration.vs_path})()
+                lab.last_run_results = [
+                    {
+                        "input": "2",
+                        "expected": "4",
+                        "actual": "3",
+                        "passed": False,
+                        "reason": "student added one instead of doubling",
+                    }
+                ]
+                prompt = json.dumps(lab._fix_prompt_payload(broken_code), indent=2, ensure_ascii=False, default=str)
+                model = os.getenv("GEMINI_REVIEW_LAB_MODEL") or "gemini-flash-latest"
+                response = complete_json_with_schema(
+                    GeminiProvider(model=model),
+                    prompt,
+                    None,
+                    gui.REVIEW_FIX_RESPONSE_SCHEMA,
+                )
+                fixed_code = str(response.get("fixed_code", "")).strip()
+
+                self.assertIn("n * 2", fixed_code)
+                self.assertIn("REVIEWER FIX", fixed_code)
+
+                results = lab._compile_and_run_inputs(["2", "5", "9"], fixed_code)
+
+                self.assertTrue(results)
+                self.assertEqual([], [result for result in results if not result["passed"]])
             finally:
                 os.chdir(original_cwd)
 

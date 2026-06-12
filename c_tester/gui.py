@@ -192,7 +192,7 @@ COLORS = {
     "hover": "#2980b9",         # Hover color for buttons
 }
 FAKE_PROVIDER_LABEL = "Fake/Offline"
-GEMINI_FALLBACK_MODELS = ("gemini-2.0-flash", "gemini-1.5-flash")
+GEMINI_FALLBACK_MODELS = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash")
 REVIEW_FIX_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -3471,6 +3471,16 @@ class ReviewLabWindow(ctk.CTkToplevel):
         ctk.CTkLabel(header, textvariable=self.status_var, anchor="w", justify="left").grid(
             row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="ew"
         )
+        phase_frame = ctk.CTkFrame(header, fg_color="transparent")
+        phase_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="ew")
+        phase_frame.grid_columnconfigure((0, 1, 2), weight=1)
+        self.llm_phase_var = tk.StringVar(value="LLM: idle")
+        self.compile_phase_var = tk.StringVar(value="Compile: idle")
+        self.run_phase_var = tk.StringVar(value="Run: idle")
+        for column, phase_var in enumerate((self.llm_phase_var, self.compile_phase_var, self.run_phase_var)):
+            ctk.CTkLabel(phase_frame, textvariable=phase_var, anchor="w").grid(
+                row=0, column=column, padx=(0, 12), pady=0, sticky="ew"
+            )
 
         controls = ctk.CTkFrame(self, corner_radius=8)
         controls.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
@@ -3590,6 +3600,26 @@ class ReviewLabWindow(ctk.CTkToplevel):
         self.code_textbox.insert("1.0", self.original_code)
         self.refresh_code_view()
         self.status_var.set("Code reset to the reviewed source.")
+        self._set_phase_status(compile_status="idle", run_status="idle")
+
+    def _set_phase_status(self, llm_status=None, compile_status=None, run_status=None):
+        phase_updates = (
+            ("llm_phase_var", "LLM", llm_status),
+            ("compile_phase_var", "Compile", compile_status),
+            ("run_phase_var", "Run", run_status),
+        )
+        for variable_name, label, status in phase_updates:
+            if status is not None and hasattr(self, variable_name):
+                getattr(self, variable_name).set(f"{label}: {status}")
+
+    def _queue_phase_status(self, llm_status=None, compile_status=None, run_status=None):
+        if not any(hasattr(self, variable_name) for variable_name in ("llm_phase_var", "compile_phase_var", "run_phase_var")):
+            return
+        after = getattr(self, "after", None)
+        if callable(after):
+            after(0, lambda: self._set_phase_status(llm_status, compile_status, run_status))
+        else:
+            self._set_phase_status(llm_status, compile_status, run_status)
 
     def _default_input_text(self) -> str:
         if self.case.failed_cases:
@@ -3615,6 +3645,7 @@ class ReviewLabWindow(ctk.CTkToplevel):
 
     def _run_inputs_async(self, inputs: list[str], label: str):
         self.status_var.set(f"Running {label}...")
+        self._set_phase_status(compile_status="running", run_status="waiting")
         code_snapshot = self.current_code()
         threading.Thread(target=self._run_inputs_worker, args=(inputs, label, code_snapshot), daemon=True).start()
 
@@ -3637,6 +3668,7 @@ class ReviewLabWindow(ctk.CTkToplevel):
             student_exe, student_compile_error = compile_file(student_path)
             reference_exe, reference_compile_error = compile_file(reference_path)
             if student_compile_error or reference_compile_error:
+                self._queue_phase_status(compile_status="failed", run_status="skipped")
                 return [
                     {
                         "input": "(compile)",
@@ -3647,6 +3679,7 @@ class ReviewLabWindow(ctk.CTkToplevel):
                     }
                 ]
 
+            self._queue_phase_status(compile_status="passed", run_status="running")
             results = []
             for input_value in inputs:
                 expected = run_executable(reference_exe, input_value)
@@ -3661,11 +3694,18 @@ class ReviewLabWindow(ctk.CTkToplevel):
                         "reason": comparison.reason,
                     }
                 )
+            passed_count = sum(1 for result in results if result.get("passed"))
+            self._queue_phase_status(run_status=f"{passed_count}/{len(results)} passed")
             return results
 
     def _show_run_results(self, results: list[dict], label: str):
         self.last_run_results = results
         failed = [result for result in results if not result.get("passed")]
+        compile_failed = any(result.get("input") == "(compile)" for result in results)
+        self._set_phase_status(
+            compile_status="failed" if compile_failed else "passed",
+            run_status="skipped" if compile_failed else f"{len(results) - len(failed)}/{len(results)} passed",
+        )
         self._set_text(self.expected_textbox, self._format_side_output(results, "expected"))
         self._set_text(self.actual_textbox, self._format_side_output(results, "actual"))
         self._set_styled_diff(self.output_diff_textbox, self._format_output_diff(results) or "(all compared outputs matched)")
@@ -3677,6 +3717,7 @@ class ReviewLabWindow(ctk.CTkToplevel):
 
     def _show_run_error(self, exc: Exception):
         self.status_var.set(f"Run failed: {exc}")
+        self._set_phase_status(compile_status="failed", run_status="failed")
         self._set_text(self.actual_textbox, f"Run failed:\n{exc}")
 
     @staticmethod
@@ -3756,6 +3797,7 @@ class ReviewLabWindow(ctk.CTkToplevel):
             messagebox.showerror("LLM Setup Error", str(exc))
             return
         self.status_var.set("Asking LLM to apply the reviewer suggestion...")
+        self._set_phase_status(llm_status="running", compile_status="idle", run_status="idle")
         threading.Thread(target=self._fix_worker, args=(provider,), daemon=True).start()
 
     def _fix_worker(self, provider):
@@ -3781,7 +3823,9 @@ class ReviewLabWindow(ctk.CTkToplevel):
                 "preserve unrelated question behavior unless shared code directly affects this question."
             ),
             "instructions": (
-                "Return the full corrected C file. Make the minimal change needed. Add clear comments near changed code "
+                "Return the full corrected C file. Make the smallest edit set that passes all known inputs for this question. "
+                "Do not perform style cleanup, refactors, rewrites, or unrelated fixes. Preserve names, formatting, prompts, and "
+                "other question behavior unless a change is required for this question to pass. Add clear comments near changed code "
                 "using the phrase REVIEWER FIX, explaining what changed and which failed behavior it addresses. "
                 "Do not delete unrelated student code. The UI shows a before/after diff, so do not comment out large old blocks."
             ),
@@ -3801,10 +3845,12 @@ class ReviewLabWindow(ctk.CTkToplevel):
         self.show_code_diff(before_code, fixed_code)
         self._set_text(self.fix_notes_textbox, self._format_fix_notes(response))
         self.status_var.set("LLM fix inserted into the lab. Running all grading inputs...")
+        self._set_phase_status(llm_status="done", compile_status="running", run_status="waiting")
         self.run_all_inputs()
 
     def _show_fix_error(self, exc: Exception):
         self.status_var.set(f"LLM fix failed: {exc}")
+        self._set_phase_status(llm_status="failed")
         self._set_text(self.fix_notes_textbox, f"LLM fix failed:\n{exc}")
 
     @staticmethod
