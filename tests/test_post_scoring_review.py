@@ -55,6 +55,12 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertIn("student_output_by_input", prompt)
                 self.assertIn("do not assign a replacement score", prompt)
                 self.assertIn("common_intro_c_logic_rubric", prompt)
+                self.assertIn("question_focus", prompt)
+                self.assertIn("Focus strictly on Q1", prompt)
+                self.assertIn("Do not critique unrelated question functions", prompt)
+                self.assertIn("expected_output", prompt)
+                self.assertIn("actual_output", prompt)
+                self.assertIn("why_it_failed", prompt)
                 self.assertIn("grading_policy", prompt)
                 self.assertIn("per_error_deduction", prompt)
                 self.assertIn("cumulative_per_error", prompt)
@@ -70,6 +76,8 @@ class TestPostScoringReview(unittest.TestCase):
                 reloaded = load_review_cases(["Q1"])[0]
                 self.assertTrue(reloaded.reviewed)
                 self.assertIn("summary", reloaded.saved_review["response"])
+                self.assertIn("examples", reloaded.saved_review["response"]["root_causes"][0])
+                self.assertEqual(reloaded.saved_review["response"]["root_causes"][0]["examples"][0]["input"], "0")
             finally:
                 os.chdir(original_cwd)
 
@@ -142,6 +150,32 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertLessEqual(len(preview), 90)
                 self.assertNotIn("\n", preview)
                 self.assertTrue(preview.endswith("..."))
+            finally:
+                os.chdir(original_cwd)
+
+    def test_reviewed_code_comments_are_clearly_labeled(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                case = load_review_cases(["Q1"])[0]
+                response = {
+                    "inline_comments": [
+                        {"line": 2, "comment": "This is the line-specific reviewer explanation."},
+                        {"line": None, "comment": "This is a general reviewer explanation."},
+                    ]
+                }
+
+                from c_tester import gui
+
+                window = object.__new__(gui.PostScoringReviewWindow)
+                reviewed_code, comment_lines = window._format_reviewed_code(case, response)
+
+                self.assertIn("Reviewed for Q1 only", reviewed_code)
+                self.assertIn("// REVIEWER COMMENT: This is the line-specific reviewer explanation.", reviewed_code)
+                self.assertIn("// General reviewer comments:", reviewed_code)
+                self.assertGreaterEqual(len(comment_lines), 3)
             finally:
                 os.chdir(original_cwd)
 

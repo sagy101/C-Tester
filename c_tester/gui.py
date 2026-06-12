@@ -25,6 +25,11 @@ REQUIRED_IMPORTS = {
 }
 
 UI_FONT_FAMILY = "Segoe UI"
+CODE_FONT_FAMILY = "Consolas"
+CODE_BG = "#0f172a"
+CODE_GUTTER_BG = "#111827"
+CODE_FG = "#e5e7eb"
+CODE_SELECTION_BG = "#264f78"
 REVIEW_TREE_STYLE = "Review.Treeview"
 REVIEW_TREE_HEADING_STYLE = f"{REVIEW_TREE_STYLE}.Heading"
 
@@ -94,6 +99,8 @@ import os
 import json
 import re # Import regex module
 import shutil
+import tempfile
+import difflib
 import time
 
 try:
@@ -124,7 +131,7 @@ from .configuration import winrar_path as default_winrar_path # Import default W
 from .configuration import validate_config
 from . import configuration
 from .preprocess import detect_submission_naming, preprocess_submissions
-from .process import run_tests, setup_visual_studio_environment, read_inputs_from_file, get_ground_truth
+from .process import run_tests, setup_visual_studio_environment, read_inputs_from_file, get_ground_truth, compile_file, run_executable
 from .create_excel import create_excels
 from .checker_assistant import (
     DEFAULT_GEMINI_MODEL,
@@ -136,6 +143,7 @@ from .checker_assistant import (
     available_checker_templates,
     build_audit_prompt,
     build_suggestion_prompt,
+    complete_json_with_schema,
     get_google_api_key,
     list_gemini_models,
     parse_assignment_context,
@@ -150,7 +158,7 @@ from .post_scoring_review import (
     review_cases_with_llm,
     default_grading_policy,
 )
-from .semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config
+from .semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config, compare_output
 from .structural_analysis import structural_requirements_errors
 from .clear_utils import (
     clear_grades,
@@ -184,6 +192,17 @@ COLORS = {
 }
 FAKE_PROVIDER_LABEL = "Fake/Offline"
 GEMINI_FALLBACK_MODELS = ("gemini-2.0-flash", "gemini-1.5-flash")
+REVIEW_FIX_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "fixed_code": {"type": "string"},
+        "explanation": {"type": "string"},
+        "changes_made": {"type": "array", "items": {"type": "string"}},
+        "tests_to_run": {"type": "array", "items": {"type": "string"}},
+        "risk_note": {"type": "string"},
+    },
+    "required": ["fixed_code", "explanation", "changes_made", "tests_to_run", "risk_note"],
+}
 
 class GuiStream(io.StringIO):
     """A custom stream to redirect stdout/stderr to a CTkTextbox."""
@@ -2665,6 +2684,9 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         )
         self.attention_only_checkbox.grid(row=1, column=3, columnspan=2, padx=8, pady=(0, 8), sticky="w")
 
+        self.open_lab_button = ctk.CTkButton(top, text="Open Review Lab", command=self.open_review_lab)
+        self.open_lab_button.grid(row=1, column=5, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+
         self.key_status_label = ctk.CTkLabel(top, text="", anchor="w", justify="left")
         self.key_status_label.grid(row=2, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
 
@@ -2711,12 +2733,76 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
         self.detail_tabview = ctk.CTkTabview(body, corner_radius=6)
         self.detail_tabview.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
-        for tab_name in ["Code", "Notes", "Review", "Failures", "Prompt"]:
+        for tab_name in ["Code", "Reviewed Code", "Notes", "Review", "Failures", "Prompt"]:
             self.detail_tabview.add(tab_name)
 
-        self.code_textbox = ctk.CTkTextbox(self.detail_tabview.tab("Code"), wrap="none")
-        self.code_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        code_tab = self.detail_tabview.tab("Code")
+        code_tab.grid_columnconfigure(1, weight=1)
+        code_tab.grid_rowconfigure(0, weight=1)
+        code_font = (CODE_FONT_FAMILY, 12)
+        self.code_line_numbers = tk.Text(
+            code_tab,
+            width=5,
+            padx=4,
+            pady=6,
+            wrap="none",
+            state="disabled",
+            takefocus=0,
+            cursor="arrow",
+            font=code_font,
+            bg=CODE_GUTTER_BG,
+            fg="#94a3b8",
+            relief="flat",
+            borderwidth=0,
+        )
+        self.code_line_numbers.grid(row=0, column=0, sticky="nsw", padx=(8, 0), pady=8)
+        self.code_line_numbers.bind("<Button-1>", lambda _event: "break")
+        self.code_line_numbers.bind("<B1-Motion>", lambda _event: "break")
+        self.code_line_numbers.bind("<Control-c>", lambda _event: "break")
+        self.code_line_numbers.bind("<Control-C>", lambda _event: "break")
+
+        self.code_textbox = tk.Text(
+            code_tab,
+            wrap="none",
+            padx=4,
+            pady=6,
+            font=code_font,
+            bg=CODE_BG,
+            fg=CODE_FG,
+            insertbackground=CODE_FG,
+            selectbackground=CODE_SELECTION_BG,
+            selectforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            undo=False,
+            tabs=("4c",),
+        )
+        self.code_textbox.grid(row=0, column=1, sticky="nsew", pady=8)
+        self.code_scrollbar = ttk.Scrollbar(code_tab, orient="vertical", command=self._scroll_code_view)
+        self.code_scrollbar.grid(row=0, column=2, sticky="ns", padx=(0, 8), pady=8)
+        self.code_x_scrollbar = ttk.Scrollbar(code_tab, orient="horizontal", command=self.code_textbox.xview)
+        self.code_x_scrollbar.grid(row=1, column=1, sticky="ew", padx=(0, 0), pady=(0, 8))
+        self.code_textbox.configure(yscrollcommand=self._sync_code_line_numbers, xscrollcommand=self.code_x_scrollbar.set)
         self._configure_code_tags()
+
+        self.reviewed_code_textbox = tk.Text(
+            self.detail_tabview.tab("Reviewed Code"),
+            wrap="none",
+            padx=8,
+            pady=8,
+            font=code_font,
+            bg=CODE_BG,
+            fg=CODE_FG,
+            insertbackground=CODE_FG,
+            selectbackground=CODE_SELECTION_BG,
+            selectforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            tabs=("4c",),
+        )
+        self.reviewed_code_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.reviewed_code_textbox.tag_config("review_header", foreground="#93c5fd")
+        self.reviewed_code_textbox.tag_config("review_comment", foreground="#fde68a", background="#422006")
 
         self.notes_textbox = ctk.CTkTextbox(self.detail_tabview.tab("Notes"), wrap="word")
         self.notes_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -2885,7 +2971,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             return 50
         middle = len(grades) // 2
         median = grades[middle] if len(grades) % 2 else (grades[middle - 1] + grades[middle]) / 2
-        return median - 30
+        return median - 40
 
     @staticmethod
     def is_attention_case(case: ReviewCase, attention_threshold):
@@ -2977,6 +3063,13 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.status_var.set(f"Copied {len(student_ids)} student ID{suffix}.")
         return "break"
 
+    def open_review_lab(self):
+        selected = self.selected_review_cases()
+        if not selected:
+            messagebox.showinfo("No Row Selected", "Select one review row first.")
+            return
+        ReviewLabWindow(self, selected[0]).show_on_top()
+
     def review_selected(self):
         if self.review_running:
             return
@@ -3042,18 +3135,25 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
     def show_case(self, case: ReviewCase, show_notes=False):
         self.current_case = case
-        self._set_text(self.code_textbox, self._numbered_code(case.code_text))
+        saved_response = (case.saved_review or {}).get("response") if case.saved_review else None
+        self._set_text(self.code_line_numbers, self._line_numbers(case.code_text))
+        self._set_text(self.code_textbox, case.code_text)
+        self.code_textbox.yview_moveto(0)
+        self.code_line_numbers.yview_moveto(0)
         self._highlight_code(case.code_text)
+        reviewed_code, review_comment_lines = self._format_reviewed_code(case, saved_response)
+        self._set_text(self.reviewed_code_textbox, reviewed_code)
+        self._tag_reviewed_code(review_comment_lines)
         self._set_text(self.notes_textbox, self._format_notes(case))
         self._set_text(self.failures_textbox, self._format_failures(case))
         self._set_text(self.prompt_textbox, build_score_review_prompt(case))
-        saved_response = (case.saved_review or {}).get("response") if case.saved_review else None
         self._set_text(self.review_textbox, self._format_review(saved_response, case))
         if show_notes:
             self.detail_tabview.set("Notes")
 
     def clear_detail(self):
-        for textbox in [self.code_textbox, self.notes_textbox, self.review_textbox, self.failures_textbox, self.prompt_textbox]:
+        self._set_text(self.code_line_numbers, "")
+        for textbox in [self.code_textbox, self.reviewed_code_textbox, self.notes_textbox, self.review_textbox, self.failures_textbox, self.prompt_textbox]:
             self._set_text(textbox, "")
 
     def _format_notes(self, case: ReviewCase) -> str:
@@ -3094,19 +3194,53 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             "",
             "Root causes:",
         ]
-        for cause in response.get("root_causes", []) or []:
-            lines.append(f"- {cause.get('issue', '')}")
-            lines.append(f"  Inputs: {', '.join(map(str, cause.get('failed_inputs', []) or []))}")
-            lines.append(f"  Impact: {cause.get('deduction_impact', '')}")
+        lines.extend(self._format_review_root_causes(response.get("root_causes", []) or []))
         lines.extend(["", "Inline comments:"])
-        for comment in response.get("inline_comments", []) or []:
-            line = comment.get("line")
-            prefix = f"Line {line}: " if line else ""
-            lines.append(f"- {prefix}{comment.get('comment', '')}")
+        lines.extend(self._format_inline_comments(response.get("inline_comments", []) or []))
         lines.extend(["", "Fix to full score:", str(response.get("fix_to_full_score", ""))])
         if response.get("risk_note"):
             lines.extend(["", "Risk note:", str(response.get("risk_note", ""))])
         return "\n".join(lines)
+
+    def _format_review_root_causes(self, root_causes: list) -> list[str]:
+        lines = []
+        for cause in root_causes:
+            if not isinstance(cause, dict):
+                continue
+            lines.append(f"- {cause.get('issue', '')}")
+            lines.append(f"  Inputs: {', '.join(map(str, cause.get('failed_inputs', []) or []))}")
+            lines.append(f"  Impact: {cause.get('deduction_impact', '')}")
+            lines.extend(self._format_review_examples(cause.get("examples", []) or []))
+        return lines
+
+    @staticmethod
+    def _format_review_examples(examples: list) -> list[str]:
+        if not examples:
+            return []
+        lines = ["  Examples:"]
+        for example in examples[:3]:
+            if not isinstance(example, dict):
+                continue
+            lines.extend(
+                [
+                    f"    Input: {example.get('input', '')}",
+                    f"    Expected: {example.get('expected_output', '')}",
+                    f"    Actual: {example.get('actual_output', '')}",
+                    f"    Why: {example.get('why_it_failed', '')}",
+                ]
+            )
+        return lines
+
+    @staticmethod
+    def _format_inline_comments(inline_comments: list) -> list[str]:
+        lines = []
+        for comment in inline_comments:
+            if not isinstance(comment, dict):
+                continue
+            line = comment.get("line")
+            prefix = f"Line {line}: " if line else ""
+            lines.append(f"- {prefix}{comment.get('comment', '')}")
+        return lines
 
     def _format_failures(self, case: ReviewCase) -> str:
         lines = [
@@ -3139,12 +3273,79 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         lines.extend(["Raw grade text:", case.grade_text])
         return "\n".join(lines)
 
+    def _format_reviewed_code(self, case: ReviewCase, response: dict | None) -> tuple[str, list[int]]:
+        source_lines = case.code_text.splitlines()
+        if not response:
+            header = [
+                f"// No saved LLM review yet for {case.question}.",
+                "// Select the row and click Review Selected to generate inline comments.",
+                "",
+            ]
+            return "\n".join(header + source_lines), [1, 2]
+
+        comments_by_line, general_comments = self._split_inline_review_comments(response, len(source_lines))
+        rendered = [f"// Reviewed for {case.question} only. Inline comments explain the deterministic deduction.", ""]
+        comment_line_numbers = [1]
+        for line_number, source_line in enumerate(source_lines, start=1):
+            rendered.append(source_line)
+            self._append_review_comments(rendered, comment_line_numbers, comments_by_line.get(line_number, []))
+
+        if general_comments:
+            rendered.extend(["", "// General reviewer comments:"])
+            comment_line_numbers.append(len(rendered))
+            self._append_review_comments(rendered, comment_line_numbers, general_comments)
+        if not comments_by_line and not general_comments:
+            rendered.extend(["", "// The reviewer did not return line-specific comments for this row."])
+            comment_line_numbers.append(len(rendered))
+
+        return "\n".join(rendered), comment_line_numbers
+
+    def _split_inline_review_comments(self, response: dict, line_count: int) -> tuple[dict[int, list[str]], list[str]]:
+        comments_by_line = {}
+        general_comments = []
+        for comment in response.get("inline_comments", []) or []:
+            comment_text = self._inline_comment_text(comment)
+            if not comment_text:
+                continue
+            line_number = self._inline_comment_line(comment)
+            if 1 <= line_number <= line_count:
+                comments_by_line.setdefault(line_number, []).append(comment_text)
+            else:
+                general_comments.append(comment_text)
+        return comments_by_line, general_comments
+
+    @staticmethod
+    def _inline_comment_text(comment) -> str:
+        return str(comment.get("comment", "")).strip() if isinstance(comment, dict) else ""
+
+    @staticmethod
+    def _inline_comment_line(comment) -> int:
+        if not isinstance(comment, dict):
+            return 0
+        try:
+            return int(comment.get("line"))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _append_review_comments(rendered: list[str], comment_line_numbers: list[int], comments: list[str]):
+        for comment_text in comments:
+            rendered.append(f"// REVIEWER COMMENT: {comment_text}")
+            comment_line_numbers.append(len(rendered))
+
+    def _tag_reviewed_code(self, comment_line_numbers: list[int]):
+        self.reviewed_code_textbox.configure(state="normal")
+        for line_number in comment_line_numbers:
+            tag_name = "review_header" if line_number == 1 else "review_comment"
+            self.reviewed_code_textbox.tag_add(tag_name, f"{line_number}.0", f"{line_number}.end")
+        self.reviewed_code_textbox.configure(state="disabled")
+
     def _configure_code_tags(self):
-        self.code_textbox.tag_config("keyword", foreground=COLORS["primary"])
-        self.code_textbox.tag_config("name", foreground=COLORS["text_dark"])
-        self.code_textbox.tag_config("comment", foreground=COLORS["secondary"])
-        self.code_textbox.tag_config("string", foreground=COLORS["warning"])
-        self.code_textbox.tag_config("number", foreground=COLORS["accent"])
+        self.code_textbox.tag_config("keyword", foreground="#60a5fa")
+        self.code_textbox.tag_config("name", foreground=CODE_FG)
+        self.code_textbox.tag_config("comment", foreground="#6ee7b7")
+        self.code_textbox.tag_config("string", foreground="#fca5a5")
+        self.code_textbox.tag_config("number", foreground="#c4b5fd")
 
     def _highlight_code(self, code: str):
         if lex and CLexer:
@@ -3155,22 +3356,22 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         for idx, line in enumerate(lines, start=1):
             comment_col = line.find("//")
             if comment_col >= 0:
-                self.code_textbox.tag_add("comment", f"{idx}.{comment_col + 5}", f"{idx}.end")
+                self.code_textbox.tag_add("comment", f"{idx}.{comment_col}", f"{idx}.end")
             for match in re.finditer(r'"[^"]*"', line):
-                self.code_textbox.tag_add("string", f"{idx}.{match.start() + 5}", f"{idx}.{match.end() + 5}")
+                self.code_textbox.tag_add("string", f"{idx}.{match.start()}", f"{idx}.{match.end()}")
             for match in re.finditer(r"\b[A-Za-z_]\w*\b", line):
                 if match.group(0) in keywords:
-                    self.code_textbox.tag_add("keyword", f"{idx}.{match.start() + 5}", f"{idx}.{match.end() + 5}")
+                    self.code_textbox.tag_add("keyword", f"{idx}.{match.start()}", f"{idx}.{match.end()}")
 
     def _highlight_code_with_pygments(self, code: str):
         line = 1
-        column = 5
+        column = 0
         for token_type, value in lex(code, CLexer()):
             start_line, start_column = line, column
             for char in value:
                 if char == "\n":
                     line += 1
-                    column = 5
+                    column = 0
                 else:
                     column += 1
             tag = self._pygments_tag(token_type)
@@ -3198,13 +3399,343 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         textbox.configure(state="disabled")
 
     @staticmethod
-    def _numbered_code(code: str) -> str:
-        return "\n".join(f"{index:>3}: {line}" for index, line in enumerate(code.splitlines(), start=1))
+    def _line_numbers(code: str) -> str:
+        return "\n".join(f"{index:>3}:" for index, _line in enumerate(code.splitlines(), start=1))
+
+    def _scroll_code_view(self, *args):
+        self.code_textbox.yview(*args)
+        self.code_line_numbers.yview(*args)
+
+    def _sync_code_line_numbers(self, first, last):
+        self.code_scrollbar.set(first, last)
+        self.code_line_numbers.yview_moveto(first)
 
     @staticmethod
     def _shorten(text: str, limit: int) -> str:
         compact = " ".join(str(text).split())
         return compact if len(compact) <= limit else compact[: limit - 3] + "..."
+
+
+class ReviewLabWindow(ctk.CTkToplevel):
+    """Interactive scratchpad for testing and iterating on one reviewed submission."""
+
+    def __init__(self, review_window: PostScoringReviewWindow, case: ReviewCase):
+        super().__init__(review_window)
+        self.review_window = review_window
+        self.parent_app = review_window.parent
+        self.case = case
+        self.original_code = case.code_text
+        self.last_run_results: list[dict] = []
+        self.last_fix_response: dict = {}
+        self.title(f"Review Lab - {case.question} {case.anonymized_label}")
+        self.geometry("1350x850")
+        self.minsize(1100, 720)
+        self.transient(review_window)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+
+        header = ctk.CTkFrame(self, corner_radius=8)
+        header.grid(row=0, column=0, padx=12, pady=12, sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            header,
+            text=f"{case.question} {case.anonymized_label} | Score {case.question_score:g}, Final {case.final_grade:g}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=2, padx=10, pady=8, sticky="ew")
+        self.status_var = tk.StringVar(value="Edit code, choose inputs, then run or ask the LLM to apply the reviewer suggestion.")
+        ctk.CTkLabel(header, textvariable=self.status_var, anchor="w", justify="left").grid(
+            row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="ew"
+        )
+
+        controls = ctk.CTkFrame(self, corner_radius=8)
+        controls.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
+        controls.grid_columnconfigure(0, weight=1)
+        self.input_textbox = ctk.CTkTextbox(controls, height=72, wrap="word")
+        self.input_textbox.grid(row=0, column=0, rowspan=2, padx=8, pady=8, sticky="ew")
+        self._set_text(self.input_textbox, self._default_input_text(), readonly=False)
+        ctk.CTkButton(controls, text="Run Custom Input", command=self.run_custom_inputs).grid(row=0, column=1, padx=8, pady=8)
+        ctk.CTkButton(controls, text="Run All Grading Inputs", command=self.run_all_inputs).grid(row=0, column=2, padx=8, pady=8)
+        ctk.CTkButton(controls, text="Apply Suggested Fix", command=self.apply_suggested_fix).grid(row=0, column=3, padx=8, pady=8)
+        ctk.CTkButton(controls, text="Reset Code", command=self.reset_code).grid(row=0, column=4, padx=8, pady=8)
+        ctk.CTkLabel(
+            controls,
+            text="Custom input: one test case per line, matching input.txt format.",
+            text_color="gray",
+            anchor="w",
+        ).grid(row=1, column=1, columnspan=4, padx=8, pady=(0, 8), sticky="ew")
+
+        body = ctk.CTkFrame(self, corner_radius=8)
+        body.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        body.grid_columnconfigure((0, 1), weight=1)
+        body.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(body, text="Editable Student Code", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=8, pady=(8, 0), sticky="w"
+        )
+        ctk.CTkLabel(body, text="Run Results / Diff / Fix Notes", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=1, padx=8, pady=(8, 0), sticky="w"
+        )
+        self.code_textbox = tk.Text(
+            body,
+            wrap="none",
+            padx=8,
+            pady=8,
+            font=(CODE_FONT_FAMILY, 12),
+            bg=CODE_BG,
+            fg=CODE_FG,
+            insertbackground=CODE_FG,
+            selectbackground=CODE_SELECTION_BG,
+            selectforeground="#ffffff",
+            relief="flat",
+            tabs=("4c",),
+        )
+        self.code_textbox.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+        self.code_textbox.insert("1.0", case.code_text)
+
+        self.result_tabs = ctk.CTkTabview(body, corner_radius=6)
+        self.result_tabs.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
+        for tab_name in ["Compare", "Diff", "Fix Notes"]:
+            self.result_tabs.add(tab_name)
+        self._build_compare_tab()
+        self.diff_textbox = ctk.CTkTextbox(self.result_tabs.tab("Diff"), wrap="none")
+        self.diff_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.fix_notes_textbox = ctk.CTkTextbox(self.result_tabs.tab("Fix Notes"), wrap="word")
+        self.fix_notes_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._set_text(self.diff_textbox, self._unified_diff(self.original_code, self.current_code()))
+        self._set_text(self.fix_notes_textbox, "No LLM fix has been applied yet.")
+
+    def _build_compare_tab(self):
+        tab = self.result_tabs.tab("Compare")
+        tab.grid_columnconfigure((0, 1), weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(tab, text="Expected / Reference").grid(row=0, column=0, padx=8, pady=(8, 0), sticky="w")
+        ctk.CTkLabel(tab, text="Student / Current Code").grid(row=0, column=1, padx=8, pady=(8, 0), sticky="w")
+        self.expected_textbox = ctk.CTkTextbox(tab, wrap="word")
+        self.expected_textbox.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+        self.actual_textbox = ctk.CTkTextbox(tab, wrap="word")
+        self.actual_textbox.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
+
+    def show_on_top(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def current_code(self) -> str:
+        return self.code_textbox.get("1.0", tk.END).rstrip()
+
+    def reset_code(self):
+        self.code_textbox.delete("1.0", tk.END)
+        self.code_textbox.insert("1.0", self.original_code)
+        self._set_text(self.diff_textbox, self._unified_diff(self.original_code, self.current_code()))
+        self.status_var.set("Code reset to the reviewed source.")
+
+    def _default_input_text(self) -> str:
+        if self.case.failed_cases:
+            return "\n".join(failure.input_value for failure in self.case.failed_cases[:5])
+        return "\n".join(read_inputs_from_file(self.case.question)[:5])
+
+    def custom_inputs(self) -> list[str]:
+        return [line.strip() for line in self.input_textbox.get("1.0", tk.END).splitlines() if line.strip()]
+
+    def run_custom_inputs(self):
+        inputs = self.custom_inputs()
+        if not inputs:
+            messagebox.showinfo("No Input", "Enter at least one input line.")
+            return
+        self._run_inputs_async(inputs, "custom input")
+
+    def run_all_inputs(self):
+        inputs = read_inputs_from_file(self.case.question)
+        if not inputs:
+            messagebox.showwarning("No Inputs", f"No inputs found for {self.case.question}.")
+            return
+        self._run_inputs_async(inputs, "all grading inputs")
+
+    def _run_inputs_async(self, inputs: list[str], label: str):
+        self.status_var.set(f"Running {label}...")
+        code_snapshot = self.current_code()
+        threading.Thread(target=self._run_inputs_worker, args=(inputs, label, code_snapshot), daemon=True).start()
+
+    def _run_inputs_worker(self, inputs: list[str], label: str, code_snapshot: str):
+        try:
+            results = self._compile_and_run_inputs(inputs, code_snapshot)
+            self.after(0, lambda: self._show_run_results(results, label))
+        except Exception as exc:
+            self.after(0, lambda captured=exc: self._show_run_error(captured))
+
+    def _compile_and_run_inputs(self, inputs: list[str], code_snapshot: str) -> list[dict]:
+        setup_visual_studio_environment(self.parent_app.gui_vs_path)
+        with tempfile.TemporaryDirectory(prefix="review_lab_", dir=os.getcwd()) as temp_dir:
+            student_path = os.path.join(temp_dir, "student.c")
+            reference_path = os.path.join(temp_dir, "original_sol.c")
+            with open(student_path, "w", encoding="utf-8") as student_file:
+                student_file.write(code_snapshot)
+            shutil.copy2(os.path.join(self.case.question, "original_sol.c"), reference_path)
+
+            student_exe, student_compile_error = compile_file(student_path)
+            reference_exe, reference_compile_error = compile_file(reference_path)
+            if student_compile_error or reference_compile_error:
+                return [
+                    {
+                        "input": "(compile)",
+                        "expected": reference_compile_error or "Reference compiled successfully.",
+                        "actual": student_compile_error or "Student code compiled successfully.",
+                        "passed": False,
+                        "reason": "Compilation failed.",
+                    }
+                ]
+
+            results = []
+            for input_value in inputs:
+                expected = run_executable(reference_exe, input_value)
+                actual = run_executable(student_exe, input_value)
+                comparison = compare_output(self.case.question, input_value, expected, actual)
+                results.append(
+                    {
+                        "input": input_value,
+                        "expected": expected,
+                        "actual": actual,
+                        "passed": comparison.passed,
+                        "reason": comparison.reason,
+                    }
+                )
+            return results
+
+    def _show_run_results(self, results: list[dict], label: str):
+        self.last_run_results = results
+        failed = [result for result in results if not result.get("passed")]
+        self._set_text(self.expected_textbox, self._format_side_output(results, "expected"))
+        self._set_text(self.actual_textbox, self._format_side_output(results, "actual"))
+        self._set_text(self.diff_textbox, self._format_output_diff(results) or self._unified_diff(self.original_code, self.current_code()))
+        if failed:
+            self.status_var.set(f"Ran {label}: {len(failed)}/{len(results)} input(s) still fail. You can Apply Suggested Fix again.")
+        else:
+            self.status_var.set(f"Ran {label}: all {len(results)} input(s) passed.")
+
+    def _show_run_error(self, exc: Exception):
+        self.status_var.set(f"Run failed: {exc}")
+        self._set_text(self.actual_textbox, f"Run failed:\n{exc}")
+
+    @staticmethod
+    def _format_side_output(results: list[dict], key: str) -> str:
+        sections = []
+        for result in results:
+            status = "PASS" if result.get("passed") else "FAIL"
+            sections.append(f"[{status}] Input: {result.get('input', '')}\n{result.get(key, '')}")
+            if key == "actual" and result.get("reason"):
+                sections.append(f"Reason: {result.get('reason')}")
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _format_output_diff(results: list[dict]) -> str:
+        chunks = []
+        for result in results:
+            if result.get("passed"):
+                continue
+            diff = difflib.unified_diff(
+                str(result.get("expected", "")).splitlines(),
+                str(result.get("actual", "")).splitlines(),
+                fromfile=f"expected input {result.get('input', '')}",
+                tofile=f"student input {result.get('input', '')}",
+                lineterm="",
+            )
+            chunks.extend(diff)
+            if result.get("reason"):
+                chunks.append(f"# Reason: {result.get('reason')}")
+            chunks.append("")
+        return "\n".join(chunks)
+
+    @staticmethod
+    def _unified_diff(before: str, after: str) -> str:
+        return "\n".join(
+            difflib.unified_diff(
+                before.splitlines(),
+                after.splitlines(),
+                fromfile="before.c",
+                tofile="after.c",
+                lineterm="",
+            )
+        ) or "(no code changes)"
+
+    def apply_suggested_fix(self):
+        try:
+            provider = self.review_window.make_provider()
+        except Exception as exc:
+            messagebox.showerror("LLM Setup Error", str(exc))
+            return
+        self.status_var.set("Asking LLM to apply the reviewer suggestion...")
+        threading.Thread(target=self._fix_worker, args=(provider,), daemon=True).start()
+
+    def _fix_worker(self, provider):
+        before_code = self.current_code()
+        try:
+            prompt = json.dumps(self._fix_prompt_payload(before_code), indent=2, ensure_ascii=False, default=str)
+            response = complete_json_with_schema(provider, prompt, None, REVIEW_FIX_RESPONSE_SCHEMA)
+            fixed_code = str(response.get("fixed_code", "")).strip()
+            if not fixed_code:
+                raise ValueError("LLM did not return fixed_code.")
+            self.after(0, lambda: self._apply_fix_response(before_code, fixed_code, response))
+        except Exception as exc:
+            self.after(0, lambda captured=exc: self._show_fix_error(captured))
+
+    def _fix_prompt_payload(self, current_code: str) -> dict:
+        review_response = (self.case.saved_review or {}).get("response") if self.case.saved_review else {}
+        remaining_failures = [result for result in self.last_run_results if not result.get("passed")]
+        return {
+            "task": "apply_review_fix",
+            "question": self.case.question,
+            "scope": (
+                f"Fix only behavior for {self.case.question}. The file may contain multiple homework questions; "
+                "preserve unrelated question behavior unless shared code directly affects this question."
+            ),
+            "instructions": (
+                "Return the full corrected C file. Make the minimal change needed. Add clear comments near changed code "
+                "using the phrase REVIEWER FIX, explaining what changed and which failed behavior it addresses. "
+                "Do not delete unrelated student code. The UI shows a before/after diff, so do not comment out large old blocks."
+            ),
+            "current_code": current_code,
+            "original_reviewed_code": self.original_code,
+            "reviewer_output": review_response,
+            "deterministic_failed_cases": [failure.__dict__ for failure in self.case.failed_cases],
+            "remaining_failures_after_last_run": remaining_failures,
+            "grading_policy": self.case.grading_policy,
+        }
+
+    def _apply_fix_response(self, before_code: str, fixed_code: str, response: dict):
+        self.last_fix_response = response
+        self.code_textbox.delete("1.0", tk.END)
+        self.code_textbox.insert("1.0", fixed_code)
+        self._set_text(self.diff_textbox, self._unified_diff(before_code, fixed_code))
+        self._set_text(self.fix_notes_textbox, self._format_fix_notes(response))
+        self.status_var.set("LLM fix inserted into the lab. Running all grading inputs...")
+        self.run_all_inputs()
+
+    def _show_fix_error(self, exc: Exception):
+        self.status_var.set(f"LLM fix failed: {exc}")
+        self._set_text(self.fix_notes_textbox, f"LLM fix failed:\n{exc}")
+
+    @staticmethod
+    def _format_fix_notes(response: dict) -> str:
+        lines = [
+            "Explanation:",
+            str(response.get("explanation", "")),
+            "",
+            "Changes made:",
+        ]
+        lines.extend(f"- {change}" for change in response.get("changes_made", []) or [])
+        lines.extend(["", "Suggested tests:"])
+        lines.extend(f"- {test}" for test in response.get("tests_to_run", []) or [])
+        if response.get("risk_note"):
+            lines.extend(["", "Risk note:", str(response.get("risk_note", ""))])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _set_text(textbox, text: str, readonly=True):
+        textbox.configure(state="normal")
+        textbox.delete("1.0", tk.END)
+        textbox.insert("1.0", text or "")
+        if readonly:
+            textbox.configure(state="disabled")
 
 
 class CheckerManagerWindow(ctk.CTkToplevel):

@@ -391,8 +391,10 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   Sends only selected rows to the LLM. The real student ID is removed from the prompt and replaced with an anonymous label such as `student_001`.
     *   The prompt includes anonymized code, notes, grade text, per-question/final Excel fields without `ID_number`, parsed failed inputs, raw student output by input, expected/reference output by input, active grading policy, and compile-repair metadata with IDs redacted.
     *   The active grading policy tells the LLM whether failed inputs use percentage scoring or a fixed per-input deduction, the fixed deduction amount, whether submission errors are cumulative or once per student, the submission-error penalty amount, and compile-repair penalty settings.
-    *   The LLM returns JSON with a short summary, whether the deduction looks plausible, grouped root causes, inline line comments, fix guidance to reach full score, and a risk note.
-    *   Shows the code with Pygments-backed C syntax highlighting, failed inputs, expected/actual outputs, and the LLM explanation with inline line comments.
+    *   The LLM returns JSON with a short summary, whether the deduction looks plausible, grouped root causes, concrete failed-input examples, inline line comments, fix guidance to reach full score, and a risk note.
+    *   Shows the code in a readable monospace view with a separate non-copying line-number gutter, failed inputs, expected/actual outputs, and the LLM explanation with inline line comments.
+    *   Provides a **Reviewed Code** tab that inserts clearly labeled `REVIEWER COMMENT` lines beside relevant code without confusing them with the student's own comments.
+    *   Provides a **Review Lab** for one selected row: edit a scratch copy of the student's code, run custom inputs or all grading inputs against both `original_sol.c` and the current code, inspect side-by-side outputs and unified diffs, and ask the LLM to apply the reviewer guidance. The lab does not overwrite the original student file.
     *   Saves each review under `Q*/review/ID.json`; reviewed rows are locked until those generated review files are cleared.
 
 ### Advanced LLM Features
@@ -401,7 +403,7 @@ The GUI has three separate LLM workflows:
 
 * **Checker Manager:** Suggests semantic checker JSON, tests it against ground-truth outputs, saves per-question checker configuration, and can sample already graded rows for audit. It shows colored per-question readiness states so the grader can see which checkers are saved, tested, audit-passed, or still need action. It can use Gemini or Fake/Offline.
 * **LLM Compile Repair:** During grading, compile failures can be repaired with bounded compile-only LLM attempts. The original student file is never overwritten; candidates go under `Q*/llm_fixed/`, repaired outputs under `Q*/llm_fixed_output/`, and the Excel comments include the repair note and penalty.
-* **LLM Score Review:** After grading, opens a score/notes table. The grader selects rows, and the LLM receives anonymized code, parsed failed inputs, raw student output, expected/reference output, grade text, Excel fields without `ID_number`, notes, active grading policy, and compile-repair metadata with IDs redacted. It returns a concise summary, grouped root causes, inline code comments, and a suggested fix to reach full score.
+* **LLM Score Review:** After grading, opens a score/notes table. The grader selects rows, and the LLM receives anonymized code, parsed failed inputs, raw student output, expected/reference output, grade text, Excel fields without `ID_number`, notes, active grading policy, and compile-repair metadata with IDs redacted. It returns a concise summary, grouped root causes with failed-input examples, inline code comments, and a suggested fix to reach full score. The Review Lab can use that context to generate a scratch fix, run it against all grading inputs, and retry with remaining failures.
 
 The default Gemini model is `gemini-3.5-flash` through `DEFAULT_GEMINI_MODEL`; use the GUI model picker or `GEMINI_MODEL` environment variable to choose another model available to your key. Fake/Offline is deterministic and intended for regression tests and demos, not real grading judgment.
 

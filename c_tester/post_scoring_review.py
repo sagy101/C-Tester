@@ -31,8 +31,21 @@ SCORE_REVIEW_RESPONSE_SCHEMA = {
                     "issue": {"type": "string"},
                     "failed_inputs": {"type": "array", "items": {"type": "string"}},
                     "deduction_impact": {"type": "string"},
+                    "examples": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "input": {"type": "string"},
+                                "expected_output": {"type": "string"},
+                                "actual_output": {"type": "string"},
+                                "why_it_failed": {"type": "string"},
+                            },
+                            "required": ["input", "expected_output", "actual_output", "why_it_failed"],
+                        },
+                    },
                 },
-                "required": ["issue", "failed_inputs", "deduction_impact"],
+                "required": ["issue", "failed_inputs", "deduction_impact", "examples"],
             },
         },
         "inline_comments": {
@@ -162,12 +175,17 @@ def build_score_review_prompt(case: ReviewCase) -> str:
         ),
         "student_label": case.anonymized_label,
         "question": case.question,
+        "question_focus": (
+            f"Review only {case.question}. The student_code may contain all homework questions in one file; "
+            f"ignore other question functions unless they directly call, dispatch to, or change behavior for {case.question}."
+        ),
         "assigned_question_score": case.question_score,
         "assigned_final_grade": case.final_grade,
         "grading_policy": case.grading_policy,
         "common_intro_c_logic_rubric": COMMON_INTRO_C_LOGIC_RUBRIC,
         "artifact_guide": {
             "assigned_question_score": "The deterministic score for this question after test-case scoring and question-level adjustments.",
+            "question_focus": "The scope boundary for the review. Explain only the selected question even if the same C file contains other questions.",
             "assigned_final_grade": "The final weighted grade after question weights and final/report-level penalties.",
             "notes": "The final Excel comments/notes shown to the grader for this row.",
             "code_source": "Whether student_code is the original submitted code or the LLM-repaired code used after a successful compile repair.",
@@ -193,8 +211,11 @@ def build_score_review_prompt(case: ReviewCase) -> str:
         "final_fields": _anonymize_value(_public_excel_fields(case.final_fields), student_id),
         "repair_metadata": _anonymize_value(case.repair_metadata, student_id),
         "instructions": (
+            f"Focus strictly on {case.question}. If the C file contains Q1/Q2/Q3 together, discuss only the function, dispatch path, shared helper, or main branch that affects {case.question}. "
+            "Do not critique unrelated question functions. "
             "Use expected_output_by_input and failed_cases as the reference behavior, and use "
             "student_output_by_input plus student_code as the student's behavior. Group failures by likely root cause. "
+            "For each root cause, include 1-3 concrete examples copied from failed_cases with input, expected output, actual output, and why that example demonstrates the issue. "
             "Explain how one code issue can fail multiple inputs and connect that to the assigned score/notes using grading_policy. "
             "If notes or final_fields mention preprocessing/submission errors such as RAR extraction, naming, missing files, or nested subfolder issues, explain them as submission penalties rather than code-output failures. "
             "If code_source is repaired, include the compile_repair penalty from grading_policy and repair_metadata when explaining the final deduction. "
@@ -210,6 +231,14 @@ def build_score_review_prompt(case: ReviewCase) -> str:
                     "issue": "logic issue",
                     "failed_inputs": ["input values"],
                     "deduction_impact": "how this affected the score",
+                    "examples": [
+                        {
+                            "input": "input value",
+                            "expected_output": "expected output excerpt",
+                            "actual_output": "actual student output excerpt",
+                            "why_it_failed": "short explanation",
+                        }
+                    ],
                 }
             ],
             "inline_comments": [
@@ -394,11 +423,31 @@ def _normalize_review_response(response: dict[str, Any]) -> dict[str, Any]:
     return {
         "summary": str(response.get("summary", "")),
         "deduction_is_plausible": bool(response.get("deduction_is_plausible", False)),
-        "root_causes": response.get("root_causes", []) if isinstance(response.get("root_causes", []), list) else [],
+        "root_causes": _normalize_root_causes(response.get("root_causes", [])),
         "inline_comments": response.get("inline_comments", []) if isinstance(response.get("inline_comments", []), list) else [],
         "fix_to_full_score": str(response.get("fix_to_full_score", "")),
         "risk_note": str(response.get("risk_note", "")),
     }
+
+
+def _normalize_root_causes(root_causes: Any) -> list[dict[str, Any]]:
+    if not isinstance(root_causes, list):
+        return []
+
+    normalized = []
+    for cause in root_causes:
+        if not isinstance(cause, dict):
+            continue
+        examples = cause.get("examples", [])
+        normalized.append(
+            {
+                "issue": str(cause.get("issue", "")),
+                "failed_inputs": cause.get("failed_inputs", []) if isinstance(cause.get("failed_inputs", []), list) else [],
+                "deduction_impact": str(cause.get("deduction_impact", "")),
+                "examples": examples if isinstance(examples, list) else [],
+            }
+        )
+    return normalized
 
 
 def _public_excel_fields(fields: dict[str, Any]) -> dict[str, Any]:

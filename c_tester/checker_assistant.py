@@ -370,32 +370,8 @@ class FakeLLMProvider:
                 "risk": "low",
                 "reason": "Deterministic fake provider accepts the supplied audit package.",
             }
-        if '"task": "review_score_deduction"' in lower_prompt:
-            try:
-                payload = json.loads(prompt)
-                failed_cases = payload.get("failed_cases", [])
-            except json.JSONDecodeError:
-                failed_cases = []
-            failed_inputs = [str(case.get("input_value", "")) for case in failed_cases if isinstance(case, dict)]
-            return {
-                "summary": "The fake reviewer grouped the supplied failures as one deterministic grading issue.",
-                "deduction_is_plausible": True,
-                "root_causes": [
-                    {
-                        "issue": "The output differs from the expected format or value for the listed inputs.",
-                        "failed_inputs": failed_inputs,
-                        "deduction_impact": f"{len(failed_inputs)} failed input(s) contributed to the shown deduction.",
-                    }
-                ],
-                "inline_comments": [
-                    {
-                        "line": 1,
-                        "comment": "Start by checking the branch or formatting responsible for the first failed case.",
-                    }
-                ],
-                "fix_to_full_score": "Make the output match the expected behavior for every failed input.",
-                "risk_note": "",
-            }
+        if '"task": "review_score_deduction"' in lower_prompt or '"task": "apply_review_fix"' in lower_prompt:
+            return self._fake_review_response(prompt, lower_prompt)
         if "divisor" in lower_prompt:
             return {
                 "status": "supported",
@@ -421,6 +397,65 @@ class FakeLLMProvider:
             "confidence": 0.0,
             "reason": "No deterministic fake match found.",
             "structural_requirements": {},
+        }
+
+    def _fake_review_response(self, prompt: str, lower_prompt: str) -> dict:
+        if '"task": "apply_review_fix"' in lower_prompt:
+            return self._fake_apply_review_fix_response(prompt)
+        return self._fake_score_review_response(prompt)
+
+    @staticmethod
+    def _fake_apply_review_fix_response(prompt: str) -> dict:
+        try:
+            payload = json.loads(prompt)
+            current_code = str(payload.get("current_code", ""))
+        except json.JSONDecodeError:
+            current_code = prompt
+        return {
+            "fixed_code": "/* REVIEWER FIX: fake provider left code unchanged for offline preview. */\n" + current_code,
+            "explanation": "Fake/offline mode demonstrates the fix workflow without changing program logic.",
+            "changes_made": ["Added a visible reviewer-fix comment only."],
+            "tests_to_run": ["Run all grading inputs and inspect any remaining mismatches."],
+            "risk_note": "Fake/offline mode does not produce real code fixes.",
+        }
+
+    @staticmethod
+    def _fake_score_review_response(prompt: str) -> dict:
+        try:
+            payload = json.loads(prompt)
+            failed_cases = payload.get("failed_cases", [])
+        except json.JSONDecodeError:
+            failed_cases = []
+        failed_inputs = [str(case.get("input_value", "")) for case in failed_cases if isinstance(case, dict)]
+        examples = [
+            {
+                "input": str(case.get("input_value", "")),
+                "expected_output": str(case.get("expected_output", "")),
+                "actual_output": str(case.get("actual_output", "")),
+                "why_it_failed": str(case.get("reason", "")) or "The actual output did not match the expected output.",
+            }
+            for case in failed_cases[:3]
+            if isinstance(case, dict)
+        ]
+        return {
+            "summary": "The fake reviewer grouped the supplied failures as one deterministic grading issue.",
+            "deduction_is_plausible": True,
+            "root_causes": [
+                {
+                    "issue": "The output differs from the expected format or value for the listed inputs.",
+                    "failed_inputs": failed_inputs,
+                    "deduction_impact": f"{len(failed_inputs)} failed input(s) contributed to the shown deduction.",
+                    "examples": examples,
+                }
+            ],
+            "inline_comments": [
+                {
+                    "line": 1,
+                    "comment": "Start by checking the branch or formatting responsible for the first failed case.",
+                }
+            ],
+            "fix_to_full_score": "Make the output match the expected behavior for every failed input.",
+            "risk_note": "",
         }
 
 
