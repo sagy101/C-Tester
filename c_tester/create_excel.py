@@ -6,12 +6,14 @@ from .utils import log
 from .configuration import penalty
 
 ID_COLUMN = "ID_number"
+NAME_COLUMN = "Name"
 COMMENTS_COLUMN = "Comments"
 FINAL_GRADE_COLUMN = "Final_Grade"
 PENALTY_APPLIED_COLUMN = "Penalty Applied"
 WEIGHTED_SUBTOTAL_COLUMN = "_Weighted_Subtotal"
 SUBMISSION_PENALTY_AMOUNT_COLUMN = "_Submission_Penalty_Amount"
 SUBMISSION_PENALTY_COUNT_COLUMN = "_Submission_Penalty_Count"
+STUDENT_NAMES_FILE = "student_names.json"
 
 
 def delete_existing_excel_files(directory):
@@ -155,7 +157,33 @@ def normalize_id(id_str):
     return digits_only.lstrip('0') if digits_only else ''
 
 
-def write_text_columns(worksheet, df, columns):
+def load_student_names(names_file=STUDENT_NAMES_FILE):
+    if not os.path.exists(names_file):
+        return {}
+    try:
+        import json
+        with open(names_file, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except Exception as exc:
+        log(f"Could not load student names from {names_file}: {exc}", level="warning")
+        return {}
+    return {normalize_id(student_id): str(name) for student_id, name in payload.items() if str(name).strip()}
+
+
+def add_student_names(df, student_names=None):
+    if ID_COLUMN not in df.columns:
+        return df
+    names = student_names if student_names is not None else load_student_names()
+    result = df.copy()
+    result[NAME_COLUMN] = result[ID_COLUMN].apply(lambda value: names.get(normalize_id(value), ""))
+    columns = list(result.columns)
+    columns.remove(NAME_COLUMN)
+    insert_at = columns.index(ID_COLUMN) + 1 if ID_COLUMN in columns else 1
+    columns.insert(insert_at, NAME_COLUMN)
+    return result[columns]
+
+
+def write_text_columns(worksheet, df, columns, cell_format=None):
     """Force selected columns to Excel text cells to preserve IDs and input lists."""
     for column_name in columns:
         if column_name not in df.columns:
@@ -163,9 +191,9 @@ def write_text_columns(worksheet, df, columns):
         column_index = df.columns.get_loc(column_name)
         for row_index, value in enumerate(df[column_name], start=1):
             if pd.isna(value) or value == "":
-                worksheet.write_blank(row_index, column_index, None)
+                worksheet.write_blank(row_index, column_index, None, cell_format)
             else:
-                worksheet.write_string(row_index, column_index, str(value))
+                worksheet.write_string(row_index, column_index, str(value), cell_format)
 
 
 def format_grade_number(value, decimals=2):
@@ -756,7 +784,7 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
             else:
                 final_output = final_df 
 
-    return final_output
+    return add_student_names(final_output)
 
 
 def build_summary_tables(final_grades_df, folder_data, folder_weights=None, top_wrong_inputs=10):
@@ -853,6 +881,7 @@ def build_top_wrong_inputs_table(folder_data, limit=10):
 def build_attention_needed_table(final_grades_df, folder_data):
     rows = []
     final_grade_by_id = final_grade_lookup(final_grades_df)
+    name_by_id = student_name_lookup(final_grades_df)
     attention_ids = attention_student_ids(final_grades_df)
     per_student_reasons = {student_id: [] for student_id in attention_ids}
     add_final_grade_attention(per_student_reasons, final_grades_df, attention_ids)
@@ -869,11 +898,12 @@ def build_attention_needed_table(final_grades_df, folder_data):
     for student_id in sorted(attention_ids, key=natural_id_sort_key):
         rows.append({
             "ID_number": student_id,
+            "Name": name_by_id.get(student_id, ""),
             "Final_Grade": final_grade_by_id.get(student_id, ""),
             "Reason": attention_score_reason(final_grade_by_id.get(student_id, ""), final_grades_df),
             "Details": "; ".join(per_student_reasons.get(student_id, [])),
         })
-    return pd.DataFrame(rows, columns=["ID_number", "Final_Grade", "Reason", "Details"])
+    return pd.DataFrame(rows, columns=["ID_number", "Name", "Final_Grade", "Reason", "Details"])
 
 
 def attention_student_ids(final_grades_df):
@@ -974,6 +1004,17 @@ def final_grade_lookup(final_grades_df):
     return {
         str(row[ID_COLUMN]): row[FINAL_GRADE_COLUMN]
         for _, row in final_grades_df[[ID_COLUMN, FINAL_GRADE_COLUMN]].iterrows()
+    }
+
+
+def student_name_lookup(final_grades_df):
+    if ID_COLUMN not in final_grades_df.columns:
+        return {}
+    if NAME_COLUMN not in final_grades_df.columns:
+        return {}
+    return {
+        str(row[ID_COLUMN]): row[NAME_COLUMN]
+        for _, row in final_grades_df[[ID_COLUMN, NAME_COLUMN]].iterrows()
     }
 
 
@@ -1121,6 +1162,7 @@ def write_summary_dashboard(writer, workbook, summary_tables):
     writer.sheets["Summary"] = worksheet
     title_format = workbook.add_format({"bold": True, "font_size": 14})
     header_format = workbook.add_format({"bold": True, "bg_color": "#D9E1F2", "border": 1})
+    wrap_format = workbook.add_format({"text_wrap": True, "valign": "top"})
     section_rows = {}
     current_row = 0
 
@@ -1139,6 +1181,7 @@ def write_summary_dashboard(writer, workbook, summary_tables):
             current_row,
             title_format,
             header_format,
+            wrap_format,
         )
 
     for column_index in range(0, 18):
@@ -1147,6 +1190,7 @@ def write_summary_dashboard(writer, workbook, summary_tables):
     worksheet.set_column(1, 1, 24)
     worksheet.set_column(2, 2, 18)
     worksheet.set_column(3, 3, 48)
+    worksheet.set_column(4, 4, 72, wrap_format)
     worksheet.freeze_panes(1, 0)
     add_summary_charts(workbook, worksheet, summary_tables, section_rows)
 
@@ -1165,7 +1209,16 @@ def format_grades_worksheet(workbook, worksheet, df):
         or col.startswith("Compilation_Repair_Status_")
         or col.startswith("Compilation_Repair_Note_")
     ]
-    write_text_columns(worksheet, df, text_columns)
+    wrap_format = workbook.add_format({"text_wrap": True, "valign": "top"})
+    wrapped_columns = [col for col in text_columns if col != ID_COLUMN and col != NAME_COLUMN]
+    plain_text_columns = [col for col in text_columns if col not in wrapped_columns]
+    write_text_columns(worksheet, df, plain_text_columns)
+    write_text_columns(worksheet, df, wrapped_columns, wrap_format)
+    if COMMENTS_COLUMN in df.columns:
+        worksheet.set_column(df.columns.get_loc(COMMENTS_COLUMN), df.columns.get_loc(COMMENTS_COLUMN), 60, wrap_format)
+    if NAME_COLUMN in df.columns:
+        worksheet.set_column(df.columns.get_loc(NAME_COLUMN), df.columns.get_loc(NAME_COLUMN), 24)
+    worksheet.set_default_row(36)
 
     header_format = workbook.add_format({
         'bold': True,
@@ -1176,14 +1229,16 @@ def format_grades_worksheet(workbook, worksheet, df):
         worksheet.write(0, col_num, value, header_format)
 
 
-def write_summary_section(worksheet, df, title, start_row, title_format, header_format):
+def write_summary_section(worksheet, df, title, start_row, title_format, header_format, wrap_format=None):
     worksheet.write(start_row, 0, title, title_format)
     header_row = start_row + 1
     for column_index, column_name in enumerate(df.columns):
         worksheet.write(header_row, column_index, column_name, header_format)
     for row_offset, row in enumerate(df.itertuples(index=False), start=1):
         for column_index, value in enumerate(row):
-            worksheet.write(header_row + row_offset, column_index, value)
+            column_name = df.columns[column_index]
+            cell_format = wrap_format if column_name in {"Details", "Top_Wrong_Inputs"} else None
+            worksheet.write(header_row + row_offset, column_index, value, cell_format)
     return header_row + len(df) + 3
 
 

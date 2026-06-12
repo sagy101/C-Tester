@@ -1,6 +1,8 @@
 """Configuration settings for the C Auto Grader."""
 
+import json
 import os # Needed for validate_config
+import re
 
 # Flag to control file naming pattern
 # When True: expects files named as "hw[0-9].c" and treats them as "hw[0-9]_q1.c"
@@ -28,6 +30,8 @@ llm_compile_repair_max_attempts = 3
 llm_compile_repair_provider = "Gemini"
 llm_compile_repair_model = ""
 
+DEFAULT_GUI_CONFIG_FILENAME = "gui_config.json"
+
 # Flag to enable RAR file extraction support
 isRarSupportActive = False
 
@@ -40,15 +44,159 @@ winrar_path = r"C:\Program Files\WinRAR\UnRAR.exe"
 # Path to Visual Studio environment batch file
 vs_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 
+QUESTION_FOLDER_PATTERN = re.compile(r"^Q(\d+)$", re.IGNORECASE)
+
+
+def gui_config_path(root_path=None):
+    """Return the local GUI config path for a project folder."""
+    return os.path.join(root_path or os.getcwd(), DEFAULT_GUI_CONFIG_FILENAME)
+
+
+def load_gui_config(config_path=None):
+    """Load saved GUI settings, returning an empty dict when unavailable."""
+    path = config_path or gui_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as config_file:
+            config = json.load(config_file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return config if isinstance(config, dict) else {}
+
+
+def save_gui_config(config, config_path=None):
+    """Save GUI settings to the local project config file."""
+    path = config_path or gui_config_path()
+    with open(path, "w", encoding="utf-8") as config_file:
+        json.dump(config, config_file, indent=2)
+        config_file.write("\n")
+    return path
+
+
+def detect_question_folders(root_path=None):
+    """Return valid question folders found in the project root, sorted naturally."""
+    if root_path is None:
+        root_path = os.getcwd()
+
+    detected = []
+    try:
+        folder_names = os.listdir(root_path)
+    except OSError:
+        return detected
+
+    for folder_name in folder_names:
+        match = QUESTION_FOLDER_PATTERN.match(folder_name)
+        if not match:
+            continue
+
+        folder_path = os.path.join(root_path, folder_name)
+        if not os.path.isdir(folder_path):
+            continue
+
+        if (
+            os.path.isdir(os.path.join(folder_path, "C"))
+            and os.path.isfile(os.path.join(folder_path, "input.txt"))
+            and os.path.isfile(os.path.join(folder_path, "original_sol.c"))
+        ):
+            detected.append((int(match.group(1)), folder_name))
+
+    return [folder_name for _, folder_name in sorted(detected)]
+
+
+def distribute_even_weights(question_list):
+    """Assign integer weights that are as even as possible and sum to 100."""
+    if not question_list:
+        return {}
+
+    base_weight, remainder = divmod(100, len(question_list))
+    return {
+        question: base_weight + (1 if index < remainder else 0)
+        for index, question in enumerate(question_list)
+    }
+
+
+def merge_saved_question_config(saved_config, detected_questions=None, fallback_questions=None):
+    """Merge saved question settings with currently detected question folders."""
+    fallback_questions = list(fallback_questions or ["Q1", "Q2"])
+    saved_config = saved_config if isinstance(saved_config, dict) else {}
+    detected_questions = list(detected_questions or [])
+    saved_questions = [
+        question
+        for question in saved_config.get("questions", [])
+        if isinstance(question, str) and question
+    ]
+
+    if detected_questions:
+        question_list = detected_questions
+    elif saved_questions:
+        question_list = saved_questions
+    else:
+        question_list = fallback_questions
+
+    saved_weights = saved_config.get("folder_weights", {})
+    if not isinstance(saved_weights, dict):
+        saved_weights = {}
+
+    weights = {}
+    for question in question_list:
+        saved_weight = saved_weights.get(question)
+        if isinstance(saved_weight, (int, float)):
+            weights[question] = saved_weight
+
+    if set(weights) != set(question_list) or sum(weights.values()) != 100:
+        weights = distribute_even_weights(question_list)
+
+    return question_list, weights
+
+
+def _saved_value(saved_config, key, current_value, expected_type):
+    value = saved_config.get(key)
+    return value if isinstance(value, expected_type) else current_value
+
+
+def _saved_non_empty_string(saved_config, key, current_value):
+    value = saved_config.get(key)
+    return value if isinstance(value, str) and value else current_value
+
+
 # List of question folder names (must match actual folder names in the project root)
-questions = ["Q1", "Q2"]
+_saved_gui_config = load_gui_config()
+questions, folder_weights = merge_saved_question_config(_saved_gui_config, detect_question_folders())
 
 # Dictionary mapping question folder names to their weight percentage for the final grade
 # Ensure keys match the 'questions' list and values sum to 100.
-folder_weights = {
-    questions[0]: 50,
-    questions[1]: 50
-}
+penalty = _saved_value(_saved_gui_config, "penalty", penalty, int)
+per_error_penalty = _saved_value(_saved_gui_config, "per_error_penalty", per_error_penalty, bool)
+test_scoring_mode = _saved_non_empty_string(_saved_gui_config, "test_scoring_mode", test_scoring_mode)
+test_error_deduction = _saved_value(_saved_gui_config, "test_error_deduction", test_error_deduction, (int, float))
+llm_compile_repair_enabled = _saved_value(
+    _saved_gui_config,
+    "llm_compile_repair_enabled",
+    llm_compile_repair_enabled,
+    bool,
+)
+llm_compile_repair_penalty = _saved_value(
+    _saved_gui_config,
+    "llm_compile_repair_penalty",
+    llm_compile_repair_penalty,
+    (int, float),
+)
+llm_compile_repair_max_attempts = _saved_value(
+    _saved_gui_config,
+    "llm_compile_repair_max_attempts",
+    llm_compile_repair_max_attempts,
+    int,
+)
+llm_compile_repair_provider = _saved_non_empty_string(
+    _saved_gui_config,
+    "llm_compile_repair_provider",
+    llm_compile_repair_provider,
+)
+llm_compile_repair_model = _saved_value(_saved_gui_config, "llm_compile_repair_model", llm_compile_repair_model, str)
+isRarSupportActive = _saved_value(_saved_gui_config, "rar_support", isRarSupportActive, bool)
+use_simple_naming = _saved_value(_saved_gui_config, "simple_naming", use_simple_naming, bool)
+vs_path = _saved_non_empty_string(_saved_gui_config, "vs_path", vs_path)
+winrar_path = _saved_non_empty_string(_saved_gui_config, "winrar_path", winrar_path)
 
 def validate_config(questions_list, weights_dict):
     """Validates the questions list, weights dict, and folder structure.

@@ -26,6 +26,8 @@ Q*/original_sol.c
 # specific files
 submit_error.txt
 checker_config.json
+gui_config.json
+student_names.json
 
 
 

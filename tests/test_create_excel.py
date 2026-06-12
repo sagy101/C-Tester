@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import unittest
 
@@ -309,6 +310,8 @@ class TestCreateExcelParsing(unittest.TestCase):
             original_cwd = os.getcwd()
             try:
                 os.chdir(temp_dir)
+                with open("student_names.json", "w", encoding="utf-8") as names_file:
+                    json.dump({"123456789": "Student Name"}, names_file)
                 os.makedirs(os.path.join("Q1", "grade"))
                 with open(os.path.join("Q1", "grade", "123456789.txt"), "w", encoding="utf-8") as grade_file:
                     grade_file.write("Grade: 100%\nWrong Inputs:\nTimeouts: 0/1\n")
@@ -322,7 +325,9 @@ class TestCreateExcelParsing(unittest.TestCase):
                     upload_sheet = pd.read_excel(excel_file, sheet_name="Sheet1")
                     details = pd.read_excel(excel_file, sheet_name="Student Details")
                     summary = pd.read_excel(excel_file, sheet_name="Summary", header=None)
-                self.assertEqual(list(upload_sheet.columns), ["ID_number", "Comments", "Final_Grade"])
+                self.assertEqual(list(upload_sheet.columns), ["ID_number", "Name", "Comments", "Final_Grade"])
+                self.assertEqual(upload_sheet.loc[0, "Name"], "Student Name")
+                self.assertEqual(details.loc[0, "Name"], "Student Name")
                 self.assertIn("Grade_Q1_100%", details.columns)
                 self.assertIn("Wrong_Inputs_Q1", details.columns)
                 self.assertIn("Compilation_Error_Q1", details.columns)

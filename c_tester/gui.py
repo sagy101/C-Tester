@@ -267,7 +267,7 @@ class App(ctk.CTk):
         self.gui_llm_compile_repair_max_attempts = default_llm_compile_repair_max_attempts
         self.gui_llm_compile_repair_provider = default_llm_compile_repair_provider
         self.gui_llm_compile_repair_model = default_llm_compile_repair_model or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
-        self.gui_rar_support = False  # New RAR support variable
+        self.gui_rar_support = configuration.isRarSupportActive  # New RAR support variable
         self.gui_vs_path = default_vs_path  # Initialize VS path
         self.gui_winrar_path = default_winrar_path  # Initialize WinRAR path
         self.gui_simple_naming = configuration.use_simple_naming  # Initialize simple naming flag
@@ -610,7 +610,7 @@ class App(ctk.CTk):
         self.rar_support_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
         self.rar_support_frame.grid(row=4, column=0, padx=15, pady=(0, 10), sticky="w")
         
-        self.rar_support_var = tk.BooleanVar(value=False)
+        self.rar_support_var = tk.BooleanVar(value=self.gui_rar_support)
         self.rar_support_checkbox = ctk.CTkCheckBox(
             self.rar_support_frame, 
             text="Enable RAR file support",
@@ -1492,6 +1492,33 @@ class App(ctk.CTk):
         self.apply_config_button.configure(**kwargs)
         self.global_apply_config_button.configure(**kwargs)
 
+    def current_gui_config(self):
+        """Return the settings that should be restored on the next GUI startup."""
+        return {
+            "questions": self.gui_questions,
+            "folder_weights": self.gui_weights,
+            "penalty": self.gui_penalty,
+            "per_error_penalty": self.gui_per_error_penalty,
+            "test_scoring_mode": self.gui_test_scoring_mode,
+            "test_error_deduction": self.gui_test_error_deduction,
+            "llm_compile_repair_enabled": self.gui_llm_compile_repair_enabled,
+            "llm_compile_repair_penalty": self.gui_llm_compile_repair_penalty,
+            "llm_compile_repair_max_attempts": self.gui_llm_compile_repair_max_attempts,
+            "llm_compile_repair_provider": self.gui_llm_compile_repair_provider,
+            "llm_compile_repair_model": self.gui_llm_compile_repair_model,
+            "rar_support": self.gui_rar_support,
+            "simple_naming": self.gui_simple_naming,
+            "vs_path": self.gui_vs_path,
+            "winrar_path": self.gui_winrar_path,
+        }
+
+    def save_current_gui_config(self):
+        """Persist current GUI settings without interrupting the user on failure."""
+        try:
+            configuration.save_gui_config(self.current_gui_config())
+        except OSError as exc:
+            log(f"Could not save GUI configuration: {exc}", "warning")
+
     # --- Specific Task Functions (Internal implementations called by run_task) ---
     # These now accept the callback/event args if needed
     def task_preprocess_internal(self, progress_callback=None, cancel_event=None):
@@ -1520,6 +1547,7 @@ class App(ctk.CTk):
         simple_naming = self.simple_naming_var.get()
         self.gui_simple_naming = simple_naming
         configuration.use_simple_naming = simple_naming
+        self.save_current_gui_config()
         
         log(f"Starting preprocessing task for: {zip_path} (RAR support: {'enabled' if rar_support else 'disabled'}, Simple naming: {'enabled' if simple_naming else 'disabled'})", level="info")
         # Pass the CURRENT GUI config including the WinRAR path
@@ -1552,6 +1580,7 @@ class App(ctk.CTk):
             return # Stop the task
         else:
             log("Configuration validated successfully.", "info")
+            self.save_current_gui_config()
             
         # --- Proceed with Grading Task --- 
         compile_repair_provider = self.make_compile_repair_provider()
@@ -1875,6 +1904,7 @@ class App(ctk.CTk):
              self.gui_llm_compile_repair_model = parsed_compile_repair_model
              self.gui_rar_support = parsed_rar_support
              self.gui_simple_naming = self.simple_naming_var.get()
+             self.save_current_gui_config()
              status_text = "Status: Valid ✓"
              status_color = COLORS["secondary"]  # Green
              # apply_border_color remains default
@@ -2055,6 +2085,7 @@ class App(ctk.CTk):
         self.vs_path_status_label.configure(text="Status: Valid ✓", text_color=COLORS["secondary"])
         self.apply_vs_path_button.configure(border_color=self._default_border_color, border_width=1, state="normal")
         log(f"Visual Studio path applied and validated: {vs_path}", "success")
+        self.save_current_gui_config()
         self.update_dependent_button_states()
 
     def _handle_vs_validation_warning(self, vs_path, message):
@@ -2065,6 +2096,7 @@ class App(ctk.CTk):
         self.vs_path_status_label.configure(text="Status: Applied with warnings", text_color=COLORS["warning"])
         self.apply_vs_path_button.configure(border_color=self._default_border_color, border_width=1, state="normal")
         log(f"Visual Studio path applied with warnings: {vs_path}", "warning")
+        self.save_current_gui_config()
         self.update_dependent_button_states()
 
     def _handle_vs_validation_failure(self, vs_path, error_message):
@@ -2120,6 +2152,7 @@ class App(ctk.CTk):
             self.winrar_path_status_label.configure(text="Status: Valid ✓", text_color=COLORS["secondary"])
             self.apply_winrar_path_button.configure(border_color=self._default_border_color, border_width=1)
             log(f"WinRAR path applied and validated: {winrar_path}", "success")
+            self.save_current_gui_config()
             self.update_dependent_button_states()
             
         except Exception as e:
@@ -2129,6 +2162,7 @@ class App(ctk.CTk):
             self.winrar_path_dirty = False
             self.apply_winrar_path_button.configure(border_color=self._default_border_color, border_width=1)
             log(f"WinRAR path applied with warnings: {winrar_path}", "warning")
+            self.save_current_gui_config()
             self.update_dependent_button_states()
 
     def update_rar_dependency_state(self):
@@ -2271,6 +2305,7 @@ class App(ctk.CTk):
             self.gui_simple_naming = new_state
             configuration.use_simple_naming = new_state
             log(f"Simple naming mode {'enabled' if new_state else 'disabled'}. Files will be treated as {'hw[0-9].c' if new_state else 'hw[0-9]_q[0-9].c'}.", "info")
+            self.save_current_gui_config()
 
 
 class SetupAssistantWindow(ctk.CTkToplevel):

@@ -31,6 +31,7 @@ from .utils import log
 
 STANDARD_C_RE = re.compile(r'q(\d+).*\.c$', re.IGNORECASE)
 SIMPLE_C_RE = re.compile(r'^hw\d+\.c$', re.IGNORECASE)
+STUDENT_NAMES_FILE = "student_names.json"
 
 def classify_c_filename(filename: str) -> str:
     """Classify supported submission C filename styles."""
@@ -55,6 +56,24 @@ def filter_processable_c_paths(paths: list[str]) -> list[str]:
         for path in paths
         if os.path.basename(path) != "example_student.c" and not is_macos_metadata_path(path)
     ]
+
+
+def extract_student_name_from_submission(submission_name: str, student_id: str) -> str:
+    """Extract the Moodle display name from a submission archive basename."""
+    prefix = submission_name
+    if "_assignsubmission_file_" in prefix:
+        prefix = prefix.split("_assignsubmission_file_", 1)[0]
+    else:
+        prefix = re.sub(rf"[_\s.]*{re.escape(student_id)}(?:\D*)?$", "", prefix)
+    prefix = re.sub(r"_\d+$", "", prefix)
+    return prefix.replace("_", " ").strip()
+
+
+def write_student_names(student_names: dict[str, str], output_path: str = STUDENT_NAMES_FILE):
+    if not student_names:
+        return
+    with open(output_path, "w", encoding="utf-8") as names_file:
+        json.dump(dict(sorted(student_names.items())), names_file, ensure_ascii=False, indent=2)
 
 def record_detected_c_file(name: str, counts: dict, examples: dict):
     kind = classify_c_filename(name)
@@ -617,6 +636,7 @@ def preprocess_submissions(
     # Dictionary to store issues per submission: submission_name -> list of (priority, message)
     # This change allows tracking multiple issues per submission
     submissions_issues = {}
+    student_names = {}
 
     # Define priorities (lower number = higher priority)
     PRIORITY = {
@@ -715,6 +735,10 @@ def preprocess_submissions(
                     student_id = id_match_c.group(1)
                 elif id_match_dot:
                     student_id = id_match_dot.group(1)
+
+                student_name = extract_student_name_from_submission(submission_name, student_id)
+                if student_name:
+                    student_names[student_id] = student_name
                     
                 log(f"Processing submission folder: '{submission_folder_path}' for student ID: {student_id}", level="info")
 
@@ -827,6 +851,11 @@ def preprocess_submissions(
     else:
         if not (cancel_event and cancel_event.is_set()): # Only log full success if not cancelled
              log("All submissions processed without errors or warnings requiring reporting.", level="success")
+
+    try:
+        write_student_names(student_names)
+    except Exception as e:
+        log(f"Could not write student names mapping: {e}", level="warning")
 
     # Cleanup only if not cancelled?
     if not (cancel_event and cancel_event.is_set()):

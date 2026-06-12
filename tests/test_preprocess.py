@@ -1,13 +1,24 @@
 import os
+import json
 import tempfile
 import unittest
 import zipfile
 
 from c_tester import configuration
-from c_tester.preprocess import preprocess_submissions
+from c_tester.preprocess import extract_student_name_from_submission, preprocess_submissions
 
 
 class TestPreprocessSubmissions(unittest.TestCase):
+    def test_extract_student_name_from_moodle_submission_name(self):
+        self.assertEqual(
+            extract_student_name_from_submission(
+                "Yarin Barel_593186_assignsubmission_file_HW2_206262776",
+                "206262776",
+            ),
+            "Yarin Barel",
+        )
+        self.assertEqual(extract_student_name_from_submission("Student Name_123456789", "123456789"), "Student Name")
+
     def test_single_assignment_c_file_is_copied_to_all_questions(self):
         original_cwd = os.getcwd()
         original_simple_naming = configuration.use_simple_naming
@@ -36,6 +47,9 @@ class TestPreprocessSubmissions(unittest.TestCase):
                     self.assertTrue(os.path.exists(copied_path), f"{copied_path} should exist")
                     with open(copied_path, "r", encoding="utf-8") as copied_file:
                         self.assertEqual(copied_file.read(), c_code)
+
+                with open("student_names.json", "r", encoding="utf-8") as names_file:
+                    self.assertEqual(json.load(names_file), {"123456789": "Student Name"})
 
                 self.assertFalse(os.path.exists("submit_error.txt"))
             finally:
