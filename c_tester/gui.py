@@ -2564,6 +2564,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
         self.status_var = tk.StringVar(value="Loading scored rows...")
         self.only_deductions_var = tk.BooleanVar(value=True)
+        self.attention_only_var = tk.BooleanVar(value=False)
         self.id_search_var = tk.StringVar(value="")
         self.cases: list[ReviewCase] = []
         self.visible_cases: list[ReviewCase] = []
@@ -2620,6 +2621,14 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.id_search_var.trace_add("write", lambda *_args: self.render_table())
         self.clear_id_search_button = ctk.CTkButton(top, text="Clear Search", width=110, command=self.clear_id_search)
         self.clear_id_search_button.grid(row=1, column=2, padx=8, pady=(0, 8), sticky="w")
+
+        self.attention_only_checkbox = ctk.CTkCheckBox(
+            top,
+            text="Attention needed only",
+            variable=self.attention_only_var,
+            command=self.render_table,
+        )
+        self.attention_only_checkbox.grid(row=1, column=3, columnspan=2, padx=8, pady=(0, 8), sticky="w")
 
         self.key_status_label = ctk.CTkLabel(top, text="", anchor="w", justify="left")
         self.key_status_label.grid(row=2, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
@@ -2795,15 +2804,22 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.review_tree.delete(*self.review_tree.get_children())
         self.table_case_by_iid.clear()
         id_query = self.id_search_var.get().strip().lower()
+        attention_threshold = self.attention_threshold()
         self.visible_cases = [
             case for case in self.cases
             if (not self.only_deductions_var.get() or case.question_score < 100 or case.notes)
+            and (not self.attention_only_var.get() or self.is_attention_case(case, attention_threshold))
             and (not id_query or id_query in case.student_id.lower())
         ]
         self.visible_cases.sort(key=self.review_sort_key, reverse=self.review_sort_descending)
         self.configure_review_tree_headings()
         reviewed = sum(1 for case in self.visible_cases if case.reviewed)
-        filter_text = f" matching ID search '{self.id_search_var.get().strip()}'" if id_query else ""
+        filters = []
+        if id_query:
+            filters.append(f"ID search '{self.id_search_var.get().strip()}'")
+        if self.attention_only_var.get():
+            filters.append("attention needed")
+        filter_text = f" matching {', '.join(filters)}" if filters else ""
         self.status_var.set(
             f"Loaded {len(self.visible_cases)} row(s){filter_text}, {reviewed} already reviewed. "
             "Click a notes preview to open the full Notes tab."
@@ -2824,6 +2840,21 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             self.insert_review_tree_row(iid, case)
         self.review_tree.yview_moveto(0)
         return preferred_iid or first_iid
+
+    def attention_threshold(self):
+        grades_by_student = {}
+        for case in self.cases:
+            grades_by_student[case.student_id] = case.final_grade
+        grades = sorted(float(grade) for grade in grades_by_student.values())
+        if not grades:
+            return 50
+        middle = len(grades) // 2
+        median = grades[middle] if len(grades) % 2 else (grades[middle - 1] + grades[middle]) / 2
+        return median - 30
+
+    @staticmethod
+    def is_attention_case(case: ReviewCase, attention_threshold):
+        return case.final_grade < 50 or case.final_grade <= attention_threshold
 
     def insert_review_tree_row(self, iid, case):
         status_text = "Reviewed" if case.reviewed else case.code_source.title()

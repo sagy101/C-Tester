@@ -646,8 +646,14 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
                 if q_name_match:
                     q_name = q_name_match.group(1)
                     calculation = row.get(f"Grade_Calculation_{q_name}", "")
+                    timeouts = row.get(f"Timeouts_{q_name}", 0)
+                    timeout_inputs = row.get(f"Timeout_Inputs_{q_name}", "")
+                    failure_summary = failed_inputs_summary(wrong_inputs_str, calculation, timeouts, timeout_inputs)
                     calculation_text = f" | {calculation}" if calculation else ""
-                    failed_cases_list.append(f"{q_name}: {wrong_inputs_str}{calculation_text}")
+                    if failure_summary:
+                        failed_cases_list.append(f"{q_name}: {failure_summary}{calculation_text}")
+                    else:
+                        failed_cases_list.append(f"{q_name}: {wrong_inputs_str}{calculation_text}")
         if failed_cases_list:
             comments_parts.append("Failed Test Cases:\n" + "\n".join(failed_cases_list))
         
@@ -753,6 +759,497 @@ def compute_final_grades(folder_data, folder_weights, penalty: int, slim=True, p
     return final_output
 
 
+def build_summary_tables(final_grades_df, folder_data, folder_weights=None, top_wrong_inputs=10):
+    folder_weights = folder_weights or {}
+    return {
+        "overall": build_overall_summary(final_grades_df, folder_data),
+        "per_question": build_per_question_summary(folder_data, folder_weights, top_wrong_inputs),
+        "grade_distribution": build_grade_distribution_table(numeric_series(final_grades_df.get(FINAL_GRADE_COLUMN, []))),
+        "top_wrong_inputs": build_top_wrong_inputs_table(folder_data, top_wrong_inputs),
+        "attention_needed": build_attention_needed_table(final_grades_df, folder_data),
+    }
+
+
+def build_overall_summary(final_grades_df, folder_data):
+    final_grades = numeric_series(final_grades_df.get(FINAL_GRADE_COLUMN, []))
+    metrics = [
+        ("Students graded", int(len(final_grades_df))),
+        ("Average final grade", grade_stat(final_grades, "mean")),
+        ("Median final grade", grade_stat(final_grades, "median")),
+        ("Std dev final grade", grade_stat(final_grades, "std")),
+        ("Minimum final grade", grade_stat(final_grades, "min")),
+        ("Maximum final grade", grade_stat(final_grades, "max")),
+        ("Pass rate (>=60)", percent_stat((final_grades >= 60).sum(), len(final_grades))),
+        ("Perfect final grades", int((final_grades == 100).sum()) if not final_grades.empty else 0),
+        ("Zero final grades", int((final_grades == 0).sum()) if not final_grades.empty else 0),
+        ("Submission penalties applied", count_submission_penalties(final_grades_df)),
+        ("Students with compilation errors", count_students_with_any(folder_data, "Compilation_Error", bool)),
+        ("Question compilation errors", sum(count_truthy(df, "Compilation_Error") for df in folder_data.values())),
+        ("Students with original compilation errors", count_students_with_any(folder_data, "Original_Compilation_Error", bool)),
+        ("LLM compile repairs", sum(count_equal(df, "Compilation_Repair_Status", "fixed") for df in folder_data.values())),
+        ("Students with timeouts", count_students_with_any(folder_data, "Timeouts", is_positive)),
+        ("Total timeouts", sum(sum_numeric(df, "Timeouts") for df in folder_data.values())),
+        ("Non-recursive penalties", sum(count_positive(df, "Structural_Penalty") for df in folder_data.values())),
+    ]
+    return pd.DataFrame(metrics, columns=["Metric", "Value"])
+
+
+def build_per_question_summary(folder_data, folder_weights, top_wrong_inputs):
+    rows = []
+    for question, df in folder_data.items():
+        grades = numeric_series(df.get("Grade", []))
+        rows.append({
+            "Question": question,
+            "Weight": folder_weights.get(question, ""),
+            "Students": int(len(df)),
+            "Average": grade_stat(grades, "mean"),
+            "Median": grade_stat(grades, "median"),
+            "StdDev": grade_stat(grades, "std"),
+            "Min": grade_stat(grades, "min"),
+            "Max": grade_stat(grades, "max"),
+            "Pass_Rate": percent_stat((grades >= 60).sum(), len(grades)),
+            "Perfect": int((grades == 100).sum()) if not grades.empty else 0,
+            "Zero": int((grades == 0).sum()) if not grades.empty else 0,
+            "Compilation_Errors": count_truthy(df, "Compilation_Error"),
+            "Original_Compilation_Errors": count_truthy(df, "Original_Compilation_Error"),
+            "Compile_Repairs": count_equal(df, "Compilation_Repair_Status", "fixed"),
+            "Students_With_Timeouts": count_positive(df, "Timeouts"),
+            "Total_Timeouts": sum_numeric(df, "Timeouts"),
+            "Non_Recursive_Penalties": count_positive(df, "Structural_Penalty"),
+            "Top_Wrong_Inputs": top_wrong_inputs_text(df, limit=top_wrong_inputs),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_grade_distribution_table(final_grades):
+    buckets = [
+        ("<60", final_grades < 60),
+        ("60-69", (final_grades >= 60) & (final_grades < 70)),
+        ("70-79", (final_grades >= 70) & (final_grades < 80)),
+        ("80-89", (final_grades >= 80) & (final_grades < 90)),
+        ("90-100", (final_grades >= 90) & (final_grades <= 100)),
+    ]
+    return pd.DataFrame(
+        [{"Bucket": label, "Students": int(mask.sum())} for label, mask in buckets],
+        columns=["Bucket", "Students"],
+    )
+
+
+def build_top_wrong_inputs_table(folder_data, limit=10):
+    rows = []
+    for question, df in folder_data.items():
+        counts = wrong_input_counts(df)
+        denominator = max(int(len(df)), 1)
+        for input_value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]:
+            rows.append({
+                "Question": question,
+                "Input": input_value,
+                "Failed_Students": count,
+                "Failure_Rate": percent_stat(count, denominator),
+            })
+    return pd.DataFrame(rows, columns=["Question", "Input", "Failed_Students", "Failure_Rate"])
+
+
+def build_attention_needed_table(final_grades_df, folder_data):
+    rows = []
+    final_grade_by_id = final_grade_lookup(final_grades_df)
+    attention_ids = attention_student_ids(final_grades_df)
+    per_student_reasons = {student_id: [] for student_id in attention_ids}
+    add_final_grade_attention(per_student_reasons, final_grades_df, attention_ids)
+    add_submission_penalty_attention(per_student_reasons, final_grades_df, attention_ids)
+    for question, df in folder_data.items():
+        for _, row in df.iterrows():
+            student_id = str(row.get(ID_COLUMN, ""))
+            if student_id not in attention_ids:
+                continue
+            question_reason = attention_question_reason(question, row)
+            if question_reason:
+                per_student_reasons[student_id].append(question_reason)
+
+    for student_id in sorted(attention_ids, key=natural_id_sort_key):
+        rows.append({
+            "ID_number": student_id,
+            "Final_Grade": final_grade_by_id.get(student_id, ""),
+            "Reason": attention_score_reason(final_grade_by_id.get(student_id, ""), final_grades_df),
+            "Details": "; ".join(per_student_reasons.get(student_id, [])),
+        })
+    return pd.DataFrame(rows, columns=["ID_number", "Final_Grade", "Reason", "Details"])
+
+
+def attention_student_ids(final_grades_df):
+    if ID_COLUMN not in final_grades_df.columns or FINAL_GRADE_COLUMN not in final_grades_df.columns:
+        return set()
+    final_grades = numeric_series(final_grades_df[FINAL_GRADE_COLUMN])
+    if final_grades.empty:
+        return set()
+    median_grade = float(final_grades.median())
+    threshold = median_grade - 30
+    selected = final_grades_df[
+        (pd.to_numeric(final_grades_df[FINAL_GRADE_COLUMN], errors="coerce") < 50)
+        | (pd.to_numeric(final_grades_df[FINAL_GRADE_COLUMN], errors="coerce") <= threshold)
+    ]
+    return {str(student_id) for student_id in selected[ID_COLUMN]}
+
+
+def attention_score_reason(final_grade, final_grades_df):
+    try:
+        numeric_grade = float(final_grade)
+    except (TypeError, ValueError):
+        return "Needs review"
+    median_grade = numeric_series(final_grades_df.get(FINAL_GRADE_COLUMN, [])).median()
+    if numeric_grade < 50:
+        return "Final grade below 50"
+    if numeric_grade <= median_grade - 30:
+        return f"Final grade at least 30 points below median ({format_grade_number(median_grade)})"
+    return "Needs review"
+
+
+def natural_id_sort_key(value):
+    return tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", str(value)))
+
+
+def add_final_grade_attention(per_student_reasons, final_grades_df, attention_ids):
+    if FINAL_GRADE_COLUMN not in final_grades_df.columns:
+        return
+    for _, row in final_grades_df.iterrows():
+        student_id = str(row.get(ID_COLUMN, ""))
+        if student_id in attention_ids and float(row.get(FINAL_GRADE_COLUMN, 0) or 0) == 0:
+            per_student_reasons[student_id].append("Overall: final grade is 0")
+
+
+def add_submission_penalty_attention(per_student_reasons, final_grades_df, attention_ids):
+    if ID_COLUMN not in final_grades_df.columns:
+        return
+    for _, row in final_grades_df.iterrows():
+        student_id = str(row.get(ID_COLUMN, ""))
+        if student_id not in attention_ids:
+            continue
+        penalty_text = submission_penalty_text(row)
+        if penalty_text:
+            per_student_reasons[student_id].append(f"Submission penalty: {penalty_text}")
+
+
+def attention_question_reason(question, row):
+    details = []
+    grade = row.get("Grade", "")
+    if is_number_below(grade, 60):
+        details.append(f"score {format_grade_number(grade)}")
+    failure_summary = failed_inputs_summary(
+        row.get("Wrong_Inputs", ""),
+        row.get("Grade_Calculation", ""),
+        row.get("Timeouts", 0),
+        row.get("Timeout_Inputs", ""),
+    )
+    if failure_summary:
+        details.append(failure_summary)
+    if bool(row.get("Compilation_Error", False)):
+        details.append("compilation error")
+    if str(row.get("Compilation_Repair_Status", "")).lower() == "fixed":
+        details.append("compile repaired")
+    if is_positive(row.get("Structural_Penalty", 0)):
+        structural_note = row.get("Structural_Notes", "")
+        note_text = f": {structural_note}" if structural_note else ""
+        details.append(f"non-recursive penalty -{format_grade_number(row.get('Structural_Penalty', 0))}{note_text}")
+    return f"{question}: {', '.join(details)}" if details else ""
+
+
+def is_number_below(value, threshold):
+    try:
+        return float(value) < threshold
+    except (TypeError, ValueError):
+        return False
+
+
+def submission_penalty_text(row):
+    if PENALTY_APPLIED_COLUMN in row and str(row.get(PENALTY_APPLIED_COLUMN, "") or "").strip():
+        return str(row.get(PENALTY_APPLIED_COLUMN, ""))
+    comments = str(row.get(COMMENTS_COLUMN, "") or "")
+    match = re.search(r"Penalty:\s*(.*)", comments)
+    return match.group(1).strip() if match else ""
+
+
+def final_grade_lookup(final_grades_df):
+    if ID_COLUMN not in final_grades_df.columns or FINAL_GRADE_COLUMN not in final_grades_df.columns:
+        return {}
+    return {
+        str(row[ID_COLUMN]): row[FINAL_GRADE_COLUMN]
+        for _, row in final_grades_df[[ID_COLUMN, FINAL_GRADE_COLUMN]].iterrows()
+    }
+
+
+def numeric_series(values):
+    return pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+
+
+def grade_stat(series, stat_name):
+    if series.empty:
+        return ""
+    if stat_name == "std":
+        value = series.std(ddof=0)
+    else:
+        value = getattr(series, stat_name)()
+    return round(float(value), 2)
+
+
+def percent_stat(count, total):
+    if not total:
+        return ""
+    return round(float(count) * 100 / float(total), 2)
+
+
+def count_submission_penalties(final_grades_df):
+    if PENALTY_APPLIED_COLUMN in final_grades_df.columns:
+        return int(final_grades_df[PENALTY_APPLIED_COLUMN].fillna("").astype(str).str.strip().ne("").sum())
+    if COMMENTS_COLUMN in final_grades_df.columns:
+        return int(final_grades_df[COMMENTS_COLUMN].fillna("").astype(str).str.contains("Penalty:").sum())
+    return 0
+
+
+def count_truthy(df, column_name):
+    if column_name not in df.columns:
+        return 0
+    return int(df[column_name].fillna(False).astype(bool).sum())
+
+
+def count_equal(df, column_name, expected_value):
+    if column_name not in df.columns:
+        return 0
+    return int(df[column_name].fillna("").astype(str).str.lower().eq(expected_value.lower()).sum())
+
+
+def count_positive(df, column_name):
+    if column_name not in df.columns:
+        return 0
+    return int((pd.to_numeric(df[column_name], errors="coerce").fillna(0) > 0).sum())
+
+
+def sum_numeric(df, column_name):
+    if column_name not in df.columns:
+        return 0
+    return int(pd.to_numeric(df[column_name], errors="coerce").fillna(0).sum())
+
+
+def count_students_with_any(folder_data, column_name, predicate):
+    student_ids = set()
+    for df in folder_data.values():
+        if column_name not in df.columns or ID_COLUMN not in df.columns:
+            continue
+        for _, row in df.iterrows():
+            if predicate(row.get(column_name)):
+                student_ids.add(str(row[ID_COLUMN]))
+    return len(student_ids)
+
+
+def is_positive(value):
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def top_wrong_inputs_text(df, limit=5):
+    counts = wrong_input_counts(df)
+    if not counts:
+        return ""
+    top_items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    return "; ".join(f"{input_value} ({count})" for input_value, count in top_items)
+
+
+def wrong_input_counts(df):
+    if "Wrong_Inputs" not in df.columns:
+        return {}
+    counts = {}
+    for wrong_inputs in df["Wrong_Inputs"].fillna(""):
+        for wrong_input in split_input_list(wrong_inputs):
+            counts[wrong_input] = counts.get(wrong_input, 0) + 1
+    return counts
+
+
+def split_input_list(value):
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def failed_inputs_summary(wrong_inputs, grade_calculation="", timeouts=0, timeout_inputs=""):
+    wrong_input_list = split_input_list(wrong_inputs)
+    timeout_input_list = split_input_list(timeout_inputs)
+    correct_count, total_count = parse_correct_total(grade_calculation)
+    failed_count = len(wrong_input_list) + safe_int(timeouts)
+    if total_count:
+        failed_count = max(failed_count, total_count - correct_count)
+    if not wrong_input_list and not timeout_input_list:
+        return ""
+
+    examples = wrong_input_examples(wrong_input_list, timeout_input_list)
+    if total_count and failed_count >= total_count:
+        return f"failed all {total_count} inputs{examples}"
+    if total_count and failed_count / total_count >= 0.9:
+        passed_count = max(total_count - failed_count, 0)
+        return f"failed {failed_count}/{total_count} inputs; passed only {passed_count}{examples}"
+    if total_count:
+        return f"failed {failed_count}/{total_count} inputs{examples}"
+    return f"failed inputs: {', '.join(wrong_input_list)}"
+
+
+def parse_correct_total(grade_calculation):
+    match = re.search(r"(\d+)\s*/\s*(\d+)\s+correct", str(grade_calculation or ""))
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def safe_int(value):
+    try:
+        if pd.isna(value):
+            return 0
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def wrong_input_examples(wrong_inputs, timeout_inputs, limit=5):
+    examples = wrong_inputs[:limit]
+    if not examples and timeout_inputs:
+        examples = [f"{input_value} (timeout)" for input_value in timeout_inputs[:limit]]
+    if not examples:
+        return ""
+    suffix = "..." if len(wrong_inputs) + len(timeout_inputs) > limit else ""
+    return f" (examples: {', '.join(examples)}{suffix})"
+
+
+def write_summary_dashboard(writer, workbook, summary_tables):
+    worksheet = workbook.add_worksheet("Summary")
+    writer.sheets["Summary"] = worksheet
+    title_format = workbook.add_format({"bold": True, "font_size": 14})
+    header_format = workbook.add_format({"bold": True, "bg_color": "#D9E1F2", "border": 1})
+    section_rows = {}
+    current_row = 0
+
+    for title, key in [
+        ("Overall Metrics", "overall"),
+        ("Per-Question Metrics", "per_question"),
+        ("Final Grade Distribution", "grade_distribution"),
+        ("Top Wrong Inputs", "top_wrong_inputs"),
+        ("Attention Needed", "attention_needed"),
+    ]:
+        section_rows[key] = current_row
+        current_row = write_summary_section(
+            worksheet,
+            summary_tables[key],
+            title,
+            current_row,
+            title_format,
+            header_format,
+        )
+
+    for column_index in range(0, 18):
+        worksheet.set_column(column_index, column_index, 18)
+    worksheet.set_column(0, 0, 24)
+    worksheet.set_column(1, 1, 24)
+    worksheet.set_column(2, 2, 18)
+    worksheet.set_column(3, 3, 48)
+    worksheet.freeze_panes(1, 0)
+    add_summary_charts(workbook, worksheet, summary_tables, section_rows)
+
+
+def format_grades_worksheet(workbook, worksheet, df):
+    for i, _col in enumerate(df.columns):
+        worksheet.set_column(i, i, 20)
+
+    text_columns = [
+        col for col in df.columns
+        if col == ID_COLUMN
+        or col in (COMMENTS_COLUMN, PENALTY_APPLIED_COLUMN)
+        or col.startswith("Wrong_Inputs_")
+        or col.startswith("Grade_Calculation_")
+        or col.startswith("Timeout_Inputs_")
+        or col.startswith("Compilation_Repair_Status_")
+        or col.startswith("Compilation_Repair_Note_")
+    ]
+    write_text_columns(worksheet, df, text_columns)
+
+    header_format = workbook.add_format({
+        'bold': True,
+        'bg_color': '#D9E1F2',
+        'border': 1
+    })
+    for col_num, value in enumerate(df.columns.values):
+        worksheet.write(0, col_num, value, header_format)
+
+
+def write_summary_section(worksheet, df, title, start_row, title_format, header_format):
+    worksheet.write(start_row, 0, title, title_format)
+    header_row = start_row + 1
+    for column_index, column_name in enumerate(df.columns):
+        worksheet.write(header_row, column_index, column_name, header_format)
+    for row_offset, row in enumerate(df.itertuples(index=False), start=1):
+        for column_index, value in enumerate(row):
+            worksheet.write(header_row + row_offset, column_index, value)
+    return header_row + len(df) + 3
+
+
+def add_summary_charts(workbook, worksheet, summary_tables, section_rows):
+    add_grade_distribution_chart(workbook, worksheet, summary_tables["grade_distribution"], section_rows["grade_distribution"])
+    add_question_average_chart(workbook, worksheet, summary_tables["per_question"], section_rows["per_question"])
+    add_issue_counts_chart(workbook, worksheet, summary_tables["per_question"], section_rows["per_question"])
+
+
+def add_grade_distribution_chart(workbook, worksheet, df, start_row):
+    if df.empty:
+        return
+    chart = workbook.add_chart({"type": "column"})
+    first_data_row = start_row + 2
+    last_data_row = first_data_row + len(df) - 1
+    chart.add_series({
+        "name": "Students",
+        "categories": ["Summary", first_data_row, 0, last_data_row, 0],
+        "values": ["Summary", first_data_row, 1, last_data_row, 1],
+    })
+    chart.set_title({"name": "Final Grade Distribution"})
+    chart.set_legend({"none": True})
+    worksheet.insert_chart(start_row, 5, chart, {"x_scale": 1.2, "y_scale": 1.0})
+
+
+def add_question_average_chart(workbook, worksheet, df, start_row):
+    if df.empty:
+        return
+    chart = workbook.add_chart({"type": "column"})
+    first_data_row = start_row + 2
+    last_data_row = first_data_row + len(df) - 1
+    chart.add_series({
+        "name": "Average",
+        "categories": ["Summary", first_data_row, 0, last_data_row, 0],
+        "values": ["Summary", first_data_row, 3, last_data_row, 3],
+    })
+    chart.add_series({
+        "name": "Median",
+        "categories": ["Summary", first_data_row, 0, last_data_row, 0],
+        "values": ["Summary", first_data_row, 4, last_data_row, 4],
+    })
+    chart.set_title({"name": "Per-Question Average and Median"})
+    worksheet.insert_chart(start_row, 20, chart, {"x_scale": 1.2, "y_scale": 1.0})
+
+
+def add_issue_counts_chart(workbook, worksheet, df, start_row):
+    if df.empty:
+        return
+    chart = workbook.add_chart({"type": "column"})
+    first_data_row = start_row + 2
+    last_data_row = first_data_row + len(df) - 1
+    for name, column_index in [
+        ("Compilation Errors", 11),
+        ("Compile Repairs", 13),
+        ("Students With Timeouts", 14),
+        ("Non-Recursive Penalties", 16),
+    ]:
+        chart.add_series({
+            "name": name,
+            "categories": ["Summary", first_data_row, 0, last_data_row, 0],
+            "values": ["Summary", first_data_row, column_index, last_data_row, column_index],
+        })
+    chart.set_title({"name": "Issue Counts by Question"})
+    worksheet.insert_chart(start_row + 16, 20, chart, {"x_scale": 1.2, "y_scale": 1.0})
+
+
 def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_error_penalty=False):
     """
     Create the final output file final_grades.xlsx
@@ -781,38 +1278,23 @@ def create_excels(grade_folders, folder_weights, penalty: int, slim=True, per_er
     if folder_data:
         # Pass the penalty value down to compute_final_grades
         final_grades_df = compute_final_grades(folder_data, folder_weights, penalty, slim, per_error_penalty)
+        student_details_df = (
+            final_grades_df
+            if not slim
+            else compute_final_grades(folder_data, folder_weights, penalty, slim=False, per_error_penalty=per_error_penalty)
+        )
+        summary_tables = build_summary_tables(final_grades_df, folder_data, folder_weights)
         # Use ExcelWriter with the XlsxWriter engine to enable formatting.
         with pd.ExcelWriter(final_output_excel, engine='xlsxwriter') as writer:
             final_grades_df.to_excel(writer, sheet_name='Sheet1', index=False)
+            student_details_df.to_excel(writer, sheet_name='Student Details', index=False)
             workbook = writer.book
             worksheet = writer.sheets['Sheet1']
+            details_worksheet = writer.sheets['Student Details']
+            format_grades_worksheet(workbook, worksheet, final_grades_df)
+            format_grades_worksheet(workbook, details_worksheet, student_details_df)
 
-            # Set each column width to 20 (adjust this value as needed)
-            for i, col in enumerate(final_grades_df.columns):
-                worksheet.set_column(i, i, 20)
-
-            text_columns = [
-                col for col in final_grades_df.columns
-                if col == ID_COLUMN
-                or col in (COMMENTS_COLUMN, PENALTY_APPLIED_COLUMN)
-                or col.startswith("Wrong_Inputs_")
-                or col.startswith("Grade_Calculation_")
-                or col.startswith("Timeout_Inputs_")
-                or col.startswith("Compilation_Repair_Status_")
-                or col.startswith("Compilation_Repair_Note_")
-            ]
-            write_text_columns(worksheet, final_grades_df, text_columns)
-
-            # Define a header format with a light blue background
-            header_format = workbook.add_format({
-                'bold': True,
-                'bg_color': '#D9E1F2',
-                'border': 1
-            })
-
-            # Apply the header format to the first row
-            for col_num, value in enumerate(final_grades_df.columns.values):
-                worksheet.write(0, col_num, value, header_format)
+            write_summary_dashboard(writer, workbook, summary_tables)
 
         log(f"Created final grades Excel: {final_output_excel} with {len(final_grades_df)} records.", level="success")
     else:
