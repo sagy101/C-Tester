@@ -30,6 +30,7 @@ CODE_BG = "#0f172a"
 CODE_GUTTER_BG = "#111827"
 CODE_FG = "#e5e7eb"
 CODE_SELECTION_BG = "#264f78"
+KEY_RELEASE_EVENT = "<KeyRelease>"
 REVIEW_TREE_STYLE = "Review.Treeview"
 REVIEW_TREE_HEADING_STYLE = f"{REVIEW_TREE_STYLE}.Heading"
 
@@ -438,7 +439,7 @@ class App(ctk.CTk):
         self.penalty_label.pack(side=tk.LEFT, padx=(0,10))
         self.penalty_entry = ctk.CTkEntry(self.penalty_frame, width=60, border_width=1)
         self.penalty_entry.pack(side=tk.LEFT)
-        self.penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty()) 
+        self.penalty_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty()) 
         
         # Add Per-Error Penalty Checkbox with improved spacing
         self.per_error_penalty_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
@@ -471,7 +472,7 @@ class App(ctk.CTk):
         self.test_error_deduction_label.grid(row=1, column=0, padx=(0, 10), pady=3, sticky="w")
         self.test_error_deduction_entry = ctk.CTkEntry(self.test_scoring_frame, width=60, border_width=1)
         self.test_error_deduction_entry.grid(row=1, column=1, padx=(0, 10), pady=3, sticky="w")
-        self.test_error_deduction_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        self.test_error_deduction_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty())
 
         self.compile_repair_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
         self.compile_repair_frame.grid(row=4, column=0, padx=12, pady=6, sticky="ew")
@@ -491,11 +492,11 @@ class App(ctk.CTk):
         ctk.CTkLabel(self.compile_repair_frame, text="Repair penalty:").grid(row=1, column=0, padx=(0, 5), pady=3, sticky="w")
         self.compile_repair_penalty_entry = ctk.CTkEntry(self.compile_repair_frame, width=55, border_width=1)
         self.compile_repair_penalty_entry.grid(row=1, column=1, padx=(0, 10), pady=3, sticky="w")
-        self.compile_repair_penalty_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        self.compile_repair_penalty_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty())
         ctk.CTkLabel(self.compile_repair_frame, text="Max attempts:").grid(row=1, column=2, padx=(0, 5), pady=3, sticky="w")
         self.compile_repair_attempts_entry = ctk.CTkEntry(self.compile_repair_frame, width=45, border_width=1)
         self.compile_repair_attempts_entry.grid(row=1, column=3, padx=(0, 10), pady=3, sticky="w")
-        self.compile_repair_attempts_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        self.compile_repair_attempts_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty())
         ctk.CTkLabel(self.compile_repair_frame, text="Provider:").grid(row=2, column=0, padx=(0, 5), pady=3, sticky="w")
         self.compile_repair_provider_menu = ctk.CTkOptionMenu(
             self.compile_repair_frame,
@@ -928,7 +929,7 @@ class App(ctk.CTk):
             border_width=1
         )
         self.vs_path_entry.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
-        self.vs_path_entry.bind("<KeyRelease>", lambda event: self.mark_vs_path_dirty())
+        self.vs_path_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_vs_path_dirty())
 
         # VS Path Buttons and Status - Row 2
         self.vs_buttons_frame = ctk.CTkFrame(self.vs_path_frame, fg_color="transparent")
@@ -989,7 +990,7 @@ class App(ctk.CTk):
             border_width=1
         )
         self.winrar_path_entry.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
-        self.winrar_path_entry.bind("<KeyRelease>", lambda event: self.mark_winrar_path_dirty())
+        self.winrar_path_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_winrar_path_dirty())
 
         # WinRAR Path Buttons and Status - Row 2
         self.winrar_buttons_frame = ctk.CTkFrame(self.winrar_path_frame, fg_color="transparent")
@@ -1702,12 +1703,12 @@ class App(ctk.CTk):
         q_entry = ctk.CTkEntry(self.config_table_frame, border_width=1)
         q_entry.grid(row=row_index, column=0, padx=5, pady=3, sticky="ew")
         q_entry.insert(0, question_name)
-        q_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        q_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty())
 
         w_entry = ctk.CTkEntry(self.config_table_frame, width=80, border_width=1)  # Fixed width for weight
         w_entry.grid(row=row_index, column=1, padx=5, pady=3, sticky="ew")
         w_entry.insert(0, str(weight))
-        w_entry.bind("<KeyRelease>", lambda event: self.mark_config_dirty())
+        w_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty())
 
         self.config_rows.append([q_entry, w_entry])
 
@@ -2736,71 +2737,20 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         for tab_name in ["Code", "Reviewed Code", "Notes", "Review", "Failures", "Prompt"]:
             self.detail_tabview.add(tab_name)
 
-        code_tab = self.detail_tabview.tab("Code")
-        code_tab.grid_columnconfigure(1, weight=1)
-        code_tab.grid_rowconfigure(0, weight=1)
         code_font = (CODE_FONT_FAMILY, 12)
-        self.code_line_numbers = tk.Text(
-            code_tab,
-            width=5,
-            padx=4,
-            pady=6,
-            wrap="none",
-            state="disabled",
-            takefocus=0,
-            cursor="arrow",
-            font=code_font,
-            bg=CODE_GUTTER_BG,
-            fg="#94a3b8",
-            relief="flat",
-            borderwidth=0,
+        self.code_line_numbers, self.code_textbox, self.code_scrollbar, self.code_x_scrollbar = self._create_code_view(
+            self.detail_tabview.tab("Code"),
+            code_font,
         )
-        self.code_line_numbers.grid(row=0, column=0, sticky="nsw", padx=(8, 0), pady=8)
-        self.code_line_numbers.bind("<Button-1>", lambda _event: "break")
-        self.code_line_numbers.bind("<B1-Motion>", lambda _event: "break")
-        self.code_line_numbers.bind("<Control-c>", lambda _event: "break")
-        self.code_line_numbers.bind("<Control-C>", lambda _event: "break")
+        self._configure_code_tags(self.code_textbox)
 
-        self.code_textbox = tk.Text(
-            code_tab,
-            wrap="none",
-            padx=4,
-            pady=6,
-            font=code_font,
-            bg=CODE_BG,
-            fg=CODE_FG,
-            insertbackground=CODE_FG,
-            selectbackground=CODE_SELECTION_BG,
-            selectforeground="#ffffff",
-            relief="flat",
-            borderwidth=0,
-            undo=False,
-            tabs=("4c",),
-        )
-        self.code_textbox.grid(row=0, column=1, sticky="nsew", pady=8)
-        self.code_scrollbar = ttk.Scrollbar(code_tab, orient="vertical", command=self._scroll_code_view)
-        self.code_scrollbar.grid(row=0, column=2, sticky="ns", padx=(0, 8), pady=8)
-        self.code_x_scrollbar = ttk.Scrollbar(code_tab, orient="horizontal", command=self.code_textbox.xview)
-        self.code_x_scrollbar.grid(row=1, column=1, sticky="ew", padx=(0, 0), pady=(0, 8))
-        self.code_textbox.configure(yscrollcommand=self._sync_code_line_numbers, xscrollcommand=self.code_x_scrollbar.set)
-        self._configure_code_tags()
-
-        self.reviewed_code_textbox = tk.Text(
-            self.detail_tabview.tab("Reviewed Code"),
-            wrap="none",
-            padx=8,
-            pady=8,
-            font=code_font,
-            bg=CODE_BG,
-            fg=CODE_FG,
-            insertbackground=CODE_FG,
-            selectbackground=CODE_SELECTION_BG,
-            selectforeground="#ffffff",
-            relief="flat",
-            borderwidth=0,
-            tabs=("4c",),
-        )
-        self.reviewed_code_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        (
+            self.reviewed_code_line_numbers,
+            self.reviewed_code_textbox,
+            self.reviewed_code_scrollbar,
+            self.reviewed_code_x_scrollbar,
+        ) = self._create_code_view(self.detail_tabview.tab("Reviewed Code"), code_font)
+        self._configure_code_tags(self.reviewed_code_textbox)
         self.reviewed_code_textbox.tag_config("review_header", foreground="#93c5fd")
         self.reviewed_code_textbox.tag_config("review_comment", foreground="#fde68a", background="#422006")
 
@@ -2907,6 +2857,72 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
                 text_color=COLORS["secondary"],
             )
             self.review_selected_button.configure(state="normal" if not self.review_running else "disabled")
+
+    def _create_code_view(self, tab, code_font):
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+        line_numbers = tk.Text(
+            tab,
+            width=5,
+            padx=4,
+            pady=6,
+            wrap="none",
+            state="disabled",
+            takefocus=0,
+            cursor="arrow",
+            font=code_font,
+            bg=CODE_GUTTER_BG,
+            fg="#94a3b8",
+            relief="flat",
+            borderwidth=0,
+        )
+        line_numbers.grid(row=0, column=0, sticky="nsw", padx=(8, 0), pady=8)
+        for event_name in ("<Button-1>", "<B1-Motion>", "<Control-c>", "<Control-C>"):
+            line_numbers.bind(event_name, lambda _event: "break")
+
+        code_textbox = tk.Text(
+            tab,
+            wrap="none",
+            padx=4,
+            pady=6,
+            font=code_font,
+            bg=CODE_BG,
+            fg=CODE_FG,
+            insertbackground=CODE_FG,
+            selectbackground=CODE_SELECTION_BG,
+            selectforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            undo=False,
+            tabs=("4c",),
+        )
+        code_textbox.grid(row=0, column=1, sticky="nsew", pady=8)
+        vertical_scrollbar = ttk.Scrollbar(
+            tab,
+            orient="vertical",
+            command=lambda *args: self._scroll_code_view(code_textbox, line_numbers, *args),
+        )
+        vertical_scrollbar.grid(row=0, column=2, sticky="ns", padx=(0, 8), pady=8)
+        horizontal_scrollbar = ttk.Scrollbar(tab, orient="horizontal", command=code_textbox.xview)
+        horizontal_scrollbar.grid(row=1, column=1, sticky="ew", padx=(0, 0), pady=(0, 8))
+        code_textbox.configure(
+            yscrollcommand=lambda first, last: self._sync_code_line_numbers(
+                vertical_scrollbar,
+                line_numbers,
+                first,
+                last,
+            ),
+            xscrollcommand=horizontal_scrollbar.set,
+        )
+        return line_numbers, code_textbox, vertical_scrollbar, horizontal_scrollbar
+
+    @staticmethod
+    def _configure_diff_tags(textbox):
+        textbox.tag_config("diff_header", foreground="#93c5fd")
+        textbox.tag_config("diff_hunk", foreground="#c4b5fd")
+        textbox.tag_config("diff_add", foreground="#bbf7d0", background="#14532d")
+        textbox.tag_config("diff_remove", foreground="#fecaca", background="#7f1d1d")
+        textbox.tag_config("diff_note", foreground="#fde68a")
 
     def reload_cases(self):
         try:
@@ -3142,7 +3158,11 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.code_line_numbers.yview_moveto(0)
         self._highlight_code(case.code_text)
         reviewed_code, review_comment_lines = self._format_reviewed_code(case, saved_response)
+        self._set_text(self.reviewed_code_line_numbers, self._line_numbers(reviewed_code))
         self._set_text(self.reviewed_code_textbox, reviewed_code)
+        self.reviewed_code_textbox.yview_moveto(0)
+        self.reviewed_code_line_numbers.yview_moveto(0)
+        self._highlight_code(reviewed_code, self.reviewed_code_textbox)
         self._tag_reviewed_code(review_comment_lines)
         self._set_text(self.notes_textbox, self._format_notes(case))
         self._set_text(self.failures_textbox, self._format_failures(case))
@@ -3153,6 +3173,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
     def clear_detail(self):
         self._set_text(self.code_line_numbers, "")
+        self._set_text(self.reviewed_code_line_numbers, "")
         for textbox in [self.code_textbox, self.reviewed_code_textbox, self.notes_textbox, self.review_textbox, self.failures_textbox, self.prompt_textbox]:
             self._set_text(textbox, "")
 
@@ -3340,30 +3361,31 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             self.reviewed_code_textbox.tag_add(tag_name, f"{line_number}.0", f"{line_number}.end")
         self.reviewed_code_textbox.configure(state="disabled")
 
-    def _configure_code_tags(self):
-        self.code_textbox.tag_config("keyword", foreground="#60a5fa")
-        self.code_textbox.tag_config("name", foreground=CODE_FG)
-        self.code_textbox.tag_config("comment", foreground="#6ee7b7")
-        self.code_textbox.tag_config("string", foreground="#fca5a5")
-        self.code_textbox.tag_config("number", foreground="#c4b5fd")
+    def _configure_code_tags(self, textbox):
+        textbox.tag_config("keyword", foreground="#60a5fa")
+        textbox.tag_config("name", foreground=CODE_FG)
+        textbox.tag_config("comment", foreground="#6ee7b7")
+        textbox.tag_config("string", foreground="#fca5a5")
+        textbox.tag_config("number", foreground="#c4b5fd")
 
-    def _highlight_code(self, code: str):
+    def _highlight_code(self, code: str, textbox=None):
+        textbox = textbox or self.code_textbox
         if lex and CLexer:
-            self._highlight_code_with_pygments(code)
+            self._highlight_code_with_pygments(code, textbox)
             return
         keywords = {"int", "return", "if", "else", "for", "while", "do", "void", "float", "double", "char", "include", "define"}
         lines = code.splitlines()
         for idx, line in enumerate(lines, start=1):
             comment_col = line.find("//")
             if comment_col >= 0:
-                self.code_textbox.tag_add("comment", f"{idx}.{comment_col}", f"{idx}.end")
+                textbox.tag_add("comment", f"{idx}.{comment_col}", f"{idx}.end")
             for match in re.finditer(r'"[^"]*"', line):
-                self.code_textbox.tag_add("string", f"{idx}.{match.start()}", f"{idx}.{match.end()}")
+                textbox.tag_add("string", f"{idx}.{match.start()}", f"{idx}.{match.end()}")
             for match in re.finditer(r"\b[A-Za-z_]\w*\b", line):
                 if match.group(0) in keywords:
-                    self.code_textbox.tag_add("keyword", f"{idx}.{match.start()}", f"{idx}.{match.end()}")
+                    textbox.tag_add("keyword", f"{idx}.{match.start()}", f"{idx}.{match.end()}")
 
-    def _highlight_code_with_pygments(self, code: str):
+    def _highlight_code_with_pygments(self, code: str, textbox):
         line = 1
         column = 0
         for token_type, value in lex(code, CLexer()):
@@ -3376,7 +3398,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
                     column += 1
             tag = self._pygments_tag(token_type)
             if tag and value:
-                self.code_textbox.tag_add(tag, f"{start_line}.{start_column}", f"{line}.{column}")
+                textbox.tag_add(tag, f"{start_line}.{start_column}", f"{line}.{column}")
 
     @staticmethod
     def _pygments_tag(token_type):
@@ -3402,13 +3424,15 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
     def _line_numbers(code: str) -> str:
         return "\n".join(f"{index:>3}:" for index, _line in enumerate(code.splitlines(), start=1))
 
-    def _scroll_code_view(self, *args):
-        self.code_textbox.yview(*args)
-        self.code_line_numbers.yview(*args)
+    @staticmethod
+    def _scroll_code_view(textbox, line_numbers, *args):
+        textbox.yview(*args)
+        line_numbers.yview(*args)
 
-    def _sync_code_line_numbers(self, first, last):
-        self.code_scrollbar.set(first, last)
-        self.code_line_numbers.yview_moveto(first)
+    @staticmethod
+    def _sync_code_line_numbers(scrollbar, line_numbers, first, last):
+        scrollbar.set(first, last)
+        line_numbers.yview_moveto(first)
 
     @staticmethod
     def _shorten(text: str, limit: int) -> str:
@@ -3458,12 +3482,13 @@ class ReviewLabWindow(ctk.CTkToplevel):
         ctk.CTkButton(controls, text="Run All Grading Inputs", command=self.run_all_inputs).grid(row=0, column=2, padx=8, pady=8)
         ctk.CTkButton(controls, text="Apply Suggested Fix", command=self.apply_suggested_fix).grid(row=0, column=3, padx=8, pady=8)
         ctk.CTkButton(controls, text="Reset Code", command=self.reset_code).grid(row=0, column=4, padx=8, pady=8)
+        ctk.CTkButton(controls, text="Re-highlight Code", command=self.refresh_code_view).grid(row=0, column=5, padx=8, pady=8)
         ctk.CTkLabel(
             controls,
             text="Custom input: one test case per line, matching input.txt format.",
             text_color="gray",
             anchor="w",
-        ).grid(row=1, column=1, columnspan=4, padx=8, pady=(0, 8), sticky="ew")
+        ).grid(row=1, column=1, columnspan=5, padx=8, pady=(0, 8), sticky="ew")
 
         body = ctk.CTkFrame(self, corner_radius=8)
         body.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
@@ -3475,33 +3500,28 @@ class ReviewLabWindow(ctk.CTkToplevel):
         ctk.CTkLabel(body, text="Run Results / Diff / Fix Notes", font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=1, padx=8, pady=(8, 0), sticky="w"
         )
-        self.code_textbox = tk.Text(
-            body,
-            wrap="none",
-            padx=8,
-            pady=8,
-            font=(CODE_FONT_FAMILY, 12),
-            bg=CODE_BG,
-            fg=CODE_FG,
-            insertbackground=CODE_FG,
-            selectbackground=CODE_SELECTION_BG,
-            selectforeground="#ffffff",
-            relief="flat",
-            tabs=("4c",),
+        self.code_frame = ctk.CTkFrame(body, fg_color="transparent")
+        self.code_frame.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+        self.code_line_numbers, self.code_textbox, self.code_scrollbar, self.code_x_scrollbar = review_window._create_code_view(
+            self.code_frame,
+            (CODE_FONT_FAMILY, 12),
         )
-        self.code_textbox.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+        review_window._configure_code_tags(self.code_textbox)
         self.code_textbox.insert("1.0", case.code_text)
+        self.refresh_code_view()
+        self.code_textbox.bind(KEY_RELEASE_EVENT, lambda _event: self.refresh_code_view(debounce=True))
 
         self.result_tabs = ctk.CTkTabview(body, corner_radius=6)
         self.result_tabs.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
-        for tab_name in ["Compare", "Diff", "Fix Notes"]:
+        for tab_name in ["Compare", "Code Diff", "Output Diff", "Fix Notes"]:
             self.result_tabs.add(tab_name)
         self._build_compare_tab()
-        self.diff_textbox = ctk.CTkTextbox(self.result_tabs.tab("Diff"), wrap="none")
-        self.diff_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.code_diff_textbox = self._create_diff_textbox(self.result_tabs.tab("Code Diff"))
+        self.output_diff_textbox = self._create_diff_textbox(self.result_tabs.tab("Output Diff"))
         self.fix_notes_textbox = ctk.CTkTextbox(self.result_tabs.tab("Fix Notes"), wrap="word")
         self.fix_notes_textbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self._set_text(self.diff_textbox, self._unified_diff(self.original_code, self.current_code()))
+        self.show_code_diff(self.original_code, self.current_code())
+        self._set_styled_diff(self.output_diff_textbox, "(run inputs to see output diffs)")
         self._set_text(self.fix_notes_textbox, "No LLM fix has been applied yet.")
 
     def _build_compare_tab(self):
@@ -3515,6 +3535,32 @@ class ReviewLabWindow(ctk.CTkToplevel):
         self.actual_textbox = ctk.CTkTextbox(tab, wrap="word")
         self.actual_textbox.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
 
+    def _create_diff_textbox(self, tab):
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+        textbox = tk.Text(
+            tab,
+            wrap="none",
+            padx=8,
+            pady=8,
+            font=(CODE_FONT_FAMILY, 11),
+            bg=CODE_BG,
+            fg=CODE_FG,
+            insertbackground=CODE_FG,
+            selectbackground=CODE_SELECTION_BG,
+            selectforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+        )
+        textbox.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        vertical_scrollbar = ttk.Scrollbar(tab, orient="vertical", command=textbox.yview)
+        vertical_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=(8, 0))
+        horizontal_scrollbar = ttk.Scrollbar(tab, orient="horizontal", command=textbox.xview)
+        horizontal_scrollbar.grid(row=1, column=0, sticky="ew", padx=(8, 0), pady=(0, 8))
+        textbox.configure(yscrollcommand=vertical_scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
+        self.review_window._configure_diff_tags(textbox)
+        return textbox
+
     def show_on_top(self):
         self.deiconify()
         self.lift()
@@ -3523,10 +3569,26 @@ class ReviewLabWindow(ctk.CTkToplevel):
     def current_code(self) -> str:
         return self.code_textbox.get("1.0", tk.END).rstrip()
 
+    def refresh_code_view(self, debounce=False):
+        if debounce:
+            if getattr(self, "_refresh_code_after_id", None):
+                self.after_cancel(self._refresh_code_after_id)
+            self._refresh_code_after_id = self.after(250, self.refresh_code_view)
+            return
+        self._set_text(self.code_line_numbers, self.review_window._line_numbers(self.current_code()))
+        self._clear_code_tags(self.code_textbox)
+        self.review_window._highlight_code(self.current_code(), self.code_textbox)
+        self.show_code_diff(self.original_code, self.current_code())
+
+    @staticmethod
+    def _clear_code_tags(textbox):
+        for tag_name in ("keyword", "name", "comment", "string", "number"):
+            textbox.tag_remove(tag_name, "1.0", tk.END)
+
     def reset_code(self):
         self.code_textbox.delete("1.0", tk.END)
         self.code_textbox.insert("1.0", self.original_code)
-        self._set_text(self.diff_textbox, self._unified_diff(self.original_code, self.current_code()))
+        self.refresh_code_view()
         self.status_var.set("Code reset to the reviewed source.")
 
     def _default_input_text(self) -> str:
@@ -3606,7 +3668,8 @@ class ReviewLabWindow(ctk.CTkToplevel):
         failed = [result for result in results if not result.get("passed")]
         self._set_text(self.expected_textbox, self._format_side_output(results, "expected"))
         self._set_text(self.actual_textbox, self._format_side_output(results, "actual"))
-        self._set_text(self.diff_textbox, self._format_output_diff(results) or self._unified_diff(self.original_code, self.current_code()))
+        self._set_styled_diff(self.output_diff_textbox, self._format_output_diff(results) or "(all compared outputs matched)")
+        self.show_code_diff(self.original_code, self.current_code())
         if failed:
             self.status_var.set(f"Ran {label}: {len(failed)}/{len(results)} input(s) still fail. You can Apply Suggested Fix again.")
         else:
@@ -3657,6 +3720,35 @@ class ReviewLabWindow(ctk.CTkToplevel):
             )
         ) or "(no code changes)"
 
+    def show_code_diff(self, before: str, after: str):
+        self._set_styled_diff(self.code_diff_textbox, self._unified_diff(before, after))
+
+    @staticmethod
+    def _set_styled_diff(textbox, diff_text: str):
+        textbox.configure(state="normal")
+        textbox.delete("1.0", tk.END)
+        for line in (diff_text or "").splitlines() or [""]:
+            tag = ReviewLabWindow._diff_tag_for_line(line)
+            start = textbox.index(tk.END)
+            textbox.insert(tk.END, line + "\n")
+            if tag:
+                textbox.tag_add(tag, start, textbox.index(f"{start} lineend"))
+        textbox.configure(state="disabled")
+
+    @staticmethod
+    def _diff_tag_for_line(line: str) -> str:
+        if line.startswith(("---", "+++")):
+            return "diff_header"
+        if line.startswith("@@"):
+            return "diff_hunk"
+        if line.startswith("+"):
+            return "diff_add"
+        if line.startswith("-"):
+            return "diff_remove"
+        if line.startswith("#"):
+            return "diff_note"
+        return ""
+
     def apply_suggested_fix(self):
         try:
             provider = self.review_window.make_provider()
@@ -3705,7 +3797,8 @@ class ReviewLabWindow(ctk.CTkToplevel):
         self.last_fix_response = response
         self.code_textbox.delete("1.0", tk.END)
         self.code_textbox.insert("1.0", fixed_code)
-        self._set_text(self.diff_textbox, self._unified_diff(before_code, fixed_code))
+        self.refresh_code_view()
+        self.show_code_diff(before_code, fixed_code)
         self._set_text(self.fix_notes_textbox, self._format_fix_notes(response))
         self.status_var.set("LLM fix inserted into the lab. Running all grading inputs...")
         self.run_all_inputs()

@@ -394,7 +394,7 @@ Suitable for scripting or users preferring the command line. Uses the static con
     *   The LLM returns JSON with a short summary, whether the deduction looks plausible, grouped root causes, concrete failed-input examples, inline line comments, fix guidance to reach full score, and a risk note.
     *   Shows the code in a readable monospace view with a separate non-copying line-number gutter, failed inputs, expected/actual outputs, and the LLM explanation with inline line comments.
     *   Provides a **Reviewed Code** tab that inserts clearly labeled `REVIEWER COMMENT` lines beside relevant code without confusing them with the student's own comments.
-    *   Provides a **Review Lab** for one selected row: edit a scratch copy of the student's code, run custom inputs or all grading inputs against both `original_sol.c` and the current code, inspect side-by-side outputs and unified diffs, and ask the LLM to apply the reviewer guidance. The lab does not overwrite the original student file.
+    *   Provides a **Review Lab** for one selected row: edit a scratch copy of the student's code in the same highlighted code renderer, run custom inputs or all grading inputs against both `original_sol.c` and the current code, inspect side-by-side outputs and styled unified diffs, and ask the LLM to apply the reviewer guidance. The lab does not overwrite the original student file.
     *   Saves each review under `Q*/review/ID.json`; reviewed rows are locked until those generated review files are cleared.
 
 ### Advanced LLM Features
