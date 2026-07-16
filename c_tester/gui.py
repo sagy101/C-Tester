@@ -1,4 +1,5 @@
 import importlib.util
+import queue
 import subprocess
 import sys
 import tkinter as tk
@@ -148,6 +149,7 @@ from .checker_assistant import (
     get_google_api_key,
     list_gemini_models,
     parse_assignment_context,
+    refine_checker,
     run_checker_tests,
     select_audit_cases,
     suggest_checker,
@@ -159,7 +161,21 @@ from .post_scoring_review import (
     review_cases_with_llm,
     default_grading_policy,
 )
-from .semantic_grading import DEFAULT_CHECKER_CONFIG_PATH, load_checker_config, save_checker_config, compare_output
+from .semantic_grading import (
+    DEFAULT_CHECKER_CONFIG_PATH,
+    checker_config_errors,
+    compare_output,
+    load_checker_config,
+    save_checker_config,
+)
+from .checker_calibration import (
+    anonymized_student_hashes,
+    append_checker_version,
+    candidate_preserves_audited_cases,
+    checker_config_hash,
+    editable_checker_config,
+    validate_candidate_against_rows,
+)
 from .structural_analysis import structural_requirements_errors
 from .clear_utils import (
     clear_grades,
@@ -3880,6 +3896,11 @@ class ReviewLabWindow(ctk.CTkToplevel):
 class CheckerManagerWindow(ctk.CTkToplevel):
     def __init__(self, parent: App):
         super().__init__(parent)
+        self._ui_queue = queue.Queue()
+        self._closing = False
+        self._background_running = False
+        self._worker_snapshot = {}
+        super().after(50, self._drain_ui_queue)
         self.parent = parent
         self.title("Checker Manager")
         self.geometry("1100x780")
@@ -3891,6 +3912,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
         self.checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
         self.latest_checker_test_status = {}
+        self.latest_checker_test_hash = {}
         self.assignment_path_var = tk.StringVar(value="")
         self.provider_var = tk.StringVar(value="Gemini")
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
@@ -3898,7 +3920,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.audit_size_var = tk.StringVar(value="15")
         self.question_var = tk.StringVar(value=parent.gui_questions[0] if parent.gui_questions else "Q1")
 
-        top = ctk.CTkFrame(self, corner_radius=8)
+        top = self.checker_setup_frame = ctk.CTkFrame(self, corner_radius=8)
         top.grid(row=0, column=0, padx=12, pady=12, sticky="ew")
         top.grid_columnconfigure(1, weight=1)
 
@@ -3946,7 +3968,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         )
         self.copy_gemini_setup_button.grid(row=4, column=3, padx=8, pady=(0, 8), sticky="e")
 
-        buttons = ctk.CTkFrame(self, corner_radius=8)
+        buttons = self.checker_actions_frame = ctk.CTkFrame(self, corner_radius=8)
         buttons.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
         for idx in range(5):
             buttons.grid_columnconfigure(idx, weight=1)
@@ -3960,15 +3982,31 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.run_audit_button.grid(row=0, column=3, padx=8, pady=8, sticky="ew")
         self.reload_checker_button = ctk.CTkButton(buttons, text="Reload", command=self.load_question_config)
         self.reload_checker_button.grid(row=0, column=4, padx=8, pady=8, sticky="ew")
-        self.auto_current_button = ctk.CTkButton(buttons, text="Auto Setup Current Question", command=self.auto_setup_current_question)
+        self.auto_current_button = ctk.CTkButton(
+            buttons,
+            text="One-click Calibrate Current Question",
+            command=self.auto_setup_current_question,
+        )
         self.auto_current_button.grid(row=2, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
-        self.auto_all_button = ctk.CTkButton(buttons, text="Auto Setup All Questions", command=self.auto_setup_all_questions)
-        self.auto_all_button.grid(row=2, column=2, columnspan=3, padx=8, pady=(0, 8), sticky="ew")
+        self.auto_all_button = ctk.CTkButton(
+            buttons,
+            text="One-click Calibrate All Questions",
+            command=self.auto_setup_all_questions,
+        )
+        self.auto_all_button.grid(row=2, column=2, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+        self.rollback_checker_button = ctk.CTkButton(
+            buttons,
+            text="Rollback Version",
+            command=self.rollback_current_checker,
+        )
+        self.rollback_checker_button.grid(row=2, column=4, padx=8, pady=(0, 8), sticky="ew")
         ctk.CTkLabel(
             buttons,
             text=(
                 "Recommended flow: Suggest, review/edit JSON, Test Draft, Save Checker, run grading, then Run Audit. "
-                "Auto Setup does Suggest -> Test Draft -> Save, and runs Audit only when grade/Excel outputs already exist. "
+                "One-click calibration does Suggest -> deterministic mutation tests -> Save -> Grade -> up to 3 "
+                "stratified Audit/Improve rounds with cumulative no-regression gates; it may regrade every student "
+                "and make up to 45 audit LLM calls plus suggestions per question at the default sample size. "
                 "The assignment file is optional LLM context, not an audit folder."
             ),
             text_color="gray",
@@ -3977,7 +4015,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             wraplength=950,
         ).grid(row=1, column=0, columnspan=5, padx=8, pady=(0, 8), sticky="ew")
 
-        activity_frame = ctk.CTkFrame(self, corner_radius=8)
+        activity_frame = self.checker_activity_frame = ctk.CTkFrame(self, corner_radius=8)
         activity_frame.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
         activity_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(activity_frame, text="LLM activity:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=8, sticky="w")
@@ -3986,6 +4024,15 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.llm_activity_progress = ctk.CTkProgressBar(activity_frame, mode="indeterminate", height=8)
         self.llm_activity_progress.grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
         self.llm_activity_progress.set(0)
+        self.llm_activity_progress.grid_remove()
+        self.calibration_progress_label = ctk.CTkLabel(
+            activity_frame,
+            text="Calibration: idle",
+            anchor="w",
+            justify="left",
+            text_color="gray",
+        )
+        self.calibration_progress_label.grid(row=2, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
         self.llm_activity_running = False
         self.llm_activity_started_at = None
         self.llm_activity_step = "Idle"
@@ -3994,7 +4041,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.checker_state_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
         self.checker_state_frame.grid_columnconfigure(0, weight=1)
 
-        self.tabview = ctk.CTkTabview(self, corner_radius=8)
+        self.tabview = ctk.CTkTabview(self, corner_radius=8, command=self.on_checker_tab_changed)
         self.tabview.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="nsew")
         for tab_name in ["Configure", "Test Results", "Audit", "Prompt / Response"]:
             self.tabview.add(tab_name)
@@ -4026,6 +4073,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.test_table_frame.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
         self.test_table_frame.grid_columnconfigure(4, weight=1)
         self.test_row_index = 0
+        ctk.CTkLabel(
+            self.test_table_frame,
+            text="No draft tests have run yet. Click Test Draft, or use one-click calibration.",
+            text_color="gray",
+            anchor="w",
+        ).grid(row=0, column=0, padx=8, pady=8, sticky="w")
 
         audit_tab = self.tabview.tab("Audit")
         audit_tab.grid_columnconfigure(0, weight=1)
@@ -4084,8 +4137,49 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.after(250, lambda: self.attributes("-topmost", False))
 
     def close_window(self):
+        self._closing = True
         self.parent.checker_manager_window = None
         self.destroy()
+
+    def on_checker_tab_changed(self):
+        compact = self.tabview.get() == "Test Results"
+        for frame in [
+            self.checker_setup_frame,
+            self.checker_actions_frame,
+            self.checker_activity_frame,
+            self.checker_state_frame,
+        ]:
+            if compact:
+                frame.grid_remove()
+            else:
+                frame.grid()
+
+    def after(self, ms, func=None, *args):
+        if (
+            func is not None
+            and ms == 0
+            and hasattr(self, "_ui_queue")
+            and threading.current_thread() is not threading.main_thread()
+        ):
+            self._ui_queue.put(lambda: func(*args))
+            return None
+        return super().after(ms, func, *args)
+
+    def _drain_ui_queue(self):
+        if self._closing or not self.winfo_exists():
+            return
+        try:
+            while True:
+                try:
+                    callback = self._ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                callback()
+        except Exception as exc:
+            log(f"Checker Manager UI callback failed: {exc}", "error")
+        finally:
+            if not self._closing and self.winfo_exists():
+                super().after(50, self._drain_ui_queue)
 
     @staticmethod
     def gemini_setup_command():
@@ -4208,6 +4302,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             return f"{question}: audited", COLORS["secondary"]
         if audit_status == "partial":
             return f"{question}: audit partial", COLORS["warning"]
+        if audit_status == "uncertain":
+            return f"{question}: audit uncertain", COLORS["warning"]
         if audit_status in {"flagged", "error"}:
             return f"{question}: audit {audit_status}", COLORS["danger"]
         if test_status == "passed":
@@ -4226,6 +4322,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             return f"{question}: audit passed, checker saved ({checker_name})", COLORS["secondary"]
         if audit_status == "partial":
             return f"{question}: audit partial; some LLM reviews errored but none flagged ({checker_name})", COLORS["warning"]
+        if audit_status == "uncertain":
+            return f"{question}: audit uncertain; checker was not changed from incomplete evidence ({checker_name})", COLORS["warning"]
         if audit_status in {"flagged", "error"}:
             return f"{question}: audit {audit_status}; review checker before trusting scores ({checker_name})", COLORS["danger"]
         if test_status == "passed":
@@ -4245,13 +4343,22 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         existing_config = self.checker_config.get("questions", {}).get(question, {})
         if isinstance(existing_config, dict):
             existing_metadata = existing_config.get("metadata", {})
-        saved_config = dict(question_config)
-        saved_config["metadata"] = {
-            **existing_metadata,
-            "saved": True,
-            "test_status": test_status,
-            "audit_status": "not_run",
-        }
+        saved_config = append_checker_version(
+            existing_config,
+            question_config,
+            0,
+            "promoted",
+            f"Saved after deterministic checker tests: {test_status}.",
+        )
+        saved_config.setdefault("metadata", {}).update(
+            {
+                **existing_metadata,
+                **saved_config.get("metadata", {}),
+                "saved": True,
+                "test_status": test_status,
+                "audit_status": "not_run",
+            }
+        )
         self.checker_config.setdefault("questions", {})[question] = saved_config
         save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
         self.after(0, self.refresh_checker_status_strip)
@@ -4275,13 +4382,23 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         if checker_name not in available_checker_templates():
             messagebox.showerror("Unknown Checker", f"Checker '{checker_name}' is not available.")
             return
+        contract_errors = checker_config_errors(question_config)
+        if contract_errors:
+            messagebox.showerror("Invalid Checker Contract", "\n".join(contract_errors))
+            self.set_status("Checker contract needs correction before it can be saved.")
+            return
         structural_errors = structural_requirements_errors(question_config)
         if structural_errors:
             messagebox.showerror("Structural Requirement Needs Input", "\n".join(structural_errors))
             self.set_status("Structural requirement needs a deduction before saving.")
             return
         question = self.question_var.get()
-        test_status = self.latest_checker_test_status.get(question, "not_run")
+        current_hash = checker_config_hash(question_config)
+        test_status = (
+            self.latest_checker_test_status.get(question, "not_run")
+            if self.latest_checker_test_hash.get(question) == current_hash
+            else "not_run"
+        )
         self.mark_checker_saved(question, question_config, test_status=test_status)
         next_step = "Run grading, then Run Audit." if test_status == "passed" else "Run Test Draft, then grading/audit."
         self.set_status(f"Saved checker for {question}. Next: {next_step}")
@@ -4302,7 +4419,28 @@ class CheckerManagerWindow(ctk.CTkToplevel):
     def auto_setup_all_questions(self):
         self.run_background("Auto-setting checkers for all questions...", self._auto_setup_all_worker, "Preparing auto setup for all questions")
 
+    def rollback_current_checker(self):
+        self.run_background(
+            "Rolling back checker and regrading...",
+            self._rollback_current_checker_worker,
+            "Restoring previous checker version",
+        )
+
     def run_background(self, status, worker, activity_message=None):
+        if self._background_running:
+            self.set_status("Another Checker Manager action is already running.")
+            return
+        self._background_running = True
+        self._worker_snapshot = {
+            "question": self.question_var.get(),
+            "provider": self.provider_var.get(),
+            "model": self.gemini_model_var.get(),
+            "assignment_path": self.assignment_path_var.get().strip(),
+            "audit_size": self.audit_size_var.get().strip(),
+            "config_text": self.config_textbox.get("1.0", tk.END).strip(),
+            "slim_output": self.parent.slim_output_var.get(),
+        }
+        self.set_checker_actions_enabled(False)
         self.set_status(status)
         if activity_message:
             self.start_llm_activity(activity_message)
@@ -4311,21 +4449,55 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             try:
                 worker()
             finally:
-                if activity_message:
-                    self.after(0, self.stop_llm_activity)
+                self.after(0, lambda: self.finish_background_action(activity_message))
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def finish_background_action(self, activity_message=None):
+        if activity_message:
+            self.stop_llm_activity()
+        self._background_running = False
+        self._worker_snapshot = {}
+        self.set_checker_actions_enabled(True)
+        self.update_gemini_key_status()
+
+    def set_checker_actions_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for button in [
+            self.suggest_checker_button,
+            self.test_checker_button,
+            self.save_checker_button,
+            self.run_audit_button,
+            self.reload_checker_button,
+            self.auto_current_button,
+            self.auto_all_button,
+            self.rollback_checker_button,
+        ]:
+            button.configure(state=state)
+
+    def worker_value(self, key, getter):
+        return self._worker_snapshot[key] if key in self._worker_snapshot else getter()
+
+    def slim_output_enabled(self):
+        return self.worker_value("slim_output", self.parent.slim_output_var.get)
 
     def start_llm_activity(self, message):
         self.llm_activity_running = True
         self.llm_activity_started_at = time.monotonic()
         self.llm_activity_step = message
+        self.llm_activity_progress.grid()
         self.llm_activity_progress.start()
         self.update_llm_activity_label()
 
     def set_llm_activity_step(self, message):
         self.llm_activity_step = message
         self.update_llm_activity_label()
+
+    def set_calibration_progress(self, message, color=None):
+        options = {"text": f"Calibration: {message}"}
+        if color:
+            options["text_color"] = color
+        self.calibration_progress_label.configure(**options)
 
     def update_llm_activity_label(self):
         if not self.llm_activity_running:
@@ -4341,15 +4513,17 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.llm_activity_running = False
         self.llm_activity_progress.stop()
         self.llm_activity_progress.set(0)
+        self.llm_activity_progress.grid_remove()
         self.llm_activity_label.configure(text=f"Done in {elapsed}s")
 
     def _suggest_with_llm_worker(self):
         try:
-            question = self.question_var.get()
+            question = self.worker_value("question", self.question_var.get)
             self.after(0, lambda: self.set_llm_activity_step("Compiling reference solution and collecting examples"))
             original_code, inputs, expected_outputs = self.collect_question_context(question)
             self.after(0, lambda: self.set_llm_activity_step("Parsing assignment PDF/DOCX text and images"))
-            assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
+            assignment_path = self.worker_value("assignment_path", lambda: self.assignment_path_var.get().strip())
+            assignment_context = parse_assignment_context(assignment_path or None)
             focused_context = assignment_context_for_question(assignment_context, question)
             image_count = len(focused_context.images)
             self.after(0, lambda: self.set_llm_activity_step(f"Building prompt with {image_count} assignment image(s)"))
@@ -4379,30 +4553,32 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
     def _test_checker_worker(self):
         try:
-            question_config = json.loads(self.config_textbox.get("1.0", tk.END).strip())
-            question = self.question_var.get()
+            config_text = self.worker_value("config_text", lambda: self.config_textbox.get("1.0", tk.END).strip())
+            question_config = json.loads(config_text)
+            question = self.worker_value("question", self.question_var.get)
             _, _inputs, expected_outputs = self.collect_question_context(question)
             rows = run_checker_tests(question_config, expected_outputs)
             tests_ok, warnings = self.evaluate_checker_test_rows(rows)
             self.latest_checker_test_status[question] = "passed" if tests_ok else "failed"
-            if question in self.checker_config.get("questions", {}):
-                self.update_checker_metadata(
-                    question,
-                    test_status=self.latest_checker_test_status[question],
-                    audit_status="not_run",
-                    test_warnings=warnings,
-                )
+            self.latest_checker_test_hash[question] = checker_config_hash(question_config)
             self.after(0, lambda: self.show_test_rows(rows))
             status = "passed" if tests_ok else "needs review"
             self.after(0, lambda: self.set_status(f"Checker test {status}: {len(rows)} rows"))
         except Exception as exc:
-            self.after(0, lambda captured_exc=exc: self.show_error("Checker Test Failed", captured_exc))
+            self.after(
+                0,
+                lambda captured_exc=exc: (
+                    self.show_test_error(str(captured_exc)),
+                    self.show_error("Checker Test Failed", captured_exc),
+                ),
+            )
 
     def _run_audit_worker(self):
         try:
             provider = self.make_provider()
             self.after(0, lambda: self.set_llm_activity_step("Parsing assignment context for audit"))
-            assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
+            assignment_path = self.worker_value("assignment_path", lambda: self.assignment_path_var.get().strip())
+            assignment_context = parse_assignment_context(assignment_path or None)
             self.ensure_grade_outputs_for_audit(self.parent.gui_questions)
             self.after(0, lambda: self.set_llm_activity_step("Selecting representative graded students"))
             cases = select_audit_cases(self.parent.gui_questions, max_cases=self.get_audit_size())
@@ -4441,11 +4617,17 @@ class CheckerManagerWindow(ctk.CTkToplevel):
     def _auto_setup_current_worker(self):
         try:
             provider = self.make_provider()
-            assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
-            question = self.question_var.get()
+            assignment_path = self.worker_value("assignment_path", lambda: self.assignment_path_var.get().strip())
+            assignment_context = parse_assignment_context(assignment_path or None)
+            question = self.worker_value("question", self.question_var.get)
             result = self.auto_configure_question(question, provider, assignment_context, show_prompt=True)
-            audit_summary = self.run_optional_audit([question], provider, assignment_context)
-            payload = {"question_results": [self.serializable_auto_result(result)], "audit": audit_summary}
+            calibration = self.run_calibration_rounds([result], provider, assignment_context)
+            audit_summary = calibration.get("overall", {"status": "skipped", "reviewed": 0})
+            payload = {
+                "question_results": [self.serializable_auto_result(result)],
+                "calibration": calibration,
+                "audit": audit_summary,
+            }
             self.after(0, lambda captured_result=result: self.apply_auto_config_result(captured_result))
             self.after(0, lambda captured_payload=payload: self.show_json_result(captured_payload))
             self.after(0, lambda: self.set_status(self.auto_setup_status_message([result], audit_summary)))
@@ -4455,7 +4637,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
     def _auto_setup_all_worker(self):
         try:
             provider = self.make_provider()
-            assignment_context = parse_assignment_context(self.assignment_path_var.get().strip() or None)
+            assignment_path = self.worker_value("assignment_path", lambda: self.assignment_path_var.get().strip())
+            assignment_context = parse_assignment_context(assignment_path or None)
             results = []
             for question in self.parent.gui_questions:
                 self.after(0, lambda current_question=question: self.set_llm_activity_step(f"Auto setup for {current_question}"))
@@ -4464,17 +4647,11 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 except Exception as exc:
                     result = self.failed_auto_config_result(question, exc)
                 results.append(result)
-            try:
-                audit_summary = self.run_optional_audit(self.parent.gui_questions, provider, assignment_context)
-            except Exception as exc:
-                audit_summary = {
-                    "status": "error",
-                    "reason": str(exc),
-                    "reviewed": 0,
-                    "results": [],
-                }
+            calibration = self.run_calibration_rounds(results, provider, assignment_context)
+            audit_summary = calibration.get("overall", {"status": "skipped", "reviewed": 0})
             payload = {
                 "question_results": [self.serializable_auto_result(result) for result in results],
+                "calibration": calibration,
                 "audit": audit_summary,
             }
             first_displayable = next((result for result in results if result["question_config"] or result["test_rows"]), None)
@@ -4484,6 +4661,45 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.after(0, lambda: self.set_status(self.auto_setup_status_message(results, audit_summary)))
         except Exception as exc:
             self.after(0, lambda captured_exc=exc: self.show_error("Auto Setup All Failed", captured_exc))
+
+    def _rollback_current_checker_worker(self):
+        try:
+            question = self.worker_value("question", self.question_var.get)
+            current = self.checker_config.get("questions", {}).get(question, {})
+            metadata = current.get("metadata", {}) if isinstance(current, dict) else {}
+            versions = [
+                version
+                for version in metadata.get("versions", [])
+                if version.get("status") == "promoted" and isinstance(version.get("config"), dict)
+            ]
+            active_hash = metadata.get("active_version")
+            active_version = next((version for version in reversed(versions) if version.get("hash") == active_hash), None)
+            parent_hash = active_version.get("parent_hash") if active_version else None
+            prior = next((version for version in reversed(versions) if version.get("hash") == parent_hash), None)
+            if prior is None:
+                raise RuntimeError("No previous promoted checker version is available.")
+            restored = dict(prior["config"])
+            restored["metadata"] = dict(metadata)
+            restored["metadata"].update(
+                active_version=prior.get("hash", ""),
+                audit_status="not_run",
+                calibration_status="rolled_back",
+                calibration_rollback=True,
+            )
+            self.checker_config["questions"][question] = restored
+            save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+            self.after(0, lambda: self.set_calibration_progress(f"{question}: rolled back; regrading all students"))
+            self.force_grade_outputs()
+            self.after(
+                0,
+                lambda: (
+                    self.load_question_config(),
+                    self.refresh_checker_status_strip(),
+                    self.set_status(f"Rolled back {question} and regenerated grades."),
+                ),
+            )
+        except Exception as exc:
+            self.after(0, lambda captured_exc=exc: self.show_error("Checker Rollback Failed", captured_exc))
 
     def auto_configure_question(self, question, provider, assignment_context, show_prompt=False):
         self.after(0, lambda: self.set_llm_activity_step(f"{question}: compiling reference and collecting examples"))
@@ -4521,10 +4737,14 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             if suggestion.structural_requirements:
                 question_config["structural_requirements"] = suggestion.structural_requirements
             self.after(0, lambda: self.set_llm_activity_step(f"{question}: running deterministic checker tests"))
-            rows = run_checker_tests(question_config, expected_outputs)
-            tests_ok, warnings = self.evaluate_checker_test_rows(rows)
+            configuration_errors = checker_config_errors(question_config)
             structural_errors = structural_requirements_errors(question_config)
+            warnings.extend(configuration_errors)
             warnings.extend(structural_errors)
+            if not configuration_errors:
+                rows = run_checker_tests(question_config, expected_outputs)
+                tests_ok, test_warnings = self.evaluate_checker_test_rows(rows)
+                warnings.extend(test_warnings)
             if tests_ok and not structural_errors:
                 self.mark_checker_saved(question, question_config, test_status="passed")
                 saved = True
@@ -4560,13 +4780,316 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         }
 
     def evaluate_checker_test_rows(self, rows):
-        required_rows = [row for row in rows if row["variant"] in {"exact", "prompted"}]
-        wrong_rows = [row for row in rows if row["variant"] == "wrong"]
-        tests_ok = bool(required_rows) and all(row["passed"] for row in required_rows)
-        warnings = []
-        if any(row["passed"] for row in wrong_rows):
-            warnings.append("One or more synthetic wrong-output rows passed; review manually if this is unexpected.")
+        tests_ok = bool(rows) and all(row.get("test_passed", row.get("passed", False)) for row in rows)
+        warnings = [
+            f"{row.get('variant', 'test')}: {row.get('reason', 'checker test failed')}"
+            for row in rows
+            if not row.get("test_passed", row.get("passed", False))
+        ]
         return tests_ok, warnings
+
+    def run_calibration_rounds(self, setup_results, provider, assignment_context):
+        summaries = []
+        for setup_result in setup_results:
+            if not setup_result.get("saved"):
+                summaries.append(
+                    {
+                        "question": setup_result.get("question", ""),
+                        "status": "skipped",
+                        "reason": "Initial checker was not saved because deterministic tests failed.",
+                        "rounds": [],
+                    }
+                )
+                continue
+            summaries.append(
+                self.calibrate_question(
+                    setup_result["question"],
+                    setup_result,
+                    provider,
+                    assignment_context,
+                )
+            )
+        statuses = [summary.get("status") for summary in summaries]
+        if any(status == "flagged" for status in statuses):
+            overall_status = "flagged"
+        elif any(status == "error" for status in statuses):
+            overall_status = "error"
+        elif summaries and all(status == "passed" for status in statuses):
+            overall_status = "passed"
+        else:
+            overall_status = "partial"
+        overall = {
+            "status": overall_status,
+            "reviewed": sum(summary.get("reviewed", 0) for summary in summaries),
+        }
+        return {"overall": overall, "questions": summaries}
+
+    def calibrate_question(self, question, setup_result, provider, assignment_context):
+        self.after(0, lambda: self.set_calibration_progress(f"{question}: preparing full reference corpus"))
+        original_code, inputs, expected_outputs = self.collect_question_context(question, max_inputs=None)
+        active_config = editable_checker_config(self.checker_config["questions"][question])
+        active_stack = []
+        cumulative_rows = list(setup_result.get("test_rows", []))
+        protected_passed_ids: set[str] = set()
+        sampled_ids: set[str] = set()
+        needs_post_promotion_audit = False
+        round_summaries = []
+        total_reviewed = 0
+        last_status = "flagged"
+
+        for round_number in range(1, 4):
+            self.after(
+                0,
+                lambda current_round=round_number: self.set_calibration_progress(
+                    f"{question}: round {current_round}/3 — grading all students"
+                ),
+            )
+            self.force_grade_outputs()
+            seed = sum(ord(character) for character in question) * 1000 + round_number
+            cases = select_audit_cases(
+                [question],
+                max_cases=self.get_audit_size(),
+                seed=seed,
+                exclude_student_ids=sampled_ids,
+            )
+            if not cases:
+                last_status = "flagged" if needs_post_promotion_audit else ("passed" if round_summaries else "skipped")
+                round_summaries.append(
+                    {
+                        "round": round_number,
+                        "status": last_status,
+                        "reason": (
+                            "No holdout cases remain to audit the newly promoted checker."
+                            if needs_post_promotion_audit
+                            else "No new audit cases remain."
+                        ),
+                    }
+                )
+                break
+
+            sampled_ids.update(case.student_id for case in cases)
+            self.after(0, lambda selected=cases: self.start_audit_display(selected))
+            self.after(
+                0,
+                lambda current_round=round_number, count=len(cases): self.set_calibration_progress(
+                    f"{question}: round {current_round}/3 — auditing 0/{count}"
+                ),
+            )
+            results = audit_cases_with_llm(
+                cases,
+                self.checker_config.get("questions", {}),
+                provider,
+                assignment_context,
+                max_workers=4,
+                progress_callback=lambda result, done, total, current_round=round_number: self.after(
+                    0,
+                    lambda: (
+                        self.add_audit_result(result, done, total),
+                        self.set_calibration_progress(
+                            f"{question}: round {current_round}/3 — auditing {done}/{total}"
+                        ),
+                    ),
+                ),
+            )
+            total_reviewed += len(results)
+            needs_post_promotion_audit = False
+            self.record_audit_results(results, self.audit_overall_status(results))
+            passed_ids = {result.student_id for result in results if result.status == "passed"}
+            protected_passed_ids.update(passed_ids)
+            flagged = [result for result in results if result.status == "flagged"]
+            uncertain = [result for result in results if result.status == "uncertain"]
+            errors = [result for result in results if result.status == "error"]
+            round_summary = {
+                "round": round_number,
+                "sampled": len(results),
+                "passed": len(passed_ids),
+                "flagged": len(flagged),
+                "uncertain": len(uncertain),
+                "errors": len(errors),
+                "sample_hashes": anonymized_student_hashes({result.student_id for result in results}),
+            }
+            round_summaries.append(round_summary)
+
+            if not flagged:
+                if errors and len(errors) == len(results):
+                    last_status = "error"
+                elif uncertain or errors:
+                    last_status = "partial"
+                else:
+                    last_status = "passed"
+                round_summary["status"] = last_status
+                if errors:
+                    round_summary["reason"] = (
+                        f"No checker defect was established; {len(errors)} audit call(s) errored and were not treated as passes."
+                    )
+                elif uncertain:
+                    round_summary["reason"] = "No defects were flagged; uncertain evidence was not used to mutate the checker."
+                else:
+                    round_summary["reason"] = "No checker defects were flagged."
+                break
+
+            self.after(
+                0,
+                lambda current_round=round_number: self.set_calibration_progress(
+                    f"{question}: round {current_round}/3 — proposing a guarded improvement"
+                ),
+            )
+            focused_context = assignment_context_for_question(assignment_context, question)
+            proposal = refine_checker(
+                question,
+                original_code,
+                inputs[:8],
+                expected_outputs[:8],
+                active_config,
+                results,
+                provider,
+                focused_context.text,
+                focused_context.images,
+            )
+            if proposal.status != "supported" or not proposal.checker:
+                round_summary.update(status="rejected", reason="LLM did not produce a supported candidate.")
+                last_status = "flagged"
+                break
+            candidate = {"checker": proposal.checker, "config": proposal.config}
+            if proposal.structural_requirements:
+                candidate["structural_requirements"] = proposal.structural_requirements
+            config_errors = checker_config_errors(candidate)
+            if config_errors:
+                round_summary.update(status="rejected", reason="; ".join(config_errors))
+                last_status = "flagged"
+                self._record_rejected_candidate(question, active_config, candidate, round_number, round_summary["reason"])
+                break
+
+            candidate_rows = run_checker_tests(candidate, expected_outputs, max_cases=len(expected_outputs))
+            candidate_tests_ok, candidate_warnings = self.evaluate_checker_test_rows(candidate_rows)
+            cumulative_ok, cumulative_failures = validate_candidate_against_rows(candidate, cumulative_rows)
+            preserves_passed, changed_ids = candidate_preserves_audited_cases(
+                question,
+                protected_passed_ids,
+                active_config,
+                candidate,
+                expected_outputs,
+            )
+            if not candidate_tests_ok or not cumulative_ok or not preserves_passed:
+                reasons = candidate_warnings + cumulative_failures
+                if changed_ids:
+                    reasons.append(f"changed {len(changed_ids)} previously passed audited student(s)")
+                reason = "; ".join(reasons[:8]) or "candidate failed no-regression gates"
+                round_summary.update(status="rejected", reason=reason)
+                last_status = "flagged"
+                self._record_rejected_candidate(question, active_config, candidate, round_number, reason)
+                break
+
+            active_stack.append(active_config)
+            promoted = append_checker_version(
+                self.checker_config["questions"].get(question, {}),
+                candidate,
+                round_number,
+                "promoted",
+                f"Passed {len(candidate_rows)} mutation tests and preserved {len(protected_passed_ids)} audited students.",
+            )
+            promoted.setdefault("metadata", {}).update(
+                saved=True,
+                test_status="passed",
+                audit_status="not_run",
+                calibration_round=round_number,
+            )
+            self.checker_config["questions"][question] = promoted
+            save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+            active_config = editable_checker_config(promoted)
+            cumulative_rows.extend(candidate_rows)
+            needs_post_promotion_audit = True
+            round_summary.update(
+                status="promoted",
+                reason="Candidate passed deterministic, cumulative, and audited-student no-regression gates.",
+                mutation_tests=len(candidate_rows),
+                protected_audits=len(protected_passed_ids),
+            )
+            self.after(
+                0,
+                lambda current_round=round_number: self.set_calibration_progress(
+                    f"{question}: round {current_round}/3 — promoted; regrading before next audit",
+                    COLORS["secondary"],
+                ),
+            )
+        else:
+            last_status = "flagged"
+
+        if last_status in {"flagged", "error", "partial"} and active_stack:
+            rollback = active_stack[-1]
+            rollback_version = append_checker_version(
+                self.checker_config["questions"].get(question, {}),
+                rollback,
+                len(round_summaries),
+                "promoted",
+                "Automatic rollback after a later calibration round remained flagged.",
+            )
+            rollback_version.setdefault("metadata", {}).update(
+                saved=True,
+                test_status="passed",
+                audit_status="flagged",
+                calibration_rollback=True,
+            )
+            self.checker_config["questions"][question] = rollback_version
+            save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+            self.force_grade_outputs()
+
+        metadata = self.checker_config["questions"][question].setdefault("metadata", {})
+        metadata["calibration_status"] = last_status
+        metadata["calibration_rounds"] = round_summaries
+        metadata["calibration_reviewed"] = total_reviewed
+        save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+        color = COLORS["secondary"] if last_status == "passed" else COLORS["warning"]
+        self.after(
+            0,
+            lambda: (
+                self.set_calibration_progress(
+                    f"{question}: {last_status} after {len(round_summaries)} round(s), {total_reviewed} audits",
+                    color,
+                ),
+                self.refresh_checker_status_strip(),
+            ),
+        )
+        return {
+            "question": question,
+            "status": last_status,
+            "reviewed": total_reviewed,
+            "rounds": round_summaries,
+        }
+
+    def _record_rejected_candidate(self, question, active_config, candidate, round_number, reason):
+        rejected = append_checker_version(
+            self.checker_config["questions"].get(question, {}),
+            candidate,
+            round_number,
+            "rejected",
+            reason,
+        )
+        active_with_metadata = dict(active_config)
+        active_with_metadata["metadata"] = rejected.get("metadata", {})
+        self.checker_config["questions"][question] = active_with_metadata
+        save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
+
+    def force_grade_outputs(self):
+        run_tests(
+            self.parent.gui_questions,
+            progress_callback=lambda *_args: None,
+            scoring_mode=self.parent.gui_test_scoring_mode,
+            deduction_per_error=self.parent.gui_test_error_deduction,
+            llm_compile_repair_enabled=self.parent.gui_llm_compile_repair_enabled,
+            llm_compile_repair_provider=self.parent.make_compile_repair_provider(),
+            llm_compile_repair_penalty=self.parent.gui_llm_compile_repair_penalty,
+            llm_compile_repair_max_attempts=self.parent.gui_llm_compile_repair_max_attempts,
+            vs_path_override=self.parent.gui_vs_path,
+        )
+        create_excels(
+            self.parent.gui_questions,
+            self.parent.gui_weights,
+            self.parent.gui_penalty,
+            slim=self.slim_output_enabled(),
+            per_error_penalty=self.parent.gui_per_error_penalty,
+        )
+        self.after(0, self.parent.update_excel_button_state)
 
     def run_optional_audit(self, questions, provider, assignment_context):
         self.ensure_grade_outputs_for_audit(questions)
@@ -4624,6 +5147,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 audit_status = "passed"
             elif any(result.status == "passed" for result in question_results):
                 audit_status = "partial"
+            elif any(result.status == "uncertain" for result in question_results):
+                audit_status = "uncertain"
             elif any(result.status == "error" for result in question_results):
                 audit_status = "error"
             else:
@@ -4650,6 +5175,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
         run_tests(
             self.parent.gui_questions,
+            progress_callback=lambda *_args: None,
             scoring_mode=self.parent.gui_test_scoring_mode,
             deduction_per_error=self.parent.gui_test_error_deduction,
             llm_compile_repair_enabled=self.parent.gui_llm_compile_repair_enabled,
@@ -4663,7 +5189,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.parent.gui_questions,
             self.parent.gui_weights,
             self.parent.gui_penalty,
-            slim=self.parent.slim_output_var.get(),
+            slim=self.slim_output_enabled(),
             per_error_penalty=self.parent.gui_per_error_penalty,
         )
         self.after(0, self.parent.update_excel_button_state)
@@ -4701,23 +5227,43 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         failed_text = f"; failed: {', '.join(failed)}" if failed else ""
         return f"Auto setup saved {saved_count}/{total} checker(s){failed_text}. Audit: {audit_status}"
 
-    def collect_question_context(self, question):
+    def collect_question_context(self, question, max_inputs=8):
         try:
             original_path = os.path.join(question, "original_sol.c")
             with open(original_path, "r", encoding="utf-8", errors="ignore") as original_file:
                 original_code = original_file.read()
-            inputs = read_inputs_from_file(question)[:8]
+            inputs = read_inputs_from_file(question)
+            if max_inputs is not None:
+                inputs = inputs[:max_inputs]
             setup_visual_studio_environment(self.parent.gui_vs_path)
-            expected_outputs = get_ground_truth(question, inputs)
+            # Checker Manager runs in a GUI worker thread. Supplying a callback
+            # keeps get_ground_truth from creating a terminal tqdm bar, which can
+            # raise OSError(EINVAL) when no valid Windows console handle exists.
+            expected_outputs = get_ground_truth(question, inputs, progress_callback=lambda *_args: None)
+            if not expected_outputs and inputs:
+                raise RuntimeError(
+                    "the reference solution did not compile or produce outputs; "
+                    "check the configured Visual Studio vcvars path"
+                )
             return original_code, inputs, expected_outputs
         except Exception as exc:
             raise RuntimeError(f"{question}: failed to collect reference outputs: {exc}") from exc
 
     def make_provider(self):
-        if self.provider_var.get() == "Gemini":
+        provider_name = (
+            self._worker_snapshot["provider"]
+            if "provider" in self._worker_snapshot
+            else self.provider_var.get()
+        )
+        model_name = (
+            self._worker_snapshot["model"]
+            if "model" in self._worker_snapshot
+            else self.gemini_model_var.get()
+        )
+        if provider_name == "Gemini":
             if not self.has_gemini_api_key():
                 raise ValueError(self.gemini_key_missing_message())
-            return GeminiProvider(model=self.gemini_model_var.get().strip() or None)
+            return GeminiProvider(model=str(model_name).strip() or None)
         return FakeLLMProvider()
 
     def gemini_key_missing_message(self):
@@ -4735,7 +5281,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
     def get_audit_size(self):
         try:
-            return max(1, min(50, int(self.audit_size_var.get().strip())))
+            value = (
+                self._worker_snapshot["audit_size"]
+                if "audit_size" in self._worker_snapshot
+                else self.audit_size_var.get().strip()
+            )
+            return max(1, min(50, int(value)))
         except ValueError:
             return 15
 
@@ -4756,6 +5307,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         else:
             self.set_status(f"Suggested {suggestion.checker}; click Save Checker to apply")
         self.tabview.set("Configure")
+        self.on_checker_tab_changed()
 
     def show_available_checkers(self):
         self.templates_textbox.delete("1.0", tk.END)
@@ -4776,6 +5328,20 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.add_test_row(row)
         self.show_json_result({"test_rows": rows})
         self.tabview.set("Test Results")
+        self.on_checker_tab_changed()
+
+    def show_test_error(self, message):
+        self.clear_test_table()
+        ctk.CTkLabel(
+            self.test_table_frame,
+            text=f"Test Draft could not run:\n{message}",
+            text_color=COLORS["danger"],
+            anchor="w",
+            justify="left",
+            wraplength=900,
+        ).grid(row=0, column=0, columnspan=5, padx=8, pady=8, sticky="ew")
+        self.tabview.set("Test Results")
+        self.on_checker_tab_changed()
 
     def clear_test_table(self):
         for child in self.test_table_frame.winfo_children():
@@ -4795,7 +5361,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.test_row_index = 1
 
     def add_test_row(self, row):
-        passed = bool(row.get("passed"))
+        passed = bool(row.get("test_passed", row.get("passed")))
         status_text = "PASS" if passed else "FAIL"
         status_color = COLORS["secondary"] if passed else COLORS["danger"]
         parsed_values = f"{row.get('expected_canonical')} -> {row.get('actual_canonical')}"
@@ -4824,6 +5390,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.audit_open_excel_button.configure(state="normal" if os.path.exists("final_grades.xlsx") else "disabled")
         self.audit_progress_label.configure(text=f"Queued {len(cases)} audit cases...")
         self.tabview.set("Audit")
+        self.on_checker_tab_changed()
 
     def add_audit_result(self, result, done, total):
         self.audit_progress_label.configure(text=f"Reviewed {done}/{total} audit cases")
@@ -4886,6 +5453,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             return "red: one or more reviews flagged"
         if any(result.status == "error" for result in results):
             return "yellow: one or more reviews errored"
+        if any(result.status == "uncertain" for result in results):
+            return "yellow: one or more reviews were uncertain"
         return "green: all sampled reviews passed"
 
 

@@ -9,6 +9,7 @@ import html
 import json
 import logging
 import os
+import random
 import re
 import urllib.error
 import urllib.request
@@ -17,7 +18,8 @@ from typing import Any, Protocol
 
 import pandas as pd
 
-from .semantic_grading import available_checker_templates, compare_output_with_config
+from .output_contract import ContractConfigError, _extract_field, compile_preset
+from .semantic_grading import available_checker_templates, checker_config_errors, compare_output_with_config
 
 
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
@@ -58,13 +60,13 @@ CHECKER_SUGGESTION_EVAL_CASES = {
         },
         {
             "task_shape": "floating point answer requiring tolerance",
-            "expected_checker": "no_supported_checker",
-            "success_criteria": "No current checker supports numeric tolerance, so require manual configuration.",
+            "expected_checker": "output_contract",
+            "success_criteria": "Use labeled_number or floats fields with an approx assertion and a justified tolerance.",
         },
         {
             "task_shape": "multi-column table or compound answer with mixed text and numbers",
-            "expected_checker": "no_supported_checker",
-            "success_criteria": "Do not force last_integer or integer_list when important structure would be lost.",
+            "expected_checker": "output_contract",
+            "success_criteria": "Capture each required field and assert it against reference output without relying on layout noise.",
         },
         {
             "task_shape": "assignment text and images include multiple questions",
@@ -730,6 +732,53 @@ def build_suggestion_prompt(
         "question": question,
         "target_question_number": question_number,
         "available_checkers": available_checker_templates(),
+        "output_contract_language": {
+            "shape": {
+                "checker": "output_contract",
+                "config": {
+                    "contract": {
+                        "version": 1,
+                        "description": "assignment-neutral description",
+                        "fields": "list of field objects",
+                        "checks": "list of assertion objects",
+                    }
+                },
+            },
+            "field_keys": [
+                "id", "source", "extract", "normalize", "select", "label", "number_type",
+                "anchor", "occurrence", "count", "window", "true_aliases", "false_aliases",
+            ],
+            "sources": ["stdin", "reference", "actual"],
+            "extractors": ["text", "integers", "floats", "labeled_number", "point", "points", "boolean"],
+            "extractor_requirements": {
+                "labeled_number": "requires label, or anchor to capture the first following number",
+                "point": "optional anchor; occurrence defaults to 0; returns one coordinate pair",
+                "points": "optional anchor; count is required when more than two points matter",
+                "boolean": "requires non-empty true_aliases and false_aliases; anchor is strongly recommended",
+                "integers_or_floats": "select is all, last, {index: n}, or {slice: [start, count]}",
+            },
+            "normalizers": ["collapse_whitespace", "lowercase", "strip_punctuation", "normalize_apostrophe"],
+            "selectors": ["all", "last", {"index": 0}, {"slice": [0, 2]}],
+            "check_shape": {
+                "id": "stable_generic_id",
+                "op": "equal | approx | sequence_equal | tail_equal | exchanged",
+                "left": {"field": "actual_field_id"},
+                "right": {"field": "reference_or_stdin_field_id"},
+                "tolerance": "non-negative number when needed",
+                "ordered": "boolean for sequences",
+                "message": "short failure reason",
+            },
+            "safety_rules": [
+                "Do not emit regex, source code, formulas, expressions, or unknown keys.",
+                "Use reference fields for assignment-specific calculations.",
+                "Use stdin fields and exchanged assertions for generic state-transition invariants.",
+                "Use anchors only as short literal phrases present in both intended output variants.",
+                "Every semantically required output fact needs its own field and check.",
+                "For programs printing before/after values, check both values with point/points fields and exchanged assertions; address text alone is not enough.",
+                "Cover every function behavior exercised by the reference main program, not only final calculations.",
+                "Numeric tolerance cannot exceed 0.011. Use 0.011 for two-decimal output and a smaller value for higher precision.",
+            ],
+        },
         "eval_cases": CHECKER_SUGGESTION_EVAL_CASES,
         "original_solution_c": original_code,
         "inputs": inputs,
@@ -740,9 +789,10 @@ def build_suggestion_prompt(
             f"Focus only on the selected question {question} (question number {question_number}). If the assignment text "
             "or images contain multiple questions, ignore the other question sections. Infer the intended answer and output "
             "format from the selected-question assignment context when present, the reference C code, the test inputs, and "
-            "the reference outputs. Select exactly one available checker template and only supported "
-            "configuration options. Prefer the simplest checker that validates the semantic answer while ignoring harmless "
-            "prompts/labels/spacing. Do not invent code, regular expressions, checker names, or unsupported options. "
+            "the reference outputs. Select a generic preset when it fully captures the answer; otherwise emit an "
+            "output_contract using only the supplied declarative language. Prefer the simplest checker that validates every "
+            "semantic requirement while ignoring harmless prompts/labels/spacing. Do not invent code, regular expressions, "
+            "formulas, checker names, keys, extractors, or operators. "
             "Each input string is the full stdin sent to the program, not necessarily the mathematical argument. "
             "Some assignments use routing/menu fields before the actual question argument. "
             "For those multi-integer/menu inputs, do not choose checkers that derive the answer directly from the raw stdin "
@@ -771,11 +821,15 @@ def build_suggestion_prompt(
                 "Do not use it for unrelated numeric transformations."
             ),
             "reverse_integer": (
-                "Use only for reversing integer digits when the raw stdin value is the number being reversed. "
-                "If stdin includes routing/menu fields, set input_integer_index to the argument integer. "
-                "Do not use it for digit-sum/digit-reduction tasks."
+                "Legacy alias for final integer comparison; prefer last_integer for new configurations. "
+                "Do not use it for digit-sum/digit-reduction tasks. Historical input_integer_index settings for "
+                "routing/menu fields are accepted for compatibility but are not needed by the reference-output contract."
             ),
-            "no_supported_checker": "Use for unsupported needs such as floating-point tolerance, multi-column structure, or mixed semantic fields.",
+            "output_contract": (
+                "Use for labeled floats, tolerances, mixed fields, sections, aliases, and before/after traces. "
+                "Compare assignment-specific calculations to reference fields and express only generic invariants."
+            ),
+            "no_supported_checker": "Use only when the safe declarative language cannot represent an essential requirement.",
         },
         "response_schema": {
             "status": "supported | no_supported_checker",
@@ -807,7 +861,87 @@ def suggest_checker(
     assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
 ) -> SuggestionResult:
     prompt = build_suggestion_prompt(question, original_code, inputs, expected_outputs, assignment_text, assignment_images)
-    response = complete_json_with_schema(provider, prompt, assignment_images, SUGGEST_CHECKER_RESPONSE_SCHEMA)
+    # The declarative contract contains heterogeneous field/check objects that
+    # Gemini's restricted responseSchema dialect cannot faithfully represent.
+    # JSON mode is still enforced by the provider; the result is then validated
+    # by the deterministic contract validator before testing or saving.
+    response = complete_json_with_schema(provider, prompt, assignment_images)
+    suggestion = _suggestion_from_response(question, response, assignment_text)
+    if suggestion.status == "supported" and suggestion.checker:
+        errors = checker_config_errors({"checker": suggestion.checker, "config": suggestion.config})
+        if errors:
+            retry_prompt = (
+                f"{prompt}\n\n"
+                "Your previous candidate was rejected by deterministic schema validation:\n"
+                + "\n".join(f"- {error}" for error in errors)
+                + "\nReturn a corrected complete JSON response. Do not omit required fields or checks."
+            )
+            response = complete_json_with_schema(provider, retry_prompt, assignment_images)
+            suggestion = _suggestion_from_response(question, response, assignment_text)
+    return suggestion
+
+
+def _suggestion_from_response(question: str, response: dict, assignment_text: str) -> SuggestionResult:
+    structural_requirements = merge_structural_requirements(
+        question,
+        response.get("structural_requirements") if isinstance(response.get("structural_requirements"), dict) else {},
+        assignment_text,
+    )
+    return SuggestionResult(
+        status=str(response.get("status", "no_supported_checker")),
+        question=question,
+        checker=response.get("checker"),
+        config=response.get("config") if isinstance(response.get("config"), dict) else {},
+        confidence=float(response.get("confidence", 0.0) or 0.0),
+        reason=str(response.get("reason", "")),
+        structural_requirements=structural_requirements,
+    )
+
+
+def refine_checker(
+    question: str,
+    original_code: str,
+    inputs: list[str],
+    expected_outputs: list[tuple[str, str]],
+    current_config: dict,
+    audit_results: list[AuditResult],
+    provider: LLMProvider,
+    assignment_text: str = "",
+    assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+) -> SuggestionResult:
+    base_payload = json.loads(
+        build_suggestion_prompt(
+            question,
+            original_code,
+            inputs,
+            expected_outputs,
+            assignment_text,
+            assignment_images,
+        )
+    )
+    base_payload["task"] = "refine_checker"
+    base_payload["current_checker_config"] = current_config
+    base_payload["audit_feedback"] = [
+        {
+            "status": result.status,
+            "verdict": result.verdict,
+            "risk": result.risk,
+            "reason": result.reason,
+        }
+        for result in audit_results
+        if result.status in {"flagged", "uncertain"}
+    ]
+    base_payload["instructions"] += (
+        " Improve the current checker only where the audit feedback identifies a checker false rejection or false "
+        "acceptance. Preserve every semantic requirement already checked. Return the unchanged configuration when "
+        "feedback is uncertainty, missing evidence, or a student-specific grading issue rather than a checker defect. "
+        "The candidate will be rejected unless it passes mutation tests and cumulative no-regression checks."
+    )
+    response = complete_json_with_schema(
+        provider,
+        json.dumps(base_payload, ensure_ascii=False, indent=2),
+        assignment_images,
+    )
     structural_requirements = merge_structural_requirements(
         question,
         response.get("structural_requirements") if isinstance(response.get("structural_requirements"), dict) else {},
@@ -898,14 +1032,18 @@ def infer_structural_requirements(question: str, assignment_text: str = "") -> d
 
 def run_checker_tests(checker_config: dict, inputs_and_expected: list[tuple[str, str]], max_cases: int = 8) -> list[dict]:
     rows = []
+    checker_name = (checker_config or {}).get("checker", "exact")
+    prompted_expected = checker_name not in {"exact", "normalized_text"}
     for input_value, expected_output in inputs_and_expected[:max_cases]:
         variants = [
-            ("exact", expected_output),
-            ("prompted", f"Input: {input_value}\nOutput: {expected_output}"),
-            ("wrong", "0"),
+            ("exact", expected_output, True),
+            ("prompted", f"Input: {input_value}\nOutput: {expected_output}", prompted_expected),
+            ("wrong", "__synthetic_output_without_an_answer__", False),
         ]
-        for variant_name, actual_output in variants:
+        variants.extend(_contract_mutation_variants(checker_config, expected_output))
+        for variant_name, actual_output, expected_pass in variants:
             comparison = compare_output_with_config(checker_config, input_value, expected_output, actual_output)
+            test_passed = comparison.passed == expected_pass
             rows.append(
                 {
                     "input": input_value,
@@ -913,7 +1051,10 @@ def run_checker_tests(checker_config: dict, inputs_and_expected: list[tuple[str,
                     "expected_output": expected_output,
                     "actual_output": actual_output,
                     "passed": comparison.passed,
-                    "reason": comparison.reason,
+                    "test_passed": test_passed,
+                    "comparison_passed": comparison.passed,
+                    "expected_pass": expected_pass,
+                    "reason": comparison.reason if test_passed else f"Expected {'accept' if expected_pass else 'reject'}: {comparison.reason}",
                     "expected_canonical": comparison.expected_canonical,
                     "actual_canonical": comparison.actual_canonical,
                 }
@@ -921,19 +1062,133 @@ def run_checker_tests(checker_config: dict, inputs_and_expected: list[tuple[str,
     return rows
 
 
-def select_audit_cases(questions: list[str], max_cases: int = 15) -> list[AuditCase]:
+def _contract_mutation_variants(checker_config: dict, expected_output: str) -> list[tuple[str, str, bool]]:
+    if (checker_config or {}).get("checker") != "output_contract":
+        return []
+    try:
+        contract = compile_preset(
+            (checker_config or {}).get("checker", "exact"),
+            (checker_config or {}).get("config", {}),
+        )
+    except ContractConfigError:
+        return []
+
+    variants: list[tuple[str, str, bool]] = []
+    seen_outputs = set()
+    actual_field_ids = {
+        check.get(side, {}).get("field")
+        for check in contract.get("checks", [])
+        for side in ("left", "right")
+    }
+    for field in contract.get("fields", []):
+        if field.get("source") != "actual" or field.get("id") not in actual_field_ids:
+            continue
+        mutated = _mutate_output_for_field(expected_output, field)
+        if (
+            mutated
+            and mutated != expected_output
+            and mutated not in seen_outputs
+            and _mutation_changes_extracted_value(field, expected_output, mutated)
+        ):
+            variants.append((f"reject_{field['id']}", mutated, False))
+            seen_outputs.add(mutated)
+        if len(variants) >= 6:
+            break
+    if len(expected_output) > 20:
+        truncated = expected_output[: len(expected_output) // 2]
+        if truncated not in seen_outputs:
+            variants.append(("reject_truncated", truncated, False))
+    return variants
+
+
+def _mutation_changes_extracted_value(field: dict, original: str, mutated: str) -> bool:
+    try:
+        return _extract_field(field, original) != _extract_field(field, mutated)
+    except (TypeError, ValueError):
+        return False
+
+
+def _mutate_output_for_field(output: str, field: dict) -> str | None:
+    extractor = field.get("extract")
+    anchor = field.get("anchor")
+    start = 0
+    if anchor:
+        start = output.lower().find(str(anchor).lower())
+        if start < 0:
+            return None
+        start += len(anchor)
+    window_end = min(len(output), start + int(field.get("window", 4096)))
+    scoped = output[start:window_end]
+
+    if extractor == "labeled_number":
+        label = field.get("label")
+        match = re.search(
+            rf"({re.escape(str(label))}\s*[:=]?\s*)([+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+            scoped,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        old_value = match.group(2)
+        replacement = f"{float(old_value) + 1:g}"
+        return output[: start + match.start(2)] + replacement + output[start + match.end(2):]
+
+    if extractor == "boolean":
+        pairs = [
+            (true_alias, false_alias)
+            for true_alias in field.get("true_aliases", [])
+            for false_alias in field.get("false_aliases", [])[:1]
+        ] + [
+            (false_alias, true_alias)
+            for false_alias in field.get("false_aliases", [])
+            for true_alias in field.get("true_aliases", [])[:1]
+        ]
+        for old, new in pairs:
+            position = scoped.lower().find(old.lower())
+            if position >= 0:
+                absolute = start + position
+                return output[:absolute] + new + output[absolute + len(old):]
+        return None
+
+    if extractor in {"point", "points", "integers", "floats"}:
+        match = re.search(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", scoped)
+        if not match:
+            return None
+        replacement = f"{float(match.group(0)) + 1:g}"
+        return output[: start + match.start()] + replacement + output[start + match.end():]
+
+    if extractor == "text":
+        return output + "\n__unexpected_semantic_value__"
+    return None
+
+
+def select_audit_cases(
+    questions: list[str],
+    max_cases: int = 15,
+    seed: int | None = None,
+    exclude_student_ids: set[str] | None = None,
+) -> list[AuditCase]:
     cases_by_bucket = _empty_audit_buckets()
     cases_by_question = {question: _empty_audit_buckets() for question in questions}
     final_df = _read_excel_if_exists("final_grades.xlsx")
     final_by_id = _rows_by_id(final_df)
+    excluded = {str(student_id) for student_id in (exclude_student_ids or set())}
 
     for question in questions:
         grade_excel = os.path.join(question, f"{question}_grades_to_upload.xlsx")
         question_df = _read_excel_if_exists(grade_excel)
         for _, row in question_df.iterrows():
             case = _make_audit_case(question, row, final_by_id)
+            if case.student_id in excluded:
+                continue
             _add_case_to_buckets(cases_by_bucket, case)
             _add_case_to_buckets(cases_by_question[question], case)
+
+    if seed is not None:
+        rng = random.Random(seed)
+        for buckets in [cases_by_bucket, *cases_by_question.values()]:
+            for bucket_cases in buckets.values():
+                rng.shuffle(bucket_cases)
 
     selected = []
     if max_cases >= len(questions):
@@ -1024,7 +1279,10 @@ def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider
         verdict = str(response.get("verdict", "uncertain"))
         risk = str(response.get("risk", "medium"))
         reason = str(response.get("reason", ""))
-        status = "passed" if verdict == "looks_correct" else "flagged"
+        status = {
+            "looks_correct": "passed",
+            "uncertain": "uncertain",
+        }.get(verdict, "flagged")
     except Exception as exc:
         verdict = "error"
         risk = "high"

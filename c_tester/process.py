@@ -42,14 +42,20 @@ def setup_visual_studio_environment(vs_path_override=None):
     try:
         result = subprocess.run(command, capture_output=True, text=True, shell=True)
         if result.returncode != 0:
-            raise Exception(result.stderr)
+            raise RuntimeError(result.stderr.strip() or f"vcvars command exited with code {result.returncode}")
         for line in result.stdout.splitlines():
             if '=' in line:
                 key, value = line.split('=', 1)
+                # `cmd set` includes pseudo variables such as `=C:=C:\path`.
+                # Empty environment names raise OSError(EINVAL) on Windows.
+                if not key or key.startswith("="):
+                    continue
                 os.environ[key] = value
         log("Visual Studio environment setup complete.", "success", verbosity=1)
+        return True
     except Exception as e:
         log(f"Error setting up Visual Studio environment: {str(e)}", "error", verbosity=1)
+        return False
 
 
 def sanitize_input(input_value):
@@ -79,11 +85,14 @@ def ensure_output_folder(folder_name):
 
 def compile_file(c_file):
     executable = c_file.replace(".c", ".exe")
-    compile_cmd = f'cl /TC /EHsc /MP /O2 /Fe{executable} {c_file}'
-    result = subprocess.run(compile_cmd, shell=True, capture_output=True, text=True)
+    compile_cmd = f'cl /TC /EHsc /MP /O2 /Fe"{executable}" "{c_file}"'
+    try:
+        result = subprocess.run(compile_cmd, shell=True, capture_output=True, text=True)
+    except OSError as exc:
+        return None, f"Could not start the Visual Studio compiler: {exc}"
     if result.returncode != 0:
         log(f"Compilation failed: {c_file}", "error", verbosity=1)
-        return None, result.stderr
+        return None, result.stderr.strip() or result.stdout.strip() or f"cl exited with code {result.returncode}"
     log(f"Compilation successful: {c_file}", "success", verbosity=2)
     return executable, None
 

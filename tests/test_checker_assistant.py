@@ -308,7 +308,7 @@ class TestCheckerAssistant(unittest.TestCase):
         self.assertIn("divisors", supported_text)
         self.assertIn("reverse_integer", supported_text)
         self.assertIn("normalized_text", supported_text)
-        self.assertIn("floating point answer requiring tolerance no_supported_checker", edge_text)
+        self.assertIn("floating point answer requiring tolerance output_contract", edge_text)
         self.assertIn("multi-column table", edge_text)
         self.assertIn("selected_question_only", edge_text)
         self.assertEqual(payload["target_question_number"], 2)

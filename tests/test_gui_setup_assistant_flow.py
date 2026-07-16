@@ -199,7 +199,11 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                     with patch.object(window, "make_provider", return_value=object()), \
                         patch("c_tester.gui.parse_assignment_context", return_value=AssignmentContext()), \
                         patch.object(window, "auto_configure_question", side_effect=fake_auto_configure), \
-                        patch.object(window, "run_optional_audit", return_value={"status": "skipped"}):
+                        patch.object(
+                            window,
+                            "run_calibration_rounds",
+                            return_value={"overall": {"status": "skipped", "reviewed": 0}, "questions": []},
+                        ):
                         window._auto_setup_all_worker()
                         app.update()
 

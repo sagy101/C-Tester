@@ -10,7 +10,6 @@ from typing import Any, Callable
 
 from .checker_assistant import (
     AUDIT_RESPONSE_SCHEMA,
-    SUGGEST_CHECKER_RESPONSE_SCHEMA,
     AuditCase,
     FakeLLMProvider,
     GeminiProvider,
@@ -329,7 +328,7 @@ def invoke_suggest_checker(provider: LLMProvider, case: EvalCase) -> tuple[str, 
         case.input.get("expected_outputs", []),
         case.input.get("assignment_text", ""),
     )
-    return prompt, complete_json_with_schema(provider, prompt, response_schema=SUGGEST_CHECKER_RESPONSE_SCHEMA)
+    return prompt, complete_json_with_schema(provider, prompt)
 
 
 def invoke_audit_score(provider: LLMProvider, case: EvalCase) -> tuple[str, dict[str, Any]]:
@@ -481,13 +480,40 @@ def review_case(case_id: str, description: str, code: str, keyword: str, fix: st
 
 
 def suggest_checker_cases() -> tuple[EvalCase, ...]:
+    float_contract = {
+        "contract": {
+            "version": 1,
+            "description": "Compare the final floating-point answer with display tolerance.",
+            "fields": [
+                {"id": "expected", "source": "reference", "extract": "floats", "select": "last"},
+                {"id": "actual", "source": "actual", "extract": "floats", "select": "last"},
+            ],
+            "checks": [
+                {
+                    "id": "average",
+                    "op": "approx",
+                    "left": {"field": "actual"},
+                    "right": {"field": "expected"},
+                    "tolerance": 0.011,
+                    "message": "average mismatch",
+                }
+            ],
+        }
+    }
     return (
         suggest_case("checker_last_integer", "One final numeric answer should use last_integer.", "Print factorial.", [("5", "Factorial: 120")], "last_integer"),
         suggest_case("checker_integer_list", "Ordered numeric sequence should use integer_list.", "Print Fibonacci numbers.", [("5", "1 1 2 3 5")], "integer_list", {"order_matters": True}),
         suggest_case("checker_divisors", "Divisor task should use divisors.", "Print all divisors.", [("6", "Divisors: 1 2 3 6")], "divisors", {"allow_prompt_numbers": True}),
         suggest_case("checker_reverse", "Reverse integer task should use reverse_integer.", "Reverse a number.", [("125", "Reverse: 521")], "reverse_integer"),
         suggest_case("checker_normalized_text", "Case-insensitive text category should use normalized_text.", "Print whether prime.", [("7", "Prime Number")], "normalized_text"),
-        suggest_case("checker_float_unsupported", "Float tolerance task should not be forced into integer checker.", "Print average to two decimals.", [("3", "2.67")], None, status="no_supported_checker"),
+        suggest_case(
+            "checker_float_contract",
+            "Float tolerance should use a safe declarative contract.",
+            "Print average to two decimals.",
+            [("3", "2.67")],
+            "output_contract",
+            float_contract,
+        ),
     )
 
 

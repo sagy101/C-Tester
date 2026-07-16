@@ -10,7 +10,12 @@ class TestSemanticGrading(unittest.TestCase):
         self.assertTrue(result.passed)
 
     def test_q1_accepts_prompted_divisor_list(self):
-        result = compare_output("Q1", "6", "Divisors of 6 are: 1 2 3 6", "Input: n = 6\nOutput: 1 2 3 6")
+        result = compare_output_with_config(
+            {"checker": "divisors", "config": {"allow_prompt_numbers": True}},
+            "6",
+            "Divisors of 6 are: 1 2 3 6",
+            "Input: n = 6\nOutput: 1 2 3 6",
+        )
 
         self.assertTrue(result.passed)
 
@@ -30,8 +35,9 @@ class TestSemanticGrading(unittest.TestCase):
         self.assertFalse(result.passed)
 
     def test_q1_zero_requires_no_divisor_message(self):
-        passing = compare_output("Q1", "0", "0 has no Divisors!", "0 has no divisors")
-        failing = compare_output("Q1", "0", "0 has no Divisors!", "Input: n = Output:")
+        config = {"checker": "divisors", "config": {"zero_requires_no_divisors_message": True}}
+        passing = compare_output_with_config(config, "0", "0 has no Divisors!", "0 has no divisors")
+        failing = compare_output_with_config(config, "0", "0 has no Divisors!", "Input: n = Output:")
 
         self.assertTrue(passing.passed)
         self.assertFalse(failing.passed)
@@ -85,7 +91,7 @@ class TestSemanticGrading(unittest.TestCase):
         self.assertTrue(divisors_result.passed)
         self.assertTrue(reverse_result.passed)
 
-    def test_input_derived_checkers_reject_wrong_stdin_integer_index(self):
+    def test_legacy_input_index_no_longer_overrides_reference_answer(self):
         result = compare_output_with_config(
             {"checker": "reverse_integer", "config": {"input_integer_index": 0}},
             "2 125",
@@ -93,7 +99,7 @@ class TestSemanticGrading(unittest.TestCase):
             "Result = 521",
         )
 
-        self.assertFalse(result.passed)
+        self.assertTrue(result.passed)
 
     def test_timeout_is_never_semantic_match(self):
         result = compare_output("Q2", "125", "Reverse of the number is: 521", "Timeout")

@@ -68,6 +68,7 @@ def main() -> int:
                 ("Prompt / Response", "checker_prompt_response.png"),
             ]:
                 checker.tabview.set(tab_name)
+                checker.on_checker_tab_changed()
                 settle(app)
                 capture_widget(checker, SCREENSHOT_DIR, filename)
 
