@@ -24,6 +24,7 @@ from .semantic_grading import available_checker_templates, checker_config_errors
 
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 MAX_ASSIGNMENT_IMAGES = 8
+MAX_AUDIT_TEXT_CHARS = 100_000
 CHECKER_SUGGESTION_EVAL_CASES = {
     "common_supported": [
         {
@@ -92,7 +93,10 @@ CHECKER_AUDIT_EVAL_CASES = {
     ],
     "uncertain_when": [
         "Reference context is insufficient to know whether text formatting is semantically important.",
-        "Student output, grade text, or expected/reference output is missing or truncated.",
+        (
+            "Source student output, grade text, or expected/reference output is genuinely missing or ends unexpectedly. "
+            "Application compaction explicitly reported in evidence metadata is not student-side truncation."
+        ),
         "The case depends on assignment-specific intent not visible in the selected-question context.",
     ],
 }
@@ -1316,6 +1320,8 @@ def build_audit_prompt(
     assignment_text: str = "",
     assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
 ) -> str:
+    grade_evidence = _compact_audit_text(case.grade_text)
+    output_evidence = _compact_audit_text(case.output_text)
     return json.dumps(
         {
             "task": "audit_score",
@@ -1328,8 +1334,10 @@ def build_audit_prompt(
             "eval_cases": CHECKER_AUDIT_EVAL_CASES,
             "checker_config": checker_config,
             "assigned_score": case.score,
-            "grade_text": case.grade_text[:12000],
-            "student_output": case.output_text[:12000],
+            "grade_text": grade_evidence["text"],
+            "grade_text_evidence": grade_evidence["metadata"],
+            "student_output": output_evidence["text"],
+            "student_output_evidence": output_evidence["metadata"],
             "per_question_excel_fields": case.excel_fields,
             "final_excel_fields": case.final_fields,
             "instructions": (
@@ -1338,6 +1346,10 @@ def build_audit_prompt(
                 "student output, checker configuration, and selected-question assignment intent. Verify comments, penalties, compile-error flags, timeout "
                 "fields, wrong-input fields, structural recursion/loop check fields, structural penalties, and final weighted grade fields "
                 "when present. Do not change the grade. "
+                "The application may compact exceptionally long grade or output evidence. When evidence metadata says "
+                "application_compacted=true, the omitted middle is an application size limit, not evidence that the student's "
+                "program crashed or truncated its output. The source beginning and ending are both retained; use the ending, "
+                "runtime/timeout fields, and grade evidence to judge actual completion. "
                 "Return looks_correct only when the fields are internally consistent and the grading decision appears "
                 "reasonable. Return flagged for likely scoring/Excel mistakes. Return uncertain when more human review "
                 "is needed."
@@ -1356,6 +1368,49 @@ def build_audit_prompt(
         indent=2,
         default=str,
     )
+
+
+def _compact_audit_text(text: str, max_chars: int = MAX_AUDIT_TEXT_CHARS) -> dict[str, Any]:
+    source = str(text or "")
+    metadata = {
+        "application_compacted": False,
+        "source_character_count": len(source),
+        "audit_character_limit": max_chars,
+        "source_start_included": True,
+        "source_end_included": True,
+        "note": "Evidence is complete; the application did not truncate it.",
+    }
+    if len(source) <= max_chars:
+        return {"text": source, "metadata": metadata}
+
+    marker_template = (
+        "\n\n[AUDIT APPLICATION COMPACTION: {omitted} middle characters omitted because the source exceeded "
+        f"{max_chars} characters. This is not student-side truncation. The source ending follows.]\n\n"
+    )
+    omitted = len(source)
+    while True:
+        marker = marker_template.format(omitted=omitted)
+        available = max(0, max_chars - len(marker))
+        start_chars = available // 2
+        end_chars = available - start_chars
+        updated_omitted = len(source) - start_chars - end_chars
+        if updated_omitted == omitted:
+            break
+        omitted = updated_omitted
+
+    ending = source[-end_chars:] if end_chars else ""
+    compacted = source[:start_chars] + marker + ending
+    metadata.update(
+        {
+            "application_compacted": True,
+            "omitted_middle_character_count": omitted,
+            "note": (
+                "The application omitted only the middle due to the audit size limit. "
+                "Do not treat this as evidence of student-side truncation or a crash."
+            ),
+        }
+    )
+    return {"text": compacted, "metadata": metadata}
 
 
 def _read_excel_if_exists(path: str) -> pd.DataFrame:

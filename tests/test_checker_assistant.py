@@ -10,6 +10,8 @@ from c_tester.checker_assistant import (
     AssignmentImage,
     FakeLLMProvider,
     GeminiProvider,
+    MAX_AUDIT_TEXT_CHARS,
+    _compact_audit_text,
     assignment_context_for_question,
     audit_cases_with_llm,
     build_audit_prompt,
@@ -419,6 +421,48 @@ class TestCheckerAssistant(unittest.TestCase):
         self.assertEqual(payload["target_question_number"], 2)
         self.assertIn("structural recursion/loop check fields", payload["instructions"])
         self.assertEqual(payload["per_question_excel_fields"]["Structural_Check_Status"], "failed")
+
+    def test_long_audit_evidence_preserves_start_and_end_with_explicit_metadata(self):
+        source = "SOURCE_START\n" + ("middle-data\n" * 200) + "SOURCE_END"
+        evidence = _compact_audit_text(source, max_chars=500)
+
+        self.assertLessEqual(len(evidence["text"]), 500)
+        self.assertTrue(evidence["text"].startswith("SOURCE_START"))
+        self.assertTrue(evidence["text"].endswith("SOURCE_END"))
+        self.assertIn("not student-side truncation", evidence["text"])
+        self.assertTrue(evidence["metadata"]["application_compacted"])
+        self.assertGreater(evidence["metadata"]["omitted_middle_character_count"], 0)
+
+    def test_audit_evidence_honors_cap_at_boundaries(self):
+        complete = _compact_audit_text("x" * MAX_AUDIT_TEXT_CHARS)
+        self.assertFalse(complete["metadata"]["application_compacted"])
+        self.assertEqual(len(complete["text"]), MAX_AUDIT_TEXT_CHARS)
+
+        for source_length in (MAX_AUDIT_TEXT_CHARS + 1, MAX_AUDIT_TEXT_CHARS + 825):
+            with self.subTest(source_length=source_length):
+                evidence = _compact_audit_text("A" + ("x" * (source_length - 2)) + "Z")
+                self.assertLessEqual(len(evidence["text"]), MAX_AUDIT_TEXT_CHARS)
+                self.assertTrue(evidence["text"].startswith("A"))
+                self.assertTrue(evidence["text"].endswith("Z"))
+
+    def test_audit_prompt_labels_application_compaction_as_not_student_truncation(self):
+        long_output = "OUTPUT_START\n" + ("x" * (MAX_AUDIT_TEXT_CHARS + 500)) + "\nOUTPUT_END"
+        case = AuditCase(
+            student_id="123456789",
+            question="Q1",
+            score=100,
+            grade_text="Grade: 100%",
+            output_text=long_output,
+            excel_fields={"Grade": 100},
+            final_fields={"Final_Grade": 100},
+        )
+
+        payload = json.loads(build_audit_prompt(case, {"checker": "exact", "config": {}}))
+
+        self.assertTrue(payload["student_output_evidence"]["application_compacted"])
+        self.assertTrue(payload["student_output"].startswith("OUTPUT_START"))
+        self.assertTrue(payload["student_output"].endswith("OUTPUT_END"))
+        self.assertIn("not evidence that the student's program crashed", payload["instructions"])
 
     def test_parse_json_object_accepts_trailing_text(self):
         parsed = parse_json_object('{"summary": "ok", "deduction_is_plausible": true}\nExtra explanation')
