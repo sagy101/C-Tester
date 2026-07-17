@@ -292,6 +292,12 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                         [AuditResult("demo_student", "Q1", "passed", "looks_correct", "low", "consistent")],
                         "passed",
                     )
+                    window.update_checker_metadata(
+                        "Q1",
+                        calibration_status="passed",
+                        positive_gate_status="passed",
+                        negative_gate_status="passed",
+                    )
                     app.update()
 
                     self.assertEqual(
@@ -299,7 +305,7 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                         "passed",
                     )
                     status_texts = " ".join(child.cget("text") for child in window.checker_state_frame.winfo_children())
-                    self.assertIn("Q1: audited", status_texts)
+                    self.assertIn("Q1: verified both ways", status_texts)
                     self.assertEqual({int(child.grid_info()["row"]) for child in window.checker_state_frame.winfo_children()}, {0})
                     self.assertIn("audited: Q1", app.checker_status_summary())
                     app.update_setup_readiness_banner()

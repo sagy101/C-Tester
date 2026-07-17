@@ -15,6 +15,12 @@ import pandas as pd
 from .checker_assistant import LLMProvider, complete_json_with_schema
 from . import configuration
 from .workflow_status import normalize_deduction_cause
+from .verification import (
+    REVIEW_SCHEMA_VERSION,
+    latest_review_evidence_mtime,
+    review_evidence_fingerprint,
+    saved_review_is_current,
+)
 
 
 MAX_PROMPT_TEXT = 12000
@@ -28,6 +34,15 @@ SCORE_REVIEW_RESPONSE_SCHEMA = {
             "type": "string",
             "enum": ["student_code", "checker_or_app", "unclear"],
         },
+        "semantic_assessment": {
+            "type": "string",
+            "enum": ["equivalent", "genuine_error", "unclear"],
+        },
+        "format_requirement": {
+            "type": "string",
+            "enum": ["explicit", "not_explicit", "unclear"],
+        },
+        "format_requirement_evidence": {"type": "string"},
         "root_causes": {
             "type": "array",
             "items": {
@@ -71,6 +86,9 @@ SCORE_REVIEW_RESPONSE_SCHEMA = {
         "summary",
         "deduction_is_plausible",
         "deduction_caused_by",
+        "semantic_assessment",
+        "format_requirement",
+        "format_requirement_evidence",
         "root_causes",
         "inline_comments",
         "fix_to_full_score",
@@ -134,7 +152,11 @@ class ReviewCase:
 
     @property
     def reviewed(self) -> bool:
-        return bool(self.saved_review)
+        return saved_review_is_current(self.saved_review, review_evidence_fingerprint(self))
+
+    @property
+    def stale_review(self) -> bool:
+        return bool(self.saved_review) and not self.reviewed
 
 
 @dataclass(frozen=True)
@@ -230,6 +252,9 @@ def build_score_review_prompt(case: ReviewCase) -> str:
             "Use student_code when the student's logic, missing implementation, crash, wrong values, or genuinely missing required output facts caused the deduction. "
             "Use checker_or_app when the student's output is semantically equivalent to the expected output and the deduction comes from checker/parser/label/anchor/phrasing sensitivity or an application defect; in that case set deduction_is_plausible to false. "
             "Use unclear only when the evidence is insufficient to choose. "
+            "Set semantic_assessment to equivalent only when all required facts and values match despite presentation differences. "
+            "Set format_requirement to explicit only when supplied evidence actually states exact formatting is mandatory; "
+            "an example/reference output alone is not proof. Put the supporting quote in format_requirement_evidence, otherwise use not_explicit or unclear. "
             "Suggest the smallest question-specific fix needed to pass all inputs for this question. "
             "Do not recommend style cleanup, refactors, rewrites, or edits to unrelated questions unless they are required for this question to pass. "
             "Return inline comments using 1-based line numbers from student_code when possible."
@@ -238,6 +263,9 @@ def build_score_review_prompt(case: ReviewCase) -> str:
             "summary": "short grader-facing explanation",
             "deduction_is_plausible": "boolean",
             "deduction_caused_by": "student_code | checker_or_app | unclear",
+            "semantic_assessment": "equivalent | genuine_error | unclear",
+            "format_requirement": "explicit | not_explicit | unclear",
+            "format_requirement_evidence": "supporting assignment quote, or empty string",
             "root_causes": [
                 {
                     "issue": "logic issue",
@@ -291,6 +319,9 @@ def review_cases_with_llm(
 def save_review_result(case: ReviewCase, response: dict[str, Any]) -> ReviewResult:
     os.makedirs(os.path.dirname(case.review_path), exist_ok=True)
     payload = {
+        "review_schema_version": REVIEW_SCHEMA_VERSION,
+        "evidence_fingerprint": review_evidence_fingerprint(case),
+        "evidence_mtime": latest_review_evidence_mtime(case.question, case.student_id),
         "student_id": case.student_id,
         "anonymized_label": case.anonymized_label,
         "question": case.question,
@@ -312,6 +343,9 @@ def _review_one_case(case: ReviewCase, provider: LLMProvider) -> ReviewResult:
             "summary": f"Review failed: {exc}",
             "deduction_is_plausible": False,
             "deduction_caused_by": "unclear",
+            "semantic_assessment": "unclear",
+            "format_requirement": "unclear",
+            "format_requirement_evidence": "",
             "root_causes": [],
             "inline_comments": [],
             "fix_to_full_score": "",
@@ -434,6 +468,12 @@ def _parse_failed_cases(grade_text: str, max_failed_cases: int) -> list[ReviewFa
 
 def _normalize_review_response(response: dict[str, Any]) -> dict[str, Any]:
     cause = normalize_deduction_cause(response.get("deduction_caused_by"))
+    semantic = str(response.get("semantic_assessment", "unclear"))
+    format_requirement = str(response.get("format_requirement", "unclear"))
+    if semantic == "equivalent" and format_requirement != "explicit":
+        cause = "checker_or_app"
+    if semantic == "genuine_error":
+        cause = "student_code"
     plausible = bool(response.get("deduction_is_plausible", False))
     if cause == "checker_or_app":
         plausible = False
@@ -441,6 +481,11 @@ def _normalize_review_response(response: dict[str, Any]) -> dict[str, Any]:
         "summary": str(response.get("summary", "")),
         "deduction_is_plausible": plausible,
         "deduction_caused_by": cause,
+        "semantic_assessment": semantic if semantic in {"equivalent", "genuine_error", "unclear"} else "unclear",
+        "format_requirement": (
+            format_requirement if format_requirement in {"explicit", "not_explicit", "unclear"} else "unclear"
+        ),
+        "format_requirement_evidence": str(response.get("format_requirement_evidence", "")),
         "root_causes": _normalize_root_causes(response.get("root_causes", [])),
         "inline_comments": response.get("inline_comments", []) if isinstance(response.get("inline_comments", []), list) else [],
         "fix_to_full_score": str(response.get("fix_to_full_score", "")),

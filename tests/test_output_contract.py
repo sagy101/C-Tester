@@ -248,6 +248,104 @@ class OutputContractTests(unittest.TestCase):
             [row["reason"] for row in rows if not row["test_passed"]],
         )
         self.assertTrue(any(row["variant"].startswith("reject_") for row in rows))
+        self.assertTrue(any(row["variant"].startswith("accept_") for row in rows))
+
+    def test_bounded_label_and_anchor_aliases_keep_semantics_strict(self):
+        contract = {
+            "version": 1,
+            "description": "Alias-safe numeric and boolean facts",
+            "fields": [
+                {
+                    "id": "expected_value",
+                    "source": "reference",
+                    "extract": "labeled_number",
+                    "label": "Value:",
+                    "labels": ["Result is"],
+                },
+                {
+                    "id": "actual_value",
+                    "source": "actual",
+                    "extract": "labeled_number",
+                    "label": "Value:",
+                    "labels": ["Result is"],
+                },
+                {
+                    "id": "expected_ok",
+                    "source": "reference",
+                    "extract": "boolean",
+                    "anchor": "Status:",
+                    "anchors": ["Answer:"],
+                    "true_aliases": ["yes", "correct"],
+                    "false_aliases": ["no", "incorrect"],
+                },
+                {
+                    "id": "actual_ok",
+                    "source": "actual",
+                    "extract": "boolean",
+                    "anchor": "Status:",
+                    "anchors": ["Answer:"],
+                    "true_aliases": ["yes", "correct"],
+                    "false_aliases": ["no", "incorrect"],
+                },
+            ],
+            "checks": [
+                {
+                    "id": "value",
+                    "op": "approx",
+                    "left": {"field": "actual_value"},
+                    "right": {"field": "expected_value"},
+                    "tolerance": 0.001,
+                },
+                {
+                    "id": "ok",
+                    "op": "equal",
+                    "left": {"field": "actual_ok"},
+                    "right": {"field": "expected_ok"},
+                },
+            ],
+        }
+        config = {"checker": "output_contract", "config": {"contract": contract}}
+        expected = "Value: 12.5\nStatus: yes"
+        equivalent = "Result is 12.5\nAnswer: correct"
+        wrong = "Result is 13.5\nAnswer: correct"
+        self.assertTrue(compare_output_with_config(config, "", expected, equivalent).passed)
+        self.assertFalse(compare_output_with_config(config, "", expected, wrong).passed)
+
+    def test_extraction_failures_have_typed_reason(self):
+        config = {
+            "checker": "output_contract",
+            "config": {
+                "contract": {
+                    "version": 1,
+                    "description": "Typed missing label",
+                    "fields": [
+                        {
+                            "id": "expected",
+                            "source": "reference",
+                            "extract": "labeled_number",
+                            "label": "Value:",
+                        },
+                        {
+                            "id": "actual",
+                            "source": "actual",
+                            "extract": "labeled_number",
+                            "label": "Value:",
+                        },
+                    ],
+                    "checks": [
+                        {
+                            "id": "value",
+                            "op": "equal",
+                            "left": {"field": "actual"},
+                            "right": {"field": "expected"},
+                        }
+                    ],
+                }
+            },
+        }
+        result = compare_output_with_config(config, "", "Value: 4", "Result: 4")
+        self.assertFalse(result.passed)
+        self.assertIn("[missing_label]", result.reason)
 
     def test_boolean_alias_followed_by_negation_is_inverted(self):
         # Regression: aliases ["is"] / ["isn't"] misparsed "is not" as True

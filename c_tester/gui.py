@@ -137,6 +137,7 @@ from .process import run_tests, setup_visual_studio_environment, read_inputs_fro
 from .create_excel import create_excels
 from .checker_assistant import (
     DEFAULT_GEMINI_MODEL,
+    AuditResult,
     FakeLLMProvider,
     GeminiProvider,
     SuggestionResult,
@@ -146,10 +147,12 @@ from .checker_assistant import (
     build_audit_prompt,
     build_suggestion_prompt,
     complete_json_with_schema,
+    corroborated_review_feedback_item,
     get_google_api_key,
     list_gemini_models,
     parse_assignment_context,
     refine_checker,
+    review_feedback_test_rows,
     run_checker_tests,
     select_audit_cases,
     suggest_checker,
@@ -180,6 +183,13 @@ from .checker_calibration import (
     checker_config_hash,
     editable_checker_config,
     validate_candidate_against_rows,
+)
+from .verification import (
+    AUDIT_RUBRIC_VERSION,
+    audit_metadata_is_current,
+    editable_checker_hash,
+    latest_audit_evidence_mtime,
+    stable_fingerprint,
 )
 from .structural_analysis import structural_requirements_errors
 from .clear_utils import (
@@ -225,6 +235,7 @@ REVIEW_FIX_RESPONSE_SCHEMA = {
     },
     "required": ["fixed_code", "explanation", "changes_made", "tests_to_run", "risk_note"],
 }
+MAX_CALIBRATION_ROUNDS = 5
 
 class GuiStream(io.StringIO):
     """A custom stream to redirect stdout/stderr to a CTkTextbox."""
@@ -256,7 +267,7 @@ class GuiStream(io.StringIO):
             elif normalized_s.startswith("[ERROR]"):
                 tag_to_apply = "error_tag"
 
-            # --- Insert with Tag --- 
+            # --- Insert with Tag ---
             self.textbox.configure(state="normal")
             if tag_to_apply:
                 self.textbox.insert(tk.END, clean_s, tag_to_apply)
@@ -284,7 +295,7 @@ class App(ctk.CTk):
         self.title("C Auto Grader")
         self.geometry("1050x760")
         self.minsize(960, 680)
-        
+
         # Add application icon (if available)
         try:
             self.iconbitmap("app_icon.ico")  # You'd need to create this icon file
@@ -296,7 +307,7 @@ class App(ctk.CTk):
         self.grid_rowconfigure(1, weight=0)  # Progress/Cancel
         self.grid_rowconfigure(2, weight=0, minsize=54)  # Logs
 
-        # --- App State (Initialize with defaults) --- 
+        # --- App State (Initialize with defaults) ---
         self.gui_questions = default_questions[:]  # Make copies
         self.gui_weights = default_weights.copy()
         self.gui_penalty = default_penalty  # Initialize GUI penalty
@@ -329,7 +340,7 @@ class App(ctk.CTk):
         self.score_review_window = None
         self.console_collapsed = False
 
-        # --- Frames with enhanced styling --- 
+        # --- Frames with enhanced styling ---
         # Top frame with a subtle header background
         self.top_frame = ctk.CTkFrame(self, corner_radius=10, fg_color=("gray90", "gray20"))
         self.top_frame.grid(row=0, column=0, sticky="nsew", padx=15, pady=(15, 5))
@@ -471,13 +482,13 @@ class App(ctk.CTk):
 
         # Section title with icon-like emoji and better font
         self.config_label = ctk.CTkLabel(
-            self.config_frame, 
-            text="⚙️ Configuration", 
+            self.config_frame,
+            text="⚙️ Configuration",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["primary"]
         )
         self.config_label.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
-        
+
         # Table Headers with improved styling
         header_font = ctk.CTkFont(size=12, weight="bold")
         ctk.CTkLabel(self.config_frame, text="Question Folder", anchor="w", font=header_font).grid(
@@ -486,12 +497,12 @@ class App(ctk.CTk):
         ctk.CTkLabel(self.config_frame, text="Weight (%)", anchor="w", font=header_font).grid(
             row=1, column=1, padx=10, pady=5, sticky="w"
         )
-        
+
         # Frame for the scrollable rows with subtle background
         self.config_table_frame = ctk.CTkScrollableFrame(self.config_frame, fg_color=("gray95", "gray17"), height=96)
         self.config_table_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
         self.config_table_frame.grid_columnconfigure((0, 1), weight=1)  # Columns expand
-        
+
         # Penalty Input with cleaner layout
         self.penalty_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
         self.penalty_frame.grid(row=1, column=0, padx=12, pady=8, sticky="w")
@@ -499,13 +510,13 @@ class App(ctk.CTk):
         self.penalty_label.pack(side=tk.LEFT, padx=(0,10))
         self.penalty_entry = ctk.CTkEntry(self.penalty_frame, width=60, border_width=1)
         self.penalty_entry.pack(side=tk.LEFT)
-        self.penalty_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty()) 
-        
+        self.penalty_entry.bind(KEY_RELEASE_EVENT, lambda event: self.mark_config_dirty())
+
         # Add Per-Error Penalty Checkbox with improved spacing
         self.per_error_penalty_frame = ctk.CTkFrame(self.scoring_options_frame, fg_color="transparent")
         self.per_error_penalty_frame.grid(row=2, column=0, padx=12, pady=6, sticky="w")
         self.per_error_penalty_checkbox = ctk.CTkCheckBox(
-            self.per_error_penalty_frame, 
+            self.per_error_penalty_frame,
             text="Apply penalty per error (cumulative)",
             variable=self.per_error_penalty_var,
             onvalue=True, offvalue=False,
@@ -574,13 +585,13 @@ class App(ctk.CTk):
             command=lambda _choice: self.mark_config_dirty(),
         )
         self.compile_repair_model_menu.grid(row=2, column=3, padx=(0, 10), pady=3, sticky="ew")
-        
+
         # Buttons with improved styling and spacing
         self.config_buttons_frame = ctk.CTkFrame(self.config_frame, fg_color="transparent")
         self.config_buttons_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=10)
         self.add_row_button = ctk.CTkButton(
-            self.config_buttons_frame, 
-            text="➕ Add Question", 
+            self.config_buttons_frame,
+            text="➕ Add Question",
             command=self.add_new_config_row_action,
             width=130,
             height=32,
@@ -589,10 +600,10 @@ class App(ctk.CTk):
             border_spacing=6
         )
         self.add_row_button.pack(side=tk.LEFT, padx=5)
-        
+
         self.remove_row_button = ctk.CTkButton(
-            self.config_buttons_frame, 
-            text="➖ Remove Last", 
+            self.config_buttons_frame,
+            text="➖ Remove Last",
             command=self.remove_last_config_row_action,
             width=130,
             height=32,
@@ -601,11 +612,11 @@ class App(ctk.CTk):
             border_spacing=6
         )
         self.remove_row_button.pack(side=tk.LEFT, padx=5)
-        
+
         # Apply button
         self.apply_config_button = ctk.CTkButton(
-            self.config_buttons_frame, 
-            text="Apply Config", 
+            self.config_buttons_frame,
+            text="Apply Config",
             command=self.apply_gui_configuration,
             width=140,
             height=32,
@@ -614,15 +625,15 @@ class App(ctk.CTk):
             border_spacing=6
         )
         self.apply_config_button.pack(side=tk.LEFT, padx=5)
-        
+
         # Store the default border color - fixed to avoid AttributeError
         self._default_border_color = self.apply_config_button.cget("border_color")
 
         # Status label with better formatting
         self.config_status_label = ctk.CTkLabel(
-            self.config_frame, 
-            text="Status: Unknown", 
-            anchor="w", 
+            self.config_frame,
+            text="Status: Unknown",
+            anchor="w",
             text_color="gray",
             height=25
         )
@@ -632,24 +643,24 @@ class App(ctk.CTk):
         self.preprocess_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.preprocess_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
         self.preprocess_frame.grid_columnconfigure(0, weight=1)
-        
+
         self.preprocess_label = ctk.CTkLabel(
-            self.preprocess_frame, 
-            text="📂 Preprocessing", 
+            self.preprocess_frame,
+            text="📂 Preprocessing",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["primary"]
         )
         self.preprocess_label.grid(row=0, column=0, padx=10, pady=(10, 15))
-        
+
         # Zip file selection with improved styling and more width
         self.zip_path_var = tk.StringVar()
         zip_entry_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
         zip_entry_frame.grid(row=1, column=0, padx=15, pady=(5, 10), sticky="ew")
         zip_entry_frame.grid_columnconfigure(0, weight=1)
-        
+
         self.zip_entry = ctk.CTkEntry(
-            zip_entry_frame, 
-            textvariable=self.zip_path_var, 
+            zip_entry_frame,
+            textvariable=self.zip_path_var,
             placeholder_text="Path to submissions zip",
             height=32,
             border_width=1
@@ -657,11 +668,11 @@ class App(ctk.CTk):
         self.zip_entry.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         # Add binding to check preprocess button state when path changes
         self.zip_path_var.trace_add("write", lambda *args: self.check_preprocess_button_state())
-        
+
         # Browse button with icon
         self.browse_button = ctk.CTkButton(
-            self.preprocess_frame, 
-            text="📁 Browse", 
+            self.preprocess_frame,
+            text="📁 Browse",
             command=self.browse_zip,
             height=32,
             width=200,  # Make button wider
@@ -670,11 +681,11 @@ class App(ctk.CTk):
             border_spacing=6
         )
         self.browse_button.grid(row=2, column=0, padx=15, pady=(0, 15))
-        
+
         # Run preprocess button with improved styling
         self.preprocess_button = ctk.CTkButton(
-            self.preprocess_frame, 
-            text="▶️ Run Preprocess", 
+            self.preprocess_frame,
+            text="▶️ Run Preprocess",
             command=lambda: self.run_task(self.task_preprocess_internal),
             height=36,
             width=200,  # Make button wider
@@ -685,14 +696,14 @@ class App(ctk.CTk):
             hover_color=("#2aa65a", "#216e3d")  # Darker green on hover
         )
         self.preprocess_button.grid(row=3, column=0, padx=15, pady=(0, 15))
-        
+
         # Add RAR support checkbox to preprocessing section where it belongs logically
         self.rar_support_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
         self.rar_support_frame.grid(row=4, column=0, padx=15, pady=(0, 10), sticky="w")
-        
+
         self.rar_support_var = tk.BooleanVar(value=self.gui_rar_support)
         self.rar_support_checkbox = ctk.CTkCheckBox(
-            self.rar_support_frame, 
+            self.rar_support_frame,
             text="Enable RAR file support",
             variable=self.rar_support_var,
             command=self.update_rar_dependency_state,
@@ -701,12 +712,12 @@ class App(ctk.CTk):
             width=200  # Ensure enough width for the text
         )
         self.rar_support_checkbox.pack(side=tk.LEFT)
-        
+
         # Add help note for RAR support with improved styling
         self.rar_help_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
         self.rar_help_frame.grid(row=5, column=0, padx=15, pady=(0, 5), sticky="w")
         self.rar_help_label = ctk.CTkLabel(
-            self.rar_help_frame, 
+            self.rar_help_frame,
             text="Needs rarfile + WinRAR/UnRAR",
             font=("", 10),
             text_color="gray"
@@ -716,10 +727,10 @@ class App(ctk.CTk):
         # Add Simple Naming checkbox
         self.simple_naming_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
         self.simple_naming_frame.grid(row=6, column=0, padx=15, pady=(0, 10), sticky="w")
-        
+
         self.simple_naming_var = tk.BooleanVar(value=configuration.use_simple_naming)
         self.simple_naming_checkbox = ctk.CTkCheckBox(
-            self.simple_naming_frame, 
+            self.simple_naming_frame,
             text="Simple naming (hwN.c)",
             variable=self.simple_naming_var,
             command=self.update_simple_naming_state,
@@ -728,12 +739,12 @@ class App(ctk.CTk):
             width=250  # Ensure enough width for the text
         )
         self.simple_naming_checkbox.pack(side=tk.LEFT)
-        
+
         # Add help note for Simple Naming
         self.simple_naming_help_frame = ctk.CTkFrame(self.preprocess_frame, fg_color="transparent")
         self.simple_naming_help_frame.grid(row=7, column=0, padx=15, pady=(0, 5), sticky="w")
         self.simple_naming_help_label = ctk.CTkLabel(
-            self.simple_naming_help_frame, 
+            self.simple_naming_help_frame,
             text="Auto-detected; one C file is copied to all configured questions",
             font=("", 10),
             text_color="gray"
@@ -755,19 +766,19 @@ class App(ctk.CTk):
         self.grading_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.grading_frame.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
         self.grading_frame.grid_columnconfigure(0, weight=1)
-        
+
         self.grading_label = ctk.CTkLabel(
-            self.grading_frame, 
-            text="📊 Grading", 
+            self.grading_frame,
+            text="📊 Grading",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["primary"]
         )
         self.grading_label.grid(row=0, column=0, padx=10, pady=(10, 15))
-        
+
         # Run grading button with improved styling
         self.run_button = ctk.CTkButton(
-            self.grading_frame, 
-            text="📝 Run Grading", 
+            self.grading_frame,
+            text="📝 Run Grading",
             command=self.start_grading,
             height=36,
             width=200,  # Make button wider
@@ -778,16 +789,16 @@ class App(ctk.CTk):
             hover_color=("#8649a3", "#61347a")  # Darker purple on hover
         )
         self.run_button.grid(row=1, column=0, padx=15, pady=(5, 15))
-        
+
         # Add Slim Output Checkbox with improved styling
         self.slim_checkbox_frame = ctk.CTkFrame(self.grading_frame, fg_color="transparent")
         self.slim_checkbox_frame.grid(row=2, column=0, padx=15, pady=(0, 15), sticky="w")
-        
+
         self.slim_checkbox = ctk.CTkCheckBox(
-            self.slim_checkbox_frame, 
+            self.slim_checkbox_frame,
             text="Slim output",
                                            variable=self.slim_output_var,
-            onvalue=True, 
+            onvalue=True,
             offvalue=False,
             border_width=2,
             hover=True,
@@ -851,23 +862,23 @@ class App(ctk.CTk):
         self.clear_frame = ctk.CTkFrame(self.maintenance_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.clear_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
         self.clear_frame.grid_columnconfigure((0, 1), weight=1)
-        
+
         self.clear_label = ctk.CTkLabel(
-            self.clear_frame, 
-            text="🧹 Clear Actions", 
+            self.clear_frame,
+            text="🧹 Clear Actions",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["primary"]
         )
         self.clear_label.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 15))
-        
+
         button_height = 32
         button_corner = 6
         button_width = 140
-        
+
         # Clear buttons with improved styling and icons
         self.clear_grades_button = ctk.CTkButton(
-            self.clear_frame, 
-            text="Clear Grades", 
+            self.clear_frame,
+            text="Clear Grades",
             command=lambda: self.run_task(lambda: clear_grades(self.gui_questions)),
             height=button_height,
             width=button_width,
@@ -875,10 +886,10 @@ class App(ctk.CTk):
             hover=True
         )
         self.clear_grades_button.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
-        
+
         self.clear_output_button = ctk.CTkButton(
-            self.clear_frame, 
-            text="Clear Output", 
+            self.clear_frame,
+            text="Clear Output",
             command=lambda: self.run_task(lambda: clear_output(self.gui_questions)),
             height=button_height,
             width=button_width,
@@ -886,10 +897,10 @@ class App(ctk.CTk):
             hover=True
         )
         self.clear_output_button.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        
+
         self.clear_c_button = ctk.CTkButton(
-            self.clear_frame, 
-            text="Clear C Files", 
+            self.clear_frame,
+            text="Clear C Files",
             command=lambda: self.run_task(lambda: clear_c_files(self.gui_questions)),
             height=button_height,
             width=button_width,
@@ -897,10 +908,10 @@ class App(ctk.CTk):
             hover=True
         )
         self.clear_c_button.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
-        
+
         self.clear_excels_button = ctk.CTkButton(
-            self.clear_frame, 
-            text="Clear Excels", 
+            self.clear_frame,
+            text="Clear Excels",
             command=lambda: self.run_task(clear_excels),
             height=button_height,
             width=button_width,
@@ -908,10 +919,10 @@ class App(ctk.CTk):
             hover=True
         )
         self.clear_excels_button.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-        
+
         self.clear_build_button = ctk.CTkButton(
-            self.clear_frame, 
-            text="Clear Build Files", 
+            self.clear_frame,
+            text="Clear Build Files",
             command=lambda: self.run_task(clear_build_files),
             height=button_height,
             width=button_width,
@@ -941,11 +952,11 @@ class App(ctk.CTk):
             hover=True
         )
         self.clear_review_button.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
-        
+
         self.clear_all_button = ctk.CTkButton(
-            self.clear_frame, 
-            text="Clear All", 
-            command=lambda: self.run_task(lambda: clear_all(self.gui_questions)), 
+            self.clear_frame,
+            text="Clear All",
+            command=lambda: self.run_task(lambda: clear_all(self.gui_questions)),
             fg_color=COLORS["danger"],
             hover_color=("#c0392b", "#922b21"),  # Darker red on hover
             height=button_height,
@@ -962,8 +973,8 @@ class App(ctk.CTk):
 
         # Title for Dependencies section
         self.dependencies_label = ctk.CTkLabel(
-            self.dependencies_frame, 
-            text="🔌 Dependencies", 
+            self.dependencies_frame,
+            text="🔌 Dependencies",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["primary"]
         )
@@ -975,15 +986,15 @@ class App(ctk.CTk):
         self.vs_path_frame.grid_columnconfigure(0, weight=1)
 
         self.vs_path_label = ctk.CTkLabel(
-            self.vs_path_frame, 
-            text="Visual Studio Path:", 
+            self.vs_path_frame,
+            text="Visual Studio Path:",
             anchor="w"
         )
         self.vs_path_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
         self.vs_path_var = tk.StringVar(value=default_vs_path)
         self.vs_path_entry = ctk.CTkEntry(
-            self.vs_path_frame, 
+            self.vs_path_frame,
             textvariable=self.vs_path_var,
             height=32,
             border_width=1
@@ -998,8 +1009,8 @@ class App(ctk.CTk):
         self.vs_buttons_frame.grid_columnconfigure(1, weight=1)
 
         self.browse_vs_path_button = ctk.CTkButton(
-            self.vs_buttons_frame, 
-            text="📁 Browse", 
+            self.vs_buttons_frame,
+            text="📁 Browse",
             command=self.browse_vs_path,
             height=32,
             width=120,
@@ -1010,8 +1021,8 @@ class App(ctk.CTk):
         self.browse_vs_path_button.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
         self.apply_vs_path_button = ctk.CTkButton(
-            self.vs_buttons_frame, 
-            text="Apply VS Path", 
+            self.vs_buttons_frame,
+            text="Apply VS Path",
             command=self.apply_vs_path,
             height=32,
             width=120,
@@ -1022,9 +1033,9 @@ class App(ctk.CTk):
         self.apply_vs_path_button.grid(row=0, column=1, padx=5, pady=5, sticky="e")
 
         self.vs_path_status_label = ctk.CTkLabel(
-            self.vs_path_frame, 
-            text="Status: Unchecked", 
-            anchor="w", 
+            self.vs_path_frame,
+            text="Status: Unchecked",
+            anchor="w",
             text_color="gray",
             height=25
         )
@@ -1036,15 +1047,15 @@ class App(ctk.CTk):
         self.winrar_path_frame.grid_columnconfigure(0, weight=1)
 
         self.winrar_path_label = ctk.CTkLabel(
-            self.winrar_path_frame, 
-            text="WinRAR Path:", 
+            self.winrar_path_frame,
+            text="WinRAR Path:",
             anchor="w"
         )
         self.winrar_path_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
         self.winrar_path_var = tk.StringVar(value=default_winrar_path)
         self.winrar_path_entry = ctk.CTkEntry(
-            self.winrar_path_frame, 
+            self.winrar_path_frame,
             textvariable=self.winrar_path_var,
             height=32,
             border_width=1
@@ -1059,8 +1070,8 @@ class App(ctk.CTk):
         self.winrar_buttons_frame.grid_columnconfigure(1, weight=1)
 
         self.browse_winrar_path_button = ctk.CTkButton(
-            self.winrar_buttons_frame, 
-            text="📁 Browse", 
+            self.winrar_buttons_frame,
+            text="📁 Browse",
             command=self.browse_winrar_path,
             height=32,
             width=120,
@@ -1071,8 +1082,8 @@ class App(ctk.CTk):
         self.browse_winrar_path_button.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
         self.apply_winrar_path_button = ctk.CTkButton(
-            self.winrar_buttons_frame, 
-            text="Apply WinRAR Path", 
+            self.winrar_buttons_frame,
+            text="Apply WinRAR Path",
             command=self.apply_winrar_path,
             height=32,
             width=120,
@@ -1083,9 +1094,9 @@ class App(ctk.CTk):
         self.apply_winrar_path_button.grid(row=0, column=1, padx=5, pady=5, sticky="e")
 
         self.winrar_path_status_label = ctk.CTkLabel(
-            self.winrar_path_frame, 
-            text="Status: Unchecked", 
-            anchor="w", 
+            self.winrar_path_frame,
+            text="Status: Unchecked",
+            anchor="w",
             text_color="gray",
             height=25
         )
@@ -1093,16 +1104,16 @@ class App(ctk.CTk):
 
         # --- Progress/Cancel Frame Content ---
         self.progress_desc_label = ctk.CTkLabel(
-            self.progress_cancel_frame, 
-            text="Idle", 
+            self.progress_cancel_frame,
+            text="Idle",
             anchor="w",
             font=ctk.CTkFont(size=12)
         )
         self.progress_desc_label.grid(row=0, column=0, padx=(15, 5), pady=10, sticky="w")
 
         self.progress_bar = ctk.CTkProgressBar(
-            self.progress_cancel_frame, 
-            orientation="horizontal", 
+            self.progress_cancel_frame,
+            orientation="horizontal",
             mode="determinate",
             height=15,
             progress_color=COLORS["secondary"]
@@ -1111,10 +1122,10 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
 
         self.cancel_button = ctk.CTkButton(
-            self.progress_cancel_frame, 
-            text="Cancel Task", 
-            command=self.cancel_current_task, 
-            state="disabled", 
+            self.progress_cancel_frame,
+            text="Cancel Task",
+            command=self.cancel_current_task,
+            state="disabled",
             fg_color=COLORS["danger"],
             hover_color=("#c0392b", "#922b21"),  # Darker red on hover
             height=30,
@@ -1141,12 +1152,12 @@ class App(ctk.CTk):
             corner_radius=6,
         )
         self.console_toggle_button.grid(row=0, column=1, sticky="e", padx=15, pady=(10, 5))
-        
+
         # The main log text box with improved styling
         self.log_textbox = ctk.CTkTextbox(
-            self.log_frame, 
-            state="disabled", 
-            wrap="word", 
+            self.log_frame,
+            state="disabled",
+            wrap="word",
             font=("Consolas", 11),
             corner_radius=6,
             border_width=1,
@@ -1173,10 +1184,10 @@ class App(ctk.CTk):
 
         self.setup_button_commands() # Bind commands AFTER initial validation might disable them
 
-        # --- Populate initial config & Validate --- 
+        # --- Populate initial config & Validate ---
         self.populate_config_fields()
         self.apply_gui_configuration(show_dialogs=False) # Validate initial config without blocking startup
-        
+
         # Perform initial validation of VS and WinRAR paths when the GUI starts
         # Use after() to ensure GUI is fully initialized first
         if not os.getenv("C_TESTER_SKIP_STARTUP_VALIDATION"):
@@ -1259,13 +1270,13 @@ class App(ctk.CTk):
             self.preprocess_button.configure(state="disabled")
             self.update_setup_readiness_banner()
             return
-        
+
         # First check if a zip file is selected
         if not zip_path:
             self.preprocess_button.configure(state="disabled")
             self.update_setup_readiness_banner()
             return
-        
+
         # Then check if RAR support is enabled and WinRAR path is valid
         if self.rar_support_var.get() and self.winrar_path_dirty:
             self.preprocess_button.configure(state="disabled")
@@ -1675,28 +1686,28 @@ class App(ctk.CTk):
         # Get current RAR support setting from checkbox
         rar_support = self.rar_support_var.get()
         self.gui_rar_support = rar_support
-        
+
         # Get current simple naming setting
         simple_naming = self.simple_naming_var.get()
         self.gui_simple_naming = simple_naming
         configuration.use_simple_naming = simple_naming
         self.save_current_gui_config()
-        
+
         log(f"Starting preprocessing task for: {zip_path} (RAR support: {'enabled' if rar_support else 'disabled'}, Simple naming: {'enabled' if simple_naming else 'disabled'})", level="info")
         # Pass the CURRENT GUI config including the WinRAR path
         preprocess_submissions(
-            zip_path, 
-            self.gui_questions, 
-            rar_support, 
-            progress_callback, 
-            cancel_event, 
+            zip_path,
+            self.gui_questions,
+            rar_support,
+            progress_callback,
+            cancel_event,
             winrar_path=self.gui_winrar_path
         )
 
     def task_run_grading_internal(self, progress_callback=None, cancel_event=None):
         log("Starting grading task...", level="info")
-        
-        # --- Re-validate configuration just before running --- 
+
+        # --- Re-validate configuration just before running ---
         log("Re-validating configuration before grading...", "info")
         config_errors = validate_config(self.gui_questions, self.gui_weights)
         if config_errors:
@@ -1705,17 +1716,17 @@ class App(ctk.CTk):
             log("Validation failed before grading run.", "error")
             messagebox.showerror("Grading Configuration Error", error_string)
             # Mark config as invalid in the GUI state
-            self.config_valid = False 
+            self.config_valid = False
             self.config_dirty = True # Force user to re-apply
             self.after(10, self.update_dependent_button_states) # Update UI after returning
-            self.after(10, lambda: self.config_status_label.configure(text="Status: INVALID", text_color=COLORS["danger"])) 
+            self.after(10, lambda: self.config_status_label.configure(text="Status: INVALID", text_color=COLORS["danger"]))
             self.after(10, lambda: self.configure_apply_buttons(border_color=COLORS["danger"], border_width=2))
             return # Stop the task
         else:
             log("Configuration validated successfully.", "info")
             self.save_current_gui_config()
-            
-        # --- Proceed with Grading Task --- 
+
+        # --- Proceed with Grading Task ---
         compile_repair_provider = self.make_compile_repair_provider()
         run_tests(
             self.gui_questions,
@@ -1733,7 +1744,7 @@ class App(ctk.CTk):
              # Get slim state from checkbox variable
              slim_mode = self.slim_output_var.get()
              per_error_penalty_mode = self.gui_per_error_penalty
-             
+
              # Log the modes being used
              mode_str = "per error" if per_error_penalty_mode else "once per student"
              scoring_details = self.gui_test_scoring_mode
@@ -1747,7 +1758,7 @@ class App(ctk.CTk):
                      f"-{self.gui_llm_compile_repair_penalty:g}"
                  )
              log(f"Creating Excel output (Slim mode: {slim_mode}, Penalty mode: {mode_str}, Test scoring: {scoring_details}, Compile repair: {repair_details})...", "info")
-             
+
              # Pass the per_error_penalty parameter
              create_excels(self.gui_questions, self.gui_weights, self.gui_penalty, slim=slim_mode, per_error_penalty=per_error_penalty_mode)
              log("Excel creation finished.", level="info")
@@ -1844,14 +1855,14 @@ class App(ctk.CTk):
         for widget in last_row_widgets:
             widget.destroy()
         self.mark_config_dirty()
-        
+
     def mark_config_dirty(self):
         """Updates UI to show configuration needs applying."""
         if self.config_dirty: return  # Already marked
         self.config_dirty = True
         self.config_status_label.configure(text="Status: Unapplied changes", text_color=COLORS["warning"])
         # Highlight Apply button (e.g., border color)
-        self.configure_apply_buttons(border_color=COLORS["warning"], border_width=2) 
+        self.configure_apply_buttons(border_color=COLORS["warning"], border_width=2)
         # Disable run buttons when dirty
         self.preprocess_button.configure(state="disabled")
         self.run_button.configure(state="disabled")
@@ -1908,13 +1919,13 @@ class App(ctk.CTk):
 
             if not q_name and not weight_str:
                 continue  # Skip completely empty rows
-            
+
             if not q_name:
                  parse_errors.append(f"Row {i+1}: Question folder name cannot be empty.")
                  continue  # Skip this row for weight processing
-            
+
             parsed_questions.append(q_name)
-            
+
             try:
                 weight = int(weight_str)
                 parsed_weights[q_name] = weight
@@ -1931,7 +1942,7 @@ class App(ctk.CTk):
                  parsed_penalty = None  # Mark as invalid
         except ValueError:
             parse_errors.append(f"Invalid numeric value for Penalty: '{penalty_str}'.")
-            
+
         # Get per-error penalty value
         parsed_per_error_penalty = self.per_error_penalty_var.get()
 
@@ -1976,7 +1987,7 @@ class App(ctk.CTk):
             parse_errors.append(
                 f"Invalid numeric value for compile repair max attempts: '{self.compile_repair_attempts_entry.get().strip()}'."
             )
-        
+
         # Get RAR support value
         parsed_rar_support = self.rar_support_var.get()
 
@@ -2005,7 +2016,7 @@ class App(ctk.CTk):
              status_color = COLORS["danger"]
              apply_border_color = COLORS["danger"]  # Error border
              apply_border_width = 2
-             
+
              # Format validation errors with bullet points and better spacing
              formatted_errors = []
              for error in validation_errors:
@@ -2027,7 +2038,7 @@ class App(ctk.CTk):
                          formatted_errors.append(f"• {error}")
                  else:
                      formatted_errors.append(f"• {error}")
-             
+
              if show_dialogs:
                  messagebox.showwarning("Configuration Validation Error", "\n\n".join(formatted_errors))
         else:
@@ -2062,7 +2073,7 @@ class App(ctk.CTk):
         if self.config_valid and not self.config_dirty:
             # Check the preprocess button state separately
             self.check_preprocess_button_state()
-            
+
             # Enable run button only if VS path is valid
             if not self.vs_path_dirty:
                 self.run_button.configure(
@@ -2075,7 +2086,7 @@ class App(ctk.CTk):
                     state="disabled",
                     fg_color=("gray80", "gray30")
                 )
-            
+
             # Enable clear buttons if questions exist
             if self.gui_questions:
                 clear_state = "normal"
@@ -2096,13 +2107,13 @@ class App(ctk.CTk):
         else:
             # If config is invalid, disable most buttons
             disabled_color = ("gray80", "gray30")
-            
+
             # Disable run button if config is invalid
             self.run_button.configure(
                 state="disabled",
                 fg_color=disabled_color
             )
-            
+
             # Disable question-dependent clear buttons if config is invalid
             clear_state = "disabled"
             self.clear_grades_button.configure(state=clear_state)
@@ -2111,7 +2122,7 @@ class App(ctk.CTk):
             self.clear_repair_button.configure(state=clear_state)
             self.clear_review_button.configure(state=clear_state)
             self.clear_all_button.configure(state=clear_state)
-            
+
             # Check preprocess button state separately
             self.check_preprocess_button_state()
         self.update_excel_button_state()
@@ -2128,7 +2139,7 @@ class App(ctk.CTk):
                 return
             self.vs_path_var.set(filepath)
             self.mark_vs_path_dirty()
-    
+
     def browse_winrar_path(self):
         filepath = filedialog.askopenfilename(
             title="Select WinRAR Executable",
@@ -2141,7 +2152,7 @@ class App(ctk.CTk):
                 return
             self.winrar_path_var.set(filepath)
             self.mark_winrar_path_dirty()
-    
+
     def mark_vs_path_dirty(self):
         """Updates UI to show VS path needs applying."""
         if self.vs_path_dirty: return  # Already marked
@@ -2152,23 +2163,23 @@ class App(ctk.CTk):
         self.run_button.configure(state="disabled")
         log("Visual Studio path changed, please Apply.", "info")
         self.update_dependent_button_states()
-    
+
     def mark_winrar_path_dirty(self):
         """Updates UI to show WinRAR path needs applying."""
         if self.winrar_path_dirty: return  # Already marked
         self.winrar_path_dirty = True
         self.winrar_path_status_label.configure(text="Status: Path changed (unapplied)", text_color=COLORS["warning"])
         self.apply_winrar_path_button.configure(border_color=COLORS["warning"], border_width=2)
-        
+
         # Disable preprocess button when WinRAR path is dirty AND RAR support is enabled
         if self.rar_support_var.get():
             self.preprocess_button.configure(state="disabled")
             log("RAR support enabled but WinRAR path is not applied. Please Apply the WinRAR path.", "info")
         else:
             log("RAR support disabled, preprocessor will not use WinRAR path.", "info")
-        
+
         self.update_dependent_button_states()
-    
+
     def apply_vs_path(self):
         """Validates and applies the VS path."""
         vs_path = self.vs_path_var.get().strip()
@@ -2176,23 +2187,23 @@ class App(ctk.CTk):
             messagebox.showerror("Error", "Visual Studio path cannot be empty.")
             self.vs_path_status_label.configure(text="Status: Invalid (empty path)", text_color=COLORS["danger"])
             return
-        
+
         # Check if path has the correct extension
         if not vs_path.lower().endswith('.bat'):
             messagebox.showerror("Error", "Visual Studio path must be a .bat file.")
             self.vs_path_status_label.configure(text="Status: Invalid (not a .bat file)", text_color=COLORS["danger"])
             return
-        
+
         # Check if file exists
         if not os.path.exists(vs_path):
             messagebox.showerror("Error", f"Visual Studio path does not exist: {vs_path}")
             self.vs_path_status_label.configure(text="Status: Invalid (file not found)", text_color=COLORS["danger"])
             return
-        
+
         # Update status to show we're validating
         self.vs_path_status_label.configure(text="Status: Validating...", text_color=COLORS["warning"])
         self.apply_vs_path_button.configure(state="disabled")
-        
+
         # Run validation in a background thread
         threading.Thread(target=self._validate_vs_path_thread, args=(vs_path,), daemon=True).start()
 
@@ -2202,21 +2213,21 @@ class App(ctk.CTk):
             # Basic test - just check if the file can be executed
             test_cmd = f'cmd /c ""{vs_path}" && echo Success"'
             result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
-            
+
             # Schedule UI updates on the main thread
             if result.returncode != 0:
                 self.after(0, lambda: self._handle_vs_validation_failure(vs_path, f"Failed to execute batch file:\n{result.stderr}"))
                 return
-            
+
             # Check if "cl.exe" is in the path after running vcvars64.bat
             test_cmd = f'cmd /c ""{vs_path}" && where cl.exe"'
             result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
-            
+
             if result.returncode != 0:
                 self.after(0, lambda: self._handle_vs_validation_warning(vs_path, "Visual Studio environment doesn't include cl.exe compiler.\nMake sure Visual C++ build tools are installed."))
             else:
                 self.after(0, lambda: self._handle_vs_validation_success(vs_path))
-                
+
         except Exception as e:
             self.after(0, lambda: self._handle_vs_validation_failure(vs_path, f"Validation error: {str(e)}"))
 
@@ -2254,25 +2265,25 @@ class App(ctk.CTk):
             messagebox.showerror("Error", "WinRAR path cannot be empty.")
             self.winrar_path_status_label.configure(text="Status: Invalid (empty path)", text_color=COLORS["danger"])
             return
-        
+
         # Check if path has the correct extension
         if not winrar_path.lower().endswith('.exe'):
             messagebox.showerror("Error", "WinRAR path must be an .exe file.")
             self.winrar_path_status_label.configure(text="Status: Invalid (not an .exe file)", text_color=COLORS["danger"])
             return
-        
+
         # Check if file exists
         if not os.path.exists(winrar_path):
             messagebox.showerror("Error", f"WinRAR path does not exist: {winrar_path}")
             self.winrar_path_status_label.configure(text="Status: Invalid (file not found)", text_color=COLORS["danger"])
             return
-        
+
         # Check if it contains 'rar' in the path to ensure it's likely a WinRAR executable
         if 'rar' not in winrar_path.lower():
             if not messagebox.askyesno("Warning", f"Path doesn't appear to be a RAR executable: {winrar_path}\n\nContinue anyway?"):
                 self.winrar_path_status_label.configure(text="Status: Warning (not RAR-related)", text_color=COLORS["warning"])
                 return
-        
+
         # Basic test - just check if the file can be executed
         try:
             # For UnRAR.exe, try to get version info
@@ -2281,13 +2292,13 @@ class App(ctk.CTk):
             # For WinRAR.exe, try with /? parameter
             else:
                 test_cmd = f'"{winrar_path}" /?'
-                
+
             result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
             if result.returncode != 0 and 'unrar.exe' in winrar_path.lower():
                 messagebox.showerror("Error", f"Failed to execute UnRAR executable:\n{result.stderr}")
                 self.winrar_path_status_label.configure(text="Status: Invalid (execution failed)", text_color=COLORS["danger"])
                 return
-                
+
             # Success!
             self.gui_winrar_path = winrar_path
             self.winrar_path_dirty = False
@@ -2296,7 +2307,7 @@ class App(ctk.CTk):
             log(f"WinRAR path applied and validated: {winrar_path}", "success")
             self.save_current_gui_config()
             self.update_dependent_button_states()
-            
+
         except Exception as e:
             messagebox.showwarning("Warning", f"Cannot verify WinRAR executable:\n{str(e)}\n\nPath will be applied but might not work correctly.")
             self.winrar_path_status_label.configure(text="Status: Applied with warnings", text_color=COLORS["warning"])
@@ -2311,7 +2322,7 @@ class App(ctk.CTk):
         """Updates button states when RAR support is toggled"""
         # Update preprocess button state
         self.check_preprocess_button_state()
-        
+
         # Log appropriate message
         if self.rar_support_var.get() and self.winrar_path_dirty:
             log("RAR support enabled but WinRAR path is not validated. Please Apply the WinRAR path.", "info")
@@ -2321,7 +2332,7 @@ class App(ctk.CTk):
     def validate_initial_paths(self):
         """Validate VS and WinRAR paths when the GUI first opens."""
         log("Performing initial dependency validation...", "info")
-        
+
         # Validate VS path
         vs_path = self.vs_path_var.get().strip()
         if vs_path and os.path.exists(vs_path) and vs_path.lower().endswith('.bat'):
@@ -2336,7 +2347,7 @@ class App(ctk.CTk):
             self.vs_path_status_label.configure(text="Status: Not validated", text_color=COLORS["warning"])
             self.run_button.configure(state="disabled")
             log("Initial VS path validation failed. Please validate VS path before running grading.", "warning")
-        
+
         # Validate WinRAR path regardless of RAR support setting
         winrar_path = self.winrar_path_var.get().strip()
         if winrar_path and os.path.exists(winrar_path) and winrar_path.lower().endswith('.exe'):
@@ -2349,12 +2360,12 @@ class App(ctk.CTk):
             self.winrar_path_dirty = True
             self.winrar_path_status_label.configure(text="Status: Not validated", text_color=COLORS["warning"])
             log("Initial WinRAR path validation failed.", "warning")
-            
+
             # Only disable Preprocess button if RAR support is enabled
             if self.rar_support_var.get():
                 self.preprocess_button.configure(state="disabled")
                 log("RAR support is enabled but WinRAR path is invalid. Preprocess button disabled.", "warning")
-        
+
         # Update button states
         self.update_dependent_button_states()
 
@@ -2364,20 +2375,20 @@ class App(ctk.CTk):
             # Basic test - just check if the file can be executed
             test_cmd = f'cmd /c ""{vs_path}" && echo Success"'
             result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
-            
+
             if result.returncode != 0:
                 self.after(0, lambda: self._handle_initial_vs_validation_failure())
                 return
-            
+
             # Check if "cl.exe" is in the path after running vcvars64.bat
             test_cmd = f'cmd /c ""{vs_path}" && where cl.exe"'
             result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
-            
+
             if result.returncode != 0:
                 self.after(0, lambda: self._handle_initial_vs_validation_warning())
             else:
                 self.after(0, lambda: self._handle_initial_vs_validation_success())
-                
+
         except Exception:
             self.after(0, lambda: self._handle_initial_vs_validation_failure())
 
@@ -2413,12 +2424,12 @@ class App(ctk.CTk):
             # For WinRAR.exe, try with /? parameter
             else:
                 test_cmd = f'"{winrar_path}" /?'
-                
+
             result = subprocess.run(test_cmd, capture_output=True, text=True, shell=True)
             if result.returncode != 0 and 'unrar.exe' in winrar_path.lower():
                 self.after(0, lambda: self._handle_initial_winrar_validation_failure())
                 return
-            
+
             # Success
             self.after(0, lambda: self._handle_initial_winrar_validation_success())
         except Exception:
@@ -3016,7 +3027,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
                 self.review_attention_button.configure(state="disabled")
         else:
             self.key_status_label.configure(
-                text="Ready. Reviewed rows are locked and require deleting their review JSON to re-run.",
+                text="Ready. Current reviews are locked; stale evidence is automatically unlocked for re-review.",
                 text_color=COLORS["secondary"],
             )
             enabled = "normal" if not self.review_running else "disabled"
@@ -3170,6 +3181,9 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             cause = review_cause_label(cause_key)
             status_text = "Reviewed"
             tag = cause_key if cause_key in {"checker_or_app", "unclear"} else "reviewed"
+        elif case.stale_review:
+            status_text = "Stale — re-review"
+            tag = "unclear"
         self.review_tree.insert(
             "",
             "end",
@@ -3215,7 +3229,11 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             "question": self._natural_sort_key(case.question),
             "score": case.question_score,
             "final": case.final_grade,
-            "status": "Reviewed" if case.reviewed else case.code_source.title(),
+            "status": (
+                "Reviewed"
+                if case.reviewed
+                else ("Stale — re-review" if case.stale_review else case.code_source.title())
+            ),
             "cause": review_cause_label(review_response_cause(response if isinstance(response, dict) else {})),
             "notes": (case.notes or case.grade_text or "").lower(),
         }
@@ -3264,7 +3282,9 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             if not case.reviewed:
                 continue
             response = (case.saved_review or {}).get("response", {})
-            if review_response_cause(response if isinstance(response, dict) else {}) == "checker_or_app":
+            feedback = dict(response) if isinstance(response, dict) else {}
+            feedback["cause"] = review_response_cause(feedback)
+            if corroborated_review_feedback_item(feedback):
                 defects.append(case)
         return defects
 
@@ -3326,6 +3346,10 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
                     "cause": "checker_or_app",
                     "summary": str(response.get("summary", "")),
                     "risk_note": str(response.get("risk_note", "")),
+                    "semantic_assessment": str(response.get("semantic_assessment", "unclear")),
+                    "format_requirement": str(response.get("format_requirement", "unclear")),
+                    "format_requirement_evidence": str(response.get("format_requirement_evidence", "")),
+                    "root_causes": response.get("root_causes", []),
                 }
             )
         # Prefer the currently selected question if it has defects; otherwise the densest question.
@@ -4614,8 +4638,13 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         metadata = question_config.get("metadata", {}) if isinstance(question_config, dict) else {}
         audit_status = metadata.get("audit_status", "not_run")
         test_status = metadata.get("test_status", "not_run")
+        if (
+            metadata.get("calibration_status") == "passed"
+            and audit_metadata_is_current(question_config, question)
+        ):
+            return f"{question}: verified both ways", COLORS["secondary"]
         if audit_status == "passed":
-            return f"{question}: audited", COLORS["secondary"]
+            return f"{question}: audit stale/incomplete", COLORS["warning"]
         if audit_status == "partial":
             return f"{question}: audit partial", COLORS["warning"]
         if audit_status == "uncertain":
@@ -4634,8 +4663,22 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         checker_name = question_config.get("checker", "unknown")
         audit_status = metadata.get("audit_status", "not_run")
         test_status = metadata.get("test_status", "not_run")
+        positive_status = metadata.get("positive_gate_status", "not_run")
+        negative_status = metadata.get("negative_gate_status", "not_run")
+        if (
+            metadata.get("calibration_status") == "passed"
+            and audit_metadata_is_current(question_config, question)
+        ):
+            return (
+                f"{question}: verified — equivalent variants pass; semantic mutations fail ({checker_name})",
+                COLORS["secondary"],
+            )
         if audit_status == "passed":
-            return f"{question}: audit passed, checker saved ({checker_name})", COLORS["secondary"]
+            return (
+                f"{question}: audit exists but bidirectional gates are not current "
+                f"(accept={positive_status}, reject={negative_status}; {checker_name})",
+                COLORS["warning"],
+            )
         if audit_status == "partial":
             return f"{question}: audit partial; some LLM reviews errored but none flagged ({checker_name})", COLORS["warning"]
         if audit_status == "uncertain":
@@ -4673,6 +4716,9 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 "saved": True,
                 "test_status": test_status,
                 "audit_status": "not_run",
+                "calibration_status": "not_run",
+                "positive_gate_status": "not_run",
+                "negative_gate_status": "not_run",
             }
         )
         self.checker_config.setdefault("questions", {})[question] = saved_config
@@ -5048,22 +5094,64 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         tests_ok = False
         warnings = []
         saved = False
-        if suggestion.status == "supported" and suggestion.checker:
+        for draft_round in range(1, 4):
+            if suggestion.status != "supported" or not suggestion.checker:
+                break
             question_config = {"checker": suggestion.checker, "config": suggestion.config}
             if suggestion.structural_requirements:
                 question_config["structural_requirements"] = suggestion.structural_requirements
-            self.after(0, lambda: self.set_llm_activity_step(f"{question}: running deterministic checker tests"))
+            self.after(
+                0,
+                lambda current_round=draft_round: self.set_llm_activity_step(
+                    f"{question}: deterministic bidirectional tests, draft {current_round}/3"
+                ),
+            )
             configuration_errors = checker_config_errors(question_config)
             structural_errors = structural_requirements_errors(question_config)
-            warnings.extend(configuration_errors)
-            warnings.extend(structural_errors)
+            current_warnings = list(configuration_errors) + list(structural_errors)
             if not configuration_errors:
                 rows = run_checker_tests(question_config, expected_outputs)
                 tests_ok, test_warnings = self.evaluate_checker_test_rows(rows)
-                warnings.extend(test_warnings)
+                current_warnings.extend(test_warnings)
+            warnings = current_warnings
             if tests_ok and not structural_errors:
                 self.mark_checker_saved(question, question_config, test_status="passed")
                 saved = True
+                break
+            if draft_round == 3:
+                break
+            deterministic_feedback = [
+                AuditResult(
+                    "deterministic_probe",
+                    question,
+                    "flagged",
+                    "flagged",
+                    "high",
+                    warning,
+                    checker_behavior=(
+                        "false_reject" if "Expected accept" in warning else "false_accept"
+                    ),
+                    evidence="Deterministic bidirectional checker test.",
+                )
+                for warning in current_warnings[:12]
+            ]
+            self.after(
+                0,
+                lambda current_round=draft_round: self.set_llm_activity_step(
+                    f"{question}: refining failed draft {current_round}/3"
+                ),
+            )
+            suggestion = refine_checker(
+                question,
+                original_code,
+                inputs[:8],
+                expected_outputs[:8],
+                question_config,
+                deterministic_feedback,
+                provider,
+                focused_context.text,
+                focused_context.images,
+            )
         return {
             "question": question,
             "suggestion": suggestion,
@@ -5154,11 +5242,11 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         last_status = "flagged"
         review_feedback = list(self.pending_review_feedback.get(question, []))
 
-        for round_number in range(1, 4):
+        for round_number in range(1, MAX_CALIBRATION_ROUNDS + 1):
             self.after(
                 0,
                 lambda current_round=round_number: self.set_calibration_progress(
-                    f"{question}: round {current_round}/3 — grading all students"
+                    f"{question}: round {current_round}/{MAX_CALIBRATION_ROUNDS} — grading all students"
                 ),
             )
             self.force_grade_outputs()
@@ -5189,7 +5277,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.after(
                 0,
                 lambda current_round=round_number, count=len(cases): self.set_calibration_progress(
-                    f"{question}: round {current_round}/3 — auditing 0/{count}"
+                    f"{question}: round {current_round}/{MAX_CALIBRATION_ROUNDS} — auditing 0/{count}"
                 ),
             )
             results = audit_cases_with_llm(
@@ -5203,7 +5291,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                     lambda: (
                         self.add_audit_result(result, done, total),
                         self.set_calibration_progress(
-                            f"{question}: round {current_round}/3 — auditing {done}/{total}"
+                            f"{question}: round {current_round}/{MAX_CALIBRATION_ROUNDS} — auditing {done}/{total}"
                         ),
                     ),
                 ),
@@ -5216,7 +5304,10 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             flagged = [result for result in results if result.status == "flagged"]
             uncertain = [result for result in results if result.status == "uncertain"]
             errors = [result for result in results if result.status == "error"]
-            force_review_refine = bool(review_feedback) and round_number == 1
+            corroborated_feedback = [
+                item for item in review_feedback if corroborated_review_feedback_item(item)
+            ]
+            force_review_refine = bool(corroborated_feedback) and round_number == 1
             round_summary = {
                 "round": round_number,
                 "sampled": len(results),
@@ -5247,10 +5338,18 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                     round_summary["reason"] = "No checker defects were flagged."
                 break
 
+            if round_number == MAX_CALIBRATION_ROUNDS:
+                last_status = "flagged"
+                round_summary.update(
+                    status="flagged",
+                    reason="Checker defects remain after the final audit holdout; no unverified candidate was promoted.",
+                )
+                break
+
             self.after(
                 0,
                 lambda current_round=round_number: self.set_calibration_progress(
-                    f"{question}: round {current_round}/3 — proposing a guarded improvement"
+                    f"{question}: round {current_round}/{MAX_CALIBRATION_ROUNDS} — proposing a guarded improvement"
                 ),
             )
             focused_context = assignment_context_for_question(assignment_context, question)
@@ -5264,7 +5363,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 provider,
                 focused_context.text,
                 focused_context.images,
-                review_feedback=review_feedback if force_review_refine else None,
+                review_feedback=corroborated_feedback if force_review_refine else None,
             )
             if proposal.status != "supported" or not proposal.checker:
                 round_summary.update(status="rejected", reason="LLM did not produce a supported candidate.")
@@ -5282,6 +5381,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
             candidate_rows = run_checker_tests(candidate, expected_outputs, max_cases=len(expected_outputs))
             candidate_tests_ok, candidate_warnings = self.evaluate_checker_test_rows(candidate_rows)
+            feedback_rows = review_feedback_test_rows(candidate, corroborated_feedback)
+            feedback_ok, feedback_failures = validate_candidate_against_rows(candidate, feedback_rows)
             cumulative_ok, cumulative_failures = validate_candidate_against_rows(candidate, cumulative_rows)
             preserves_passed, changed_ids = candidate_preserves_audited_cases(
                 question,
@@ -5289,9 +5390,14 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 active_config,
                 candidate,
                 expected_outputs,
+                allowed_changed_ids={
+                    str(item.get("student_id", ""))
+                    for item in corroborated_feedback
+                    if item.get("student_id")
+                },
             )
-            if not candidate_tests_ok or not cumulative_ok or not preserves_passed:
-                reasons = candidate_warnings + cumulative_failures
+            if not candidate_tests_ok or not feedback_ok or not cumulative_ok or not preserves_passed:
+                reasons = candidate_warnings + feedback_failures + cumulative_failures
                 if changed_ids:
                     reasons.append(f"changed {len(changed_ids)} previously passed audited student(s)")
                 reason = "; ".join(reasons[:8]) or "candidate failed no-regression gates"
@@ -5318,6 +5424,13 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
             active_config = editable_checker_config(promoted)
             cumulative_rows.extend(candidate_rows)
+            cumulative_rows.extend(
+                {
+                    **row,
+                    "test_passed": True,
+                }
+                for row in feedback_rows
+            )
             needs_post_promotion_audit = True
             if force_review_refine:
                 self.pending_review_feedback.pop(question, None)
@@ -5331,7 +5444,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.after(
                 0,
                 lambda current_round=round_number: self.set_calibration_progress(
-                    f"{question}: round {current_round}/3 — promoted; regrading before next audit",
+                    f"{question}: round {current_round}/{MAX_CALIBRATION_ROUNDS} — promoted; regrading before next audit",
                     COLORS["secondary"],
                 ),
             )
@@ -5358,7 +5471,33 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             self.force_grade_outputs()
 
         metadata = self.checker_config["questions"][question].setdefault("metadata", {})
+        positive_rows = [row for row in cumulative_rows if bool(row.get("expected_pass", True))]
+        negative_rows = [row for row in cumulative_rows if not bool(row.get("expected_pass", True))]
+        metadata["positive_gate_status"] = (
+            "passed"
+            if positive_rows and all(row.get("test_passed", False) for row in positive_rows)
+            else "failed"
+        )
+        metadata["negative_gate_status"] = (
+            "passed"
+            if negative_rows and all(row.get("test_passed", False) for row in negative_rows)
+            else "failed"
+        )
+        if last_status == "passed" and (
+            metadata["positive_gate_status"] != "passed"
+            or metadata["negative_gate_status"] != "passed"
+        ):
+            last_status = "flagged"
+            round_summaries.append(
+                {
+                    "round": len(round_summaries) + 1,
+                    "status": "flagged",
+                    "reason": "Bidirectional positive/negative checker gates were incomplete or failed.",
+                }
+            )
         metadata["calibration_status"] = last_status
+        if last_status == "passed":
+            metadata.pop("calibration_rollback", None)
         metadata["calibration_rounds"] = round_summaries
         metadata["calibration_reviewed"] = total_reviewed
         save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
@@ -5482,6 +5621,23 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 audit_reviewed=len(question_results),
                 audit_errors=sum(1 for result in question_results if result.status == "error"),
                 audit_reasons=[result.reason for result in question_results],
+                audit_rubric_version=AUDIT_RUBRIC_VERSION,
+                audit_checker_hash=editable_checker_hash(
+                    self.checker_config.get("questions", {}).get(question, {})
+                ),
+                audit_evidence_fingerprint=stable_fingerprint(
+                    [
+                        {
+                            "student": result.student_id,
+                            "status": result.status,
+                            "behavior": result.checker_behavior,
+                            "reason": result.reason,
+                            "evidence": result.evidence,
+                        }
+                        for result in question_results
+                    ]
+                ),
+                audit_evidence_mtime=latest_audit_evidence_mtime(question),
             )
 
     def ensure_grade_outputs_for_audit(self, audit_questions):
@@ -5783,4 +5939,4 @@ class CheckerManagerWindow(ctk.CTkToplevel):
 
 if __name__ == "__main__":
     app = App()
-    app.mainloop() 
+    app.mainloop()

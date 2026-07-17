@@ -35,9 +35,15 @@ from .semantic_grading import compare_output, get_question_checker_config
 from .structural_analysis import StructuralCheckResult, analyze_source_file
 
 
+_ACTIVE_VS_ENV_PATH = None
+
+
 def setup_visual_studio_environment(vs_path_override=None):
-    log("Setting up Visual Studio environment...", "info", verbosity=1)
+    global _ACTIVE_VS_ENV_PATH
     active_vs_path = vs_path_override or vs_path
+    if _ACTIVE_VS_ENV_PATH == active_vs_path:
+        return True
+    log("Setting up Visual Studio environment...", "info", verbosity=1)
     command = f'cmd /c ""{active_vs_path}" && set"'
     try:
         result = subprocess.run(command, capture_output=True, text=True, shell=True)
@@ -52,6 +58,7 @@ def setup_visual_studio_environment(vs_path_override=None):
                     continue
                 os.environ[key] = value
         log("Visual Studio environment setup complete.", "success", verbosity=1)
+        _ACTIVE_VS_ENV_PATH = active_vs_path
         return True
     except Exception as e:
         log(f"Error setting up Visual Studio environment: {str(e)}", "error", verbosity=1)

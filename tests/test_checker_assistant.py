@@ -136,7 +136,9 @@ class TestCheckerAssistant(unittest.TestCase):
         )
         wrong_rows = [row for row in rows if row["variant"] == "wrong"]
 
-        self.assertEqual(len(rows), 3)
+        self.assertGreaterEqual(len(rows), 3)
+        self.assertTrue(any(row["variant"].startswith("accept_") for row in rows))
+        self.assertTrue(any(row["variant"].startswith("reject_") for row in rows))
         self.assertFalse(wrong_rows[0]["passed"])
 
     def test_fake_llm_audit_cases(self):
@@ -153,7 +155,7 @@ class TestCheckerAssistant(unittest.TestCase):
         results = audit_cases_with_llm([case], {"Q1": {"checker": "divisors", "config": {}}}, FakeLLMProvider())
 
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].status, "passed")
+        self.assertEqual(results[0].status, "uncertain")
 
     def test_audit_retries_malformed_json_once(self):
         class FlakyAuditProvider:

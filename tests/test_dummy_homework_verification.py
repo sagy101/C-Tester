@@ -62,7 +62,7 @@ class TestDummyHomeworkVerification(unittest.TestCase):
 
                 audit_results = audit_cases_with_llm(cases, checker_config["questions"], provider, max_workers=4)
                 self.assertEqual(len(audit_results), len(cases))
-                self.assertTrue(all(result.status == "passed" for result in audit_results))
+                self.assertTrue(all(result.status == "uncertain" for result in audit_results))
             finally:
                 os.chdir(original_cwd)
 

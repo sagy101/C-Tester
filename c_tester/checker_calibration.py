@@ -114,12 +114,14 @@ def candidate_preserves_audited_cases(
     active_config: dict,
     candidate: dict,
     expected_outputs: list[tuple[str, str]],
+    allowed_changed_ids: set[str] | None = None,
 ) -> tuple[bool, list[str]]:
     changed = []
+    allowed = {str(student_id) for student_id in (allowed_changed_ids or set())}
     for student_id in sorted(student_ids):
         active_signature = audited_case_signature(question, student_id, active_config, expected_outputs)
         candidate_signature = audited_case_signature(question, student_id, candidate, expected_outputs)
-        if active_signature != candidate_signature:
+        if active_signature != candidate_signature and str(student_id) not in allowed:
             changed.append(student_id)
     return not changed, changed
 

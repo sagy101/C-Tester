@@ -9,6 +9,7 @@ from c_tester.workflow_status import (
     review_cause_label,
     review_response_cause,
 )
+from c_tester.verification import editable_checker_hash
 
 
 class WorkflowStatusTests(unittest.TestCase):
@@ -18,8 +19,8 @@ class WorkflowStatusTests(unittest.TestCase):
         self.assertEqual(review_cause_label("student_code"), "Student")
         self.assertEqual(review_cause_label("checker_or_app"), "Checker")
 
-    def test_legacy_review_without_cause_defaults_to_student(self):
-        self.assertEqual(review_response_cause({"deduction_is_plausible": True}), "student_code")
+    def test_legacy_review_without_cause_requires_rereview(self):
+        self.assertEqual(review_response_cause({"deduction_is_plausible": True}), "unclear")
         self.assertEqual(review_response_cause({"deduction_is_plausible": False}), "unclear")
 
     def test_workflow_marks_review_attention_when_reviews_blame_checker(self):
@@ -31,6 +32,9 @@ class WorkflowStatusTests(unittest.TestCase):
                 with open(os.path.join("Q1", "review", "111.json"), "w", encoding="utf-8") as handle:
                     json.dump(
                         {
+                            "review_schema_version": 2,
+                            "evidence_fingerprint": "current-fixture",
+                            "evidence_mtime": 9999999999,
                             "student_id": "111",
                             "question": "Q1",
                             "final_grade": 0,
@@ -112,6 +116,37 @@ class WorkflowStatusTests(unittest.TestCase):
                 self.assertEqual(workflow["next_step"], "grade")
             finally:
                 os.chdir(original_cwd)
+
+    def test_checker_done_requires_current_two_sided_gates(self):
+        config = {"checker": "last_integer", "config": {}}
+        config["metadata"] = {
+            "calibration_status": "passed",
+            "audit_status": "passed",
+            "audit_rubric_version": 2,
+            "audit_checker_hash": editable_checker_hash(config),
+            "audit_evidence_fingerprint": "evidence",
+            "audit_evidence_mtime": 9999999999,
+            "positive_gate_status": "passed",
+            "negative_gate_status": "passed",
+        }
+        workflow = compute_workflow_status(
+            ["Q1"],
+            setup_readiness={"scoring": True},
+            checker_config={"questions": {"Q1": config}},
+            final_grades_path="missing-grades.xlsx",
+            checker_config_path="missing-checker.json",
+        )
+        self.assertEqual(workflow["steps"]["checker"]["status"], "done")
+
+        config["metadata"]["negative_gate_status"] = "failed"
+        workflow = compute_workflow_status(
+            ["Q1"],
+            setup_readiness={"scoring": True},
+            checker_config={"questions": {"Q1": config}},
+            final_grades_path="missing-grades.xlsx",
+            checker_config_path="missing-checker.json",
+        )
+        self.assertEqual(workflow["steps"]["checker"]["status"], "ready")
 
 
 if __name__ == "__main__":

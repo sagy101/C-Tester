@@ -19,6 +19,27 @@ class _UncertainProvider:
         return {"verdict": "uncertain", "risk": "medium", "reason": "evidence is truncated"}
 
 
+class _SequenceAuditProvider:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def complete_json(self, prompt, images=None, response_schema=None):
+        return self.responses.pop(0)
+
+
+def _audit_response(behavior, semantic, format_requirement="not_explicit", evidence="Values match"):
+    verdict = "flagged" if behavior in {"false_reject", "false_accept"} else "looks_correct"
+    return {
+        "verdict": verdict,
+        "semantic_assessment": semantic,
+        "format_requirement": format_requirement,
+        "checker_behavior": behavior,
+        "risk": "high" if verdict == "flagged" else "low",
+        "reason": f"Checker behavior is {behavior}.",
+        "evidence": evidence,
+    }
+
+
 class CheckerCalibrationTests(unittest.TestCase):
     def test_versions_keep_parent_and_candidate_hashes(self):
         active = {"checker": "exact", "config": {}, "metadata": {}}
@@ -118,6 +139,55 @@ class CheckerCalibrationTests(unittest.TestCase):
         case = AuditCase("123", "Q1", 50, "Grade: 50", "truncated", {}, {})
         result = _audit_one_case(case, {"checker": "exact", "config": {}}, _UncertainProvider(), AssignmentContext())
         self.assertEqual(result.status, "uncertain")
+
+    def test_format_only_zero_requires_two_agreeing_false_reject_audits(self):
+        case = AuditCase(
+            "123",
+            "Q1",
+            0,
+            "Semantic Reason: field value [missing_anchor]: anchor 'Value' was not found",
+            "Result is 4",
+            {},
+            {},
+            "Value: 4",
+        )
+        provider = _SequenceAuditProvider(
+            [
+                _audit_response("false_reject", "equivalent"),
+                _audit_response("false_reject", "equivalent"),
+            ]
+        )
+        result = _audit_one_case(case, {"checker": "exact", "config": {}}, provider, AssignmentContext())
+        self.assertEqual(result.status, "flagged")
+        self.assertEqual(result.checker_behavior, "false_reject")
+        self.assertEqual(result.verification_passes, 2)
+
+    def test_high_risk_audit_disagreement_is_uncertain(self):
+        case = AuditCase(
+            "123",
+            "Q1",
+            0,
+            "Semantic Reason: field value [missing_label]: missing label",
+            "Result is 4",
+            {},
+            {},
+            "Value: 4",
+        )
+        provider = _SequenceAuditProvider(
+            [
+                _audit_response("false_reject", "equivalent"),
+                _audit_response("correct", "genuine_error"),
+            ]
+        )
+        result = _audit_one_case(case, {"checker": "exact", "config": {}}, provider, AssignmentContext())
+        self.assertEqual(result.status, "uncertain")
+
+    def test_false_accept_is_flagged(self):
+        case = AuditCase("123", "Q1", 100, "Grade: 100", "Value: 5", {}, {}, "Value: 4")
+        provider = _SequenceAuditProvider([_audit_response("false_accept", "genuine_error")])
+        result = _audit_one_case(case, {"checker": "last_integer", "config": {}}, provider, AssignmentContext())
+        self.assertEqual(result.status, "flagged")
+        self.assertEqual(result.checker_behavior, "false_accept")
 
 
 if __name__ == "__main__":

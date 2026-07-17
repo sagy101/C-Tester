@@ -9,6 +9,12 @@ from typing import Any
 
 import pandas as pd
 
+from .verification import (
+    REVIEW_SCHEMA_VERSION,
+    audit_metadata_is_current,
+    latest_review_evidence_mtime,
+)
+
 
 WORKFLOW_STEPS = ("setup", "checker", "grade", "review")
 DEDUCTION_CAUSES = ("student_code", "checker_or_app", "unclear")
@@ -35,11 +41,9 @@ def review_response_cause(response: dict[str, Any] | None) -> str:
         return "unclear"
     if "deduction_caused_by" in response:
         return normalize_deduction_cause(response.get("deduction_caused_by"))
-    # Legacy reviews without the new field: treat as student-side unless the
-    # deduction itself was already marked implausible.
-    if response.get("deduction_is_plausible") is False:
-        return "unclear"
-    return "student_code"
+    # Legacy reviews did not distinguish parser defects from student mistakes.
+    # They must be re-reviewed instead of silently becoming student-side proof.
+    return "unclear"
 
 
 def attention_threshold_from_grades(final_grades: dict[str, float]) -> float:
@@ -90,6 +94,13 @@ def collect_saved_reviews(questions: list[str]) -> list[dict[str, Any]]:
                 continue
             response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
             student_id = str(payload.get("student_id", "")).strip() or os.path.splitext(os.path.basename(path))[0]
+            current = (
+                payload.get("review_schema_version") == REVIEW_SCHEMA_VERSION
+                and bool(payload.get("evidence_fingerprint"))
+                and float(payload.get("evidence_mtime", 0) or 0) + 0.001
+                >= latest_review_evidence_mtime(str(payload.get("question") or question), student_id)
+                and "deduction_caused_by" in response
+            )
             reviews.append(
                 {
                     "question": str(payload.get("question") or question),
@@ -98,7 +109,8 @@ def collect_saved_reviews(questions: list[str]) -> list[dict[str, Any]]:
                     "question_score": payload.get("question_score"),
                     "final_grade": payload.get("final_grade"),
                     "response": response,
-                    "cause": review_response_cause(response),
+                    "cause": review_response_cause(response) if current else "unclear",
+                    "current": current,
                     "summary": str(response.get("summary", "")),
                     "risk_note": str(response.get("risk_note", "")),
                 }
@@ -109,6 +121,8 @@ def collect_saved_reviews(questions: list[str]) -> list[dict[str, Any]]:
 def checker_defect_findings(reviews: list[dict[str, Any]], question: str | None = None) -> list[dict[str, Any]]:
     findings = []
     for review in reviews:
+        if not review.get("current", False):
+            continue
         if review.get("cause") != "checker_or_app":
             continue
         if question and review.get("question") != question:
@@ -119,6 +133,10 @@ def checker_defect_findings(reviews: list[dict[str, Any]], question: str | None 
                 "student_id": review["student_id"],
                 "summary": review.get("summary", ""),
                 "risk_note": review.get("risk_note", ""),
+                "root_causes": review.get("response", {}).get("root_causes", []),
+                "semantic_assessment": review.get("response", {}).get("semantic_assessment", "unclear"),
+                "format_requirement": review.get("response", {}).get("format_requirement", "unclear"),
+                "format_requirement_evidence": review.get("response", {}).get("format_requirement_evidence", ""),
                 "cause": "checker_or_app",
             }
         )
@@ -148,7 +166,8 @@ def compute_workflow_status(
     attention_reviews = [
         review
         for review in reviews
-        if review["student_id"] in attention_ids or is_attention_grade(float(review.get("final_grade") or 0), threshold)
+        if review.get("current")
+        and (review["student_id"] in attention_ids or is_attention_grade(float(review.get("final_grade") or 0), threshold))
     ]
     defect_findings = checker_defect_findings(reviews)
     defect_questions = sorted({finding["question"] for finding in defect_findings})
@@ -177,7 +196,10 @@ def compute_workflow_status(
             continue
         configured.append(question)
         metadata = question_config.get("metadata", {}) if isinstance(question_config.get("metadata"), dict) else {}
-        if metadata.get("calibration_status") == "passed" or metadata.get("audit_status") == "passed":
+        positive_ok = metadata.get("positive_gate_status") == "passed"
+        negative_ok = metadata.get("negative_gate_status") == "passed"
+        current_audit = audit_metadata_is_current(question_config, question)
+        if metadata.get("calibration_status") == "passed" and current_audit and positive_ok and negative_ok:
             calibrated.append(question)
 
     if defect_questions:
@@ -194,7 +216,7 @@ def compute_workflow_status(
         checker_detail = f"Configure and one-click calibrate: {', '.join(missing)}."
     elif len(calibrated) == len(questions):
         checker_status = "done"
-        checker_detail = "Checkers are calibrated for every question."
+        checker_detail = "Checkers passed current false-rejection and false-acceptance verification."
     elif configured:
         checker_status = "ready"
         checker_detail = (

@@ -85,7 +85,7 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertEqual(len(results), 1)
                 self.assertTrue(os.path.exists(os.path.join("Q1", "review", "123456789.json")))
 
-                reloaded = load_review_cases(["Q1"])[0]
+                reloaded = load_review_cases(["Q1"], grading_policy=policy)[0]
                 self.assertTrue(reloaded.reviewed)
                 self.assertIn("summary", reloaded.saved_review["response"])
                 self.assertEqual(reloaded.saved_review["response"]["deduction_caused_by"], "student_code")
@@ -121,6 +121,25 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertIn("%lf", rubric_text)
                 self.assertIn("reverse-number loop", rubric_text)
                 self.assertNotIn("123456789", json.dumps(payload))
+            finally:
+                os.chdir(original_cwd)
+
+    def test_review_becomes_stale_when_grade_evidence_changes(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                self._create_review_fixture()
+                case = load_review_cases(["Q1"])[0]
+                review_cases_with_llm([case], FakeLLMProvider(), max_workers=1)
+                self.assertTrue(load_review_cases(["Q1"])[0].reviewed)
+
+                with open(os.path.join("Q1", "grade", "123456789.txt"), "a", encoding="utf-8") as grade_file:
+                    grade_file.write("\nNew checker evidence.\n")
+
+                stale = load_review_cases(["Q1"])[0]
+                self.assertFalse(stale.reviewed)
+                self.assertTrue(stale.stale_review)
             finally:
                 os.chdir(original_cwd)
 

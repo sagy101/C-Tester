@@ -19,7 +19,9 @@ from typing import Any, Protocol
 import pandas as pd
 
 from .output_contract import ContractConfigError, _extract_field, compile_preset
+from .checker_variants import generate_checker_variants
 from .semantic_grading import available_checker_templates, checker_config_errors, compare_output_with_config
+from .verification import AUDIT_RUBRIC_VERSION
 
 
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
@@ -111,10 +113,31 @@ AUDIT_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["looks_correct", "flagged", "uncertain"]},
+        "semantic_assessment": {
+            "type": "string",
+            "enum": ["equivalent", "genuine_error", "unclear"],
+        },
+        "format_requirement": {
+            "type": "string",
+            "enum": ["explicit", "not_explicit", "unclear"],
+        },
+        "checker_behavior": {
+            "type": "string",
+            "enum": ["correct", "false_reject", "false_accept", "unclear"],
+        },
         "risk": {"type": "string", "enum": ["low", "medium", "high"]},
         "reason": {"type": "string"},
+        "evidence": {"type": "string"},
     },
-    "required": ["verdict", "risk", "reason"],
+    "required": [
+        "verdict",
+        "semantic_assessment",
+        "format_requirement",
+        "checker_behavior",
+        "risk",
+        "reason",
+        "evidence",
+    ],
     "additionalProperties": False,
 }
 SUGGEST_CHECKER_RESPONSE_SCHEMA = {
@@ -192,6 +215,7 @@ class AuditCase:
     output_text: str
     excel_fields: dict[str, Any]
     final_fields: dict[str, Any]
+    reference_output_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -202,6 +226,12 @@ class AuditResult:
     verdict: str
     risk: str
     reason: str
+    semantic_assessment: str = "unclear"
+    format_requirement: str = "unclear"
+    checker_behavior: str = "unclear"
+    evidence: str = ""
+    verification_passes: int = 1
+    examples: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -379,9 +409,13 @@ class FakeLLMProvider:
             }
         if '"task": "audit_score"' in lower_prompt:
             return {
-                "verdict": "looks_correct",
-                "risk": "low",
-                "reason": "Deterministic fake provider accepts the supplied audit package.",
+                "verdict": "uncertain",
+                "semantic_assessment": "unclear",
+                "format_requirement": "unclear",
+                "checker_behavior": "unclear",
+                "risk": "medium",
+                "reason": "Fake mode cannot verify real grading evidence.",
+                "evidence": "No independent semantic reviewer was used.",
             }
         if '"task": "review_score_deduction"' in lower_prompt or '"task": "apply_review_fix"' in lower_prompt:
             return self._fake_review_response(prompt, lower_prompt)
@@ -454,6 +488,9 @@ class FakeLLMProvider:
             "summary": "The fake reviewer grouped the supplied failures as one deterministic grading issue.",
             "deduction_is_plausible": True,
             "deduction_caused_by": "student_code",
+            "semantic_assessment": "genuine_error",
+            "format_requirement": "unclear",
+            "format_requirement_evidence": "",
             "root_causes": [
                 {
                     "issue": "The output differs from the expected format or value for the listed inputs.",
@@ -757,13 +794,13 @@ def build_suggestion_prompt(
                 },
             },
             "field_keys": [
-                "id", "source", "extract", "normalize", "select", "label", "number_type",
-                "anchor", "occurrence", "count", "window", "true_aliases", "false_aliases",
+                "id", "source", "extract", "normalize", "select", "label", "labels", "number_type",
+                "anchor", "anchors", "occurrence", "count", "window", "true_aliases", "false_aliases",
             ],
             "sources": ["stdin", "reference", "actual"],
             "extractors": ["text", "integers", "floats", "labeled_number", "point", "points", "boolean"],
             "extractor_requirements": {
-                "labeled_number": "requires label, or anchor to capture the first following number",
+                "labeled_number": "requires label/labels, or anchor/anchors to capture the first following number",
                 "point": "optional anchor; occurrence defaults to 0; returns one coordinate pair",
                 "points": "optional anchor; count is required when more than two points matter",
                 "boolean": (
@@ -887,7 +924,7 @@ def suggest_checker(
     # Gemini's restricted responseSchema dialect cannot faithfully represent.
     # JSON mode is still enforced by the provider; the result is then validated
     # by the deterministic contract validator before testing or saving.
-    response = complete_json_with_schema(provider, prompt, assignment_images)
+    response = _complete_checker_json_with_retry(provider, prompt, assignment_images)
     suggestion = _suggestion_from_response(question, response, assignment_text)
     if suggestion.status == "supported" and suggestion.checker:
         errors = checker_config_errors({"checker": suggestion.checker, "config": suggestion.config})
@@ -898,7 +935,7 @@ def suggest_checker(
                 + "\n".join(f"- {error}" for error in errors)
                 + "\nReturn a corrected complete JSON response. Do not omit required fields or checks."
             )
-            response = complete_json_with_schema(provider, retry_prompt, assignment_images)
+            response = _complete_checker_json_with_retry(provider, retry_prompt, assignment_images)
             suggestion = _suggestion_from_response(question, response, assignment_text)
     return suggestion
 
@@ -932,24 +969,47 @@ def refine_checker(
     assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
     review_feedback: list[dict] | None = None,
 ) -> SuggestionResult:
-    base_payload = json.loads(
-        build_suggestion_prompt(
-            question,
-            original_code,
-            inputs,
-            expected_outputs,
-            assignment_text,
-            assignment_images,
-        )
-    )
-    base_payload["task"] = "refine_checker"
-    base_payload["current_checker_config"] = current_config
+    del original_code, inputs
+    base_payload = {
+        "task": "refine_checker",
+        "question": question,
+        "target_question_number": question_number_from_name(question),
+        "current_checker_config": current_config,
+        "assignment_text_for_selected_question_optional": str(assignment_text)[:8000],
+        "reference_examples": [
+            {"input": input_value, "output": output}
+            for input_value, output in expected_outputs[:3]
+        ],
+        "contract_language": {
+            "field_keys": [
+                "id", "source", "extract", "normalize", "select", "label", "labels",
+                "number_type", "anchor", "anchors", "occurrence", "count", "window",
+                "true_aliases", "false_aliases", "allow_empty",
+            ],
+            "extractors": ["text", "integers", "floats", "labeled_number", "point", "points", "boolean"],
+            "operators": ["equal", "approx", "sequence_equal", "tail_equal", "sequence_or_text_tokens", "exchanged"],
+            "limits": "Keep tolerance <= 0.011; labels/anchors/aliases are bounded literal strings, never regex.",
+        },
+        "response_shape": {
+            "status": "supported | no_supported_checker",
+            "checker": "checker name or null",
+            "config": "complete config object",
+            "structural_requirements": "preserve current requirements",
+            "confidence": "0.0-1.0",
+            "reason": "short explanation",
+        },
+    }
     base_payload["audit_feedback"] = [
         {
             "status": result.status,
             "verdict": result.verdict,
             "risk": result.risk,
             "reason": result.reason,
+            "semantic_assessment": result.semantic_assessment,
+            "format_requirement": result.format_requirement,
+            "checker_behavior": result.checker_behavior,
+            "evidence": result.evidence,
+            "examples": list(result.examples),
         }
         for result in audit_results
         if result.status in {"flagged", "uncertain"}
@@ -957,7 +1017,7 @@ def refine_checker(
     review_items = [
         item
         for item in (review_feedback or [])
-        if isinstance(item, dict) and str(item.get("cause", item.get("deduction_caused_by", ""))).strip() == "checker_or_app"
+        if corroborated_review_feedback_item(item)
     ]
     base_payload["review_feedback"] = [
         {
@@ -965,19 +1025,25 @@ def refine_checker(
             "summary": str(item.get("summary", "")),
             "risk_note": str(item.get("risk_note", "")),
             "student_label": str(item.get("anonymized_label") or item.get("student_id") or "student"),
+            "semantic_assessment": str(item.get("semantic_assessment", "unclear")),
+            "format_requirement": str(item.get("format_requirement", "unclear")),
+            "format_requirement_evidence": str(item.get("format_requirement_evidence", "")),
+            "root_causes": item.get("root_causes", []) if isinstance(item.get("root_causes", []), list) else [],
         }
         for item in review_items
     ]
-    base_payload["instructions"] += (
-        " Improve the current checker only where the audit feedback or review_feedback identifies a checker false "
+    base_payload["instructions"] = (
+        "Return the complete checker JSON, not a patch. Improve the current checker only where audit_feedback or "
+        "review_feedback identifies a checker false "
         "rejection or false acceptance. Review findings with cause=checker_or_app are high-confidence evidence that "
         "the checker penalized semantically equivalent student output; fix aliases, anchors, labels, and operators so "
         "those equivalent phrasings pass while genuine content mistakes still fail. Preserve every semantic "
         "requirement already checked. Return the unchanged configuration when feedback is uncertainty, missing "
         "evidence, or a student-specific grading issue rather than a checker defect. The candidate will be rejected "
-        "unless it passes mutation tests and cumulative no-regression checks."
+        "unless it passes positive invariance, semantic mutation, cumulative no-regression, and audited-student gates. "
+        "Use labels/anchors arrays only for bounded confirmed alternatives; never make extraction unrestricted."
     )
-    response = complete_json_with_schema(
+    response = _complete_checker_json_with_retry(
         provider,
         json.dumps(base_payload, ensure_ascii=False, indent=2),
         assignment_images,
@@ -996,6 +1062,94 @@ def refine_checker(
         reason=str(response.get("reason", "")),
         structural_requirements=structural_requirements,
     )
+
+
+def _complete_checker_json_with_retry(
+    provider: LLMProvider,
+    prompt: str,
+    images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+) -> dict:
+    try:
+        return complete_json_with_schema(provider, prompt, images)
+    except Exception as first_error:
+        retry_prompt = (
+            f"{prompt}\n\n"
+            "Your previous response failed transport or JSON parsing. Return one complete valid JSON object only, "
+            "with no markdown fence, comments, or trailing text."
+        )
+        try:
+            return complete_json_with_schema(provider, retry_prompt, images)
+        except Exception as second_error:
+            raise RuntimeError(f"{first_error}; checker JSON retry failed: {second_error}") from second_error
+
+
+def corroborated_review_feedback_item(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    cause = str(item.get("cause", item.get("deduction_caused_by", ""))).strip()
+    semantic = str(item.get("semantic_assessment", "unclear")).strip()
+    format_requirement = str(item.get("format_requirement", "unclear")).strip()
+    root_causes = item.get("root_causes", [])
+    has_example = any(
+        isinstance(root, dict)
+        and any(
+            isinstance(example, dict)
+            and bool(example.get("expected_output"))
+            and bool(example.get("actual_output"))
+            for example in root.get("examples", [])
+        )
+        for root in root_causes
+        if isinstance(root_causes, list)
+    )
+    return (
+        cause == "checker_or_app"
+        and semantic == "equivalent"
+        and format_requirement != "explicit"
+        and has_example
+    )
+
+
+def review_feedback_test_rows(checker_config: dict, items: list[dict] | None) -> list[dict]:
+    """Create accept rows and paired semantic corruptions from corroborated reviews."""
+    rows: list[dict] = []
+    for item in items or []:
+        if not corroborated_review_feedback_item(item):
+            continue
+        for root in item.get("root_causes", []):
+            if not isinstance(root, dict):
+                continue
+            for example in root.get("examples", []):
+                if not isinstance(example, dict):
+                    continue
+                input_value = str(example.get("input", ""))
+                expected = str(example.get("expected_output", ""))
+                actual = str(example.get("actual_output", ""))
+                if not expected or not actual:
+                    continue
+                rows.append(
+                    {
+                        "variant": "accept_adjudicated_student_variant",
+                        "input": input_value,
+                        "expected_output": expected,
+                        "actual_output": actual,
+                        "expected_pass": True,
+                    }
+                )
+                for name, corrupted, expected_pass in generate_checker_variants(checker_config, actual):
+                    if expected_pass:
+                        continue
+                    rows.append(
+                        {
+                            "variant": f"paired_{name}",
+                            "input": input_value,
+                            "expected_output": expected,
+                            "actual_output": corrupted,
+                            "expected_pass": False,
+                        }
+                    )
+                if len(rows) >= 40:
+                    return rows
+    return rows
 
 
 def merge_structural_requirements(question: str, existing: dict | None, assignment_text: str = "") -> dict:
@@ -1080,7 +1234,7 @@ def run_checker_tests(checker_config: dict, inputs_and_expected: list[tuple[str,
             ("prompted", f"Input: {input_value}\nOutput: {expected_output}", prompted_expected),
             ("wrong", "__synthetic_output_without_an_answer__", False),
         ]
-        variants.extend(_contract_mutation_variants(checker_config, expected_output))
+        variants.extend(generate_checker_variants(checker_config, expected_output))
         for variant_name, actual_output, expected_pass in variants:
             comparison = compare_output_with_config(checker_config, input_value, expected_output, actual_output)
             test_passed = comparison.passed == expected_pass
@@ -1259,6 +1413,8 @@ def select_audit_cases(
 
 def _empty_audit_buckets() -> dict[str, list[AuditCase]]:
     return {
+        "extraction_failure": [],
+        "semantic_mismatch": [],
         "perfect": [],
         "high": [],
         "medium": [],
@@ -1280,6 +1436,7 @@ def _make_audit_case(question: str, row: pd.Series, final_by_id: dict[str, dict]
         output_text=_read_optional_text(os.path.join(question, "output", f"{student_id}.txt")),
         excel_fields=row.to_dict(),
         final_fields=final_by_id.get(student_id, {}),
+        reference_output_text=_read_optional_text(os.path.join(question, "original_sol_output.txt")),
     )
 
 
@@ -1332,20 +1489,152 @@ def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider
     focused_context = assignment_context_for_question(assignment_context, case.question)
     prompt = build_audit_prompt(case, checker_config, focused_context.text, focused_context.images)
     try:
-        response = _complete_audit_json_with_retry(provider, prompt, focused_context.images)
-        verdict = str(response.get("verdict", "uncertain"))
-        risk = str(response.get("risk", "medium"))
-        reason = str(response.get("reason", ""))
-        status = {
-            "looks_correct": "passed",
-            "uncertain": "uncertain",
-        }.get(verdict, "flagged")
+        primary = _complete_audit_json_with_retry(provider, prompt, focused_context.images)
+        primary_decision = _derive_audit_decision(primary, case, focused_context.text)
+        responses = [primary]
+        decisions = [primary_decision]
+        if _needs_challenger_audit(case):
+            challenger_prompt = build_audit_prompt(
+                case,
+                checker_config,
+                focused_context.text,
+                focused_context.images,
+                audit_pass="independent_challenger",
+            )
+            challenger = _complete_audit_json_with_retry(provider, challenger_prompt, focused_context.images)
+            responses.append(challenger)
+            decisions.append(_derive_audit_decision(challenger, case, focused_context.text))
+
+        if len(decisions) == 2 and (
+            decisions[0]["status"] != decisions[1]["status"]
+            or decisions[0]["checker_behavior"] != decisions[1]["checker_behavior"]
+        ):
+            status = "uncertain"
+            verdict = "uncertain"
+            risk = "high"
+            reason = "Independent audit passes disagreed; checker verification requires human review."
+            semantic_assessment = "unclear"
+            format_requirement = "unclear"
+            checker_behavior = "unclear"
+            evidence = " | ".join(str(response.get("evidence", "")) for response in responses if response.get("evidence"))
+        else:
+            decision = decisions[0]
+            response = responses[0]
+            status = decision["status"]
+            verdict = decision["verdict"]
+            risk = str(response.get("risk", "medium"))
+            reason = str(response.get("reason", ""))
+            semantic_assessment = decision["semantic_assessment"]
+            format_requirement = decision["format_requirement"]
+            checker_behavior = decision["checker_behavior"]
+            evidence = str(response.get("evidence", ""))
     except Exception as exc:
         verdict = "error"
         risk = "high"
         reason = str(exc)
         status = "error"
-    return AuditResult(case.student_id, case.question, status, verdict, risk, reason)
+        semantic_assessment = "unclear"
+        format_requirement = "unclear"
+        checker_behavior = "unclear"
+        evidence = ""
+        responses = []
+    return AuditResult(
+        case.student_id,
+        case.question,
+        status,
+        verdict,
+        risk,
+        reason,
+        semantic_assessment,
+        format_requirement,
+        checker_behavior,
+        evidence,
+        max(1, len(responses)),
+        tuple(_audit_failed_examples(case.grade_text)),
+    )
+
+
+def _derive_audit_decision(response: dict[str, Any], case: AuditCase, assignment_text: str) -> dict[str, str]:
+    semantic = str(response.get("semantic_assessment", "unclear"))
+    format_requirement = str(response.get("format_requirement", "unclear"))
+    behavior = str(response.get("checker_behavior", "unclear"))
+    evidence = str(response.get("evidence", "")).strip()
+    legacy_verdict = str(response.get("verdict", "uncertain"))
+    extraction_failure = _audit_has_extraction_only_failure(case.grade_text)
+
+    explicit_is_grounded = (
+        format_requirement == "explicit"
+        and bool(evidence)
+        and _evidence_is_grounded(evidence, assignment_text)
+    )
+    if format_requirement == "explicit" and not explicit_is_grounded:
+        format_requirement = "unclear"
+
+    deducted = float(case.score) < 99.999
+    if behavior in {"false_reject", "false_accept"}:
+        status = "flagged"
+        verdict = "flagged"
+    elif extraction_failure and semantic == "equivalent" and format_requirement != "explicit":
+        status = "flagged"
+        verdict = "flagged"
+        behavior = "false_reject"
+    elif not deducted and semantic == "genuine_error":
+        status = "flagged"
+        verdict = "flagged"
+        behavior = "false_accept"
+    elif behavior == "correct" and (
+        not deducted or semantic == "genuine_error" or explicit_is_grounded
+    ):
+        status = "passed"
+        verdict = "looks_correct"
+    elif (
+        "semantic_assessment" not in response
+        and legacy_verdict == "looks_correct"
+        and not extraction_failure
+    ):
+        status = "passed"
+        verdict = "looks_correct"
+    else:
+        status = "uncertain"
+        verdict = "uncertain"
+        if behavior not in {"false_reject", "false_accept", "correct"}:
+            behavior = "unclear"
+
+    return {
+        "status": status,
+        "verdict": verdict,
+        "semantic_assessment": semantic,
+        "format_requirement": format_requirement,
+        "checker_behavior": behavior,
+    }
+
+
+def _needs_challenger_audit(case: AuditCase) -> bool:
+    return float(case.score) == 0 or _audit_has_extraction_only_failure(case.grade_text)
+
+
+def _audit_has_extraction_only_failure(grade_text: str) -> bool:
+    lowered = str(grade_text or "").lower()
+    extraction_markers = (
+        "[missing_anchor]",
+        "[missing_label]",
+        "anchor '",
+        "could not find labeled value",
+        "none of the configured boolean aliases",
+    )
+    return any(marker in lowered for marker in extraction_markers)
+
+
+def _evidence_is_grounded(evidence: str, assignment_text: str) -> bool:
+    normalized_evidence = " ".join(str(evidence).lower().strip(" \"'").split())
+    normalized_assignment = " ".join(str(assignment_text).lower().split())
+    if len(normalized_evidence) < 8 or not normalized_assignment:
+        return False
+    if normalized_evidence in normalized_assignment:
+        return True
+    evidence_words = {word for word in re.findall(r"[a-z0-9]+", normalized_evidence) if len(word) > 3}
+    assignment_words = set(re.findall(r"[a-z0-9]+", normalized_assignment))
+    return len(evidence_words) >= 3 and len(evidence_words & assignment_words) / len(evidence_words) >= 0.8
 
 
 def _complete_audit_json_with_retry(
@@ -1359,7 +1648,8 @@ def _complete_audit_json_with_retry(
         retry_prompt = (
             f"{prompt}\n\n"
             "The previous response could not be parsed as JSON. Return one valid JSON object only, with no markdown, "
-            "no comments, and no trailing text. Required keys: verdict, risk, reason."
+            "no comments, and no trailing text. Required keys: verdict, semantic_assessment, format_requirement, "
+            "checker_behavior, risk, reason, evidence."
         )
         try:
             return complete_json_with_schema(provider, retry_prompt, images, AUDIT_RESPONSE_SCHEMA)
@@ -1372,12 +1662,16 @@ def build_audit_prompt(
     checker_config: dict,
     assignment_text: str = "",
     assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+    audit_pass: str = "primary",
 ) -> str:
     grade_evidence = _compact_audit_text(case.grade_text)
     output_evidence = _compact_audit_text(case.output_text)
+    reference_evidence = _compact_audit_text(case.reference_output_text)
     return json.dumps(
         {
             "task": "audit_score",
+            "audit_rubric_version": AUDIT_RUBRIC_VERSION,
+            "audit_pass": audit_pass,
             "role": "You are auditing deterministic C homework grading results. You do not assign a new grade.",
             "student_id": case.student_id,
             "question": case.question,
@@ -1391,6 +1685,9 @@ def build_audit_prompt(
             "grade_text_evidence": grade_evidence["metadata"],
             "student_output": output_evidence["text"],
             "student_output_evidence": output_evidence["metadata"],
+            "reference_output_by_input": reference_evidence["text"],
+            "reference_output_evidence": reference_evidence["metadata"],
+            "parsed_discrepancy_signals": _audit_discrepancy_signals(case.grade_text),
             "per_question_excel_fields": case.excel_fields,
             "final_excel_fields": case.final_fields,
             "instructions": (
@@ -1413,15 +1710,23 @@ def build_audit_prompt(
                 "reflects a genuine content mistake by the student, and configured policy penalties (compile repair, "
                 "structural, submission) follow their documented rules. Return flagged for likely scoring/Excel mistakes "
                 "or checker defects that penalize semantically equivalent output. Return uncertain when more human "
-                "review is needed."
+                "review is needed. Independently classify semantic_assessment, format_requirement, and checker_behavior. "
+                "A missing parser label or anchor is not itself a student semantic error. Claim format_requirement=explicit "
+                "only when evidence quotes or closely paraphrases a requirement in the selected assignment context. "
+                "Also detect false_accept when a passing/high score hides a genuine semantic error."
             ),
             "response_schema": {
                 "verdict": "looks_correct | flagged | uncertain",
+                "semantic_assessment": "equivalent | genuine_error | unclear",
+                "format_requirement": "explicit | not_explicit | unclear",
+                "checker_behavior": "correct | false_reject | false_accept | unclear",
                 "risk": "low | medium | high",
                 "reason": "one short plain-text sentence under 350 characters; no newlines",
+                "evidence": "short assignment quote or concrete expected-vs-actual fact; empty only when evidence is unavailable",
             },
             "strict_json_rules": (
-                "Return exactly one JSON object with exactly the keys verdict, risk, and reason. "
+                "Return exactly one JSON object with exactly the keys verdict, semantic_assessment, format_requirement, "
+                "checker_behavior, risk, reason, and evidence. "
                 "The reason value must be one JSON string: escape quotes and do not include markdown, lists, nested objects, or line breaks."
             ),
         },
@@ -1429,6 +1734,46 @@ def build_audit_prompt(
         indent=2,
         default=str,
     )
+
+
+def _audit_discrepancy_signals(grade_text: str) -> dict[str, Any]:
+    source = str(grade_text or "")
+    reasons = re.findall(r"^Semantic Reason:\s*(.*)$", source, re.MULTILINE)
+    expected_canonical = re.findall(r"^Expected Canonical:\s*(.*)$", source, re.MULTILINE)
+    actual_canonical = re.findall(r"^Actual Canonical:\s*(.*)$", source, re.MULTILINE)
+    return {
+        "extraction_only_failure": _audit_has_extraction_only_failure(source),
+        "semantic_reasons": reasons[:12],
+        "expected_canonical": expected_canonical[:12],
+        "actual_canonical": actual_canonical[:12],
+    }
+
+
+def _audit_failed_examples(grade_text: str, max_examples: int = 3) -> list[dict[str, str]]:
+    examples = []
+    blocks = re.split(r"\n(?=Input:\s*)", str(grade_text or ""))
+    for block in blocks:
+        input_match = re.search(r"^Input:\s*(.*)$", block, re.MULTILINE)
+        expected_match = re.search(r"^Expected:\s*(.*?)(?=^Actual:)", block, re.MULTILINE | re.DOTALL)
+        actual_match = re.search(
+            r"^Actual:\s*(.*?)(?=^Semantic Reason:|^Expected Canonical:|\Z)",
+            block,
+            re.MULTILINE | re.DOTALL,
+        )
+        reason_match = re.search(r"^Semantic Reason:\s*(.*)$", block, re.MULTILINE)
+        if not input_match or not expected_match or not actual_match:
+            continue
+        examples.append(
+            {
+                "input": input_match.group(1).strip(),
+                "expected_output": expected_match.group(1).strip()[:4000],
+                "actual_output": actual_match.group(1).strip()[:4000],
+                "reason": reason_match.group(1).strip() if reason_match else "",
+            }
+        )
+        if len(examples) >= max_examples:
+            break
+    return examples
 
 
 def _compact_audit_text(text: str, max_chars: int = MAX_AUDIT_TEXT_CHARS) -> dict[str, Any]:
@@ -1495,6 +1840,17 @@ def _read_optional_text(path: str) -> str:
 
 def _case_buckets(case: AuditCase) -> list[str]:
     buckets = []
+    lowered_grade = case.grade_text.lower()
+    if any(
+        marker in lowered_grade
+        for marker in ("[missing_anchor]", "[missing_label]", "anchor '", "could not find labeled value")
+    ):
+        buckets.append("extraction_failure")
+    if any(
+        marker in lowered_grade
+        for marker in ("value mismatch", "status mismatch", "sequence mismatch", "check ")
+    ):
+        buckets.append("semantic_mismatch")
     if case.score >= 100:
         buckets.append("perfect")
     elif case.score >= 80:

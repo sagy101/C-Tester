@@ -42,8 +42,10 @@ _FIELD_KEYS = {
     "normalize",
     "select",
     "label",
+    "labels",
     "number_type",
     "anchor",
+    "anchors",
     "occurrence",
     "count",
     "window",
@@ -80,6 +82,10 @@ class ContractConfigError(ValueError):
 
 class ContractExtractionError(ValueError):
     """Raised when a required field cannot be extracted."""
+
+    def __init__(self, message: str, *, code: str = "missing_value"):
+        super().__init__(message)
+        self.code = code
 
 
 def validate_contract(contract: dict) -> list[str]:
@@ -132,6 +138,12 @@ def validate_contract(contract: dict) -> list[str]:
             value = field.get(key)
             if value is not None and (not isinstance(value, str) or not value or len(value) > MAX_TEXT_OPTION_LENGTH):
                 errors.append(f"{prefix} {key} must be 1-{MAX_TEXT_OPTION_LENGTH} characters")
+        for key in ("labels", "anchors"):
+            values = field.get(key, [])
+            if not isinstance(values, list) or len(values) > 12:
+                errors.append(f"{prefix} {key} must be a list with at most 12 values")
+            elif any(not isinstance(value, str) or not value or len(value) > MAX_TEXT_OPTION_LENGTH for value in values):
+                errors.append(f"{prefix} {key} contains an invalid value")
         window = field.get("window", MAX_WINDOW)
         if not isinstance(window, int) or not 1 <= window <= MAX_WINDOW:
             errors.append(f"{prefix} window must be between 1 and {MAX_WINDOW}")
@@ -145,8 +157,10 @@ def validate_contract(contract: dict) -> list[str]:
             not field.get("true_aliases") or not field.get("false_aliases")
         ):
             errors.append(f"{prefix} boolean extraction requires true_aliases and false_aliases")
-        if field.get("extract") == "labeled_number" and not (field.get("label") or field.get("anchor")):
-            errors.append(f"{prefix} labeled_number extraction requires label or anchor")
+        if field.get("extract") == "labeled_number" and not (
+            field.get("label") or field.get("labels") or field.get("anchor") or field.get("anchors")
+        ):
+            errors.append(f"{prefix} labeled_number extraction requires label(s) or anchor(s)")
         if "allow_empty" in field and not isinstance(field["allow_empty"], bool):
             errors.append(f"{prefix} allow_empty must be boolean")
         if "number_type" in field and field["number_type"] not in {"integer", "float"}:
@@ -246,7 +260,7 @@ def evaluate_contract(
         except ContractExtractionError as exc:
             expected = {key: value for key, value in values.items() if field_sources.get(key) != "actual"}
             actual = {key: value for key, value in values.items() if field_sources.get(key) == "actual"}
-            return ContractResult(False, f"field {field['id']}: {exc}", expected, actual)
+            return ContractResult(False, f"field {field['id']} [{exc.code}]: {exc}", expected, actual)
 
     for check in contract["checks"]:
         left = _resolve_value(check["left"], values)
@@ -394,6 +408,11 @@ def _number_list_contract(order_matters: bool, allow_prompt_numbers: bool, prefi
     }
 
 
+def extract_contract_field(field: dict, raw_text: str) -> Any:
+    """Extract one field for deterministic verification and diagnostics."""
+    return _extract_field(field, raw_text)
+
+
 def _extract_field(field: dict, raw_text: str) -> Any:
     text = _normalize(raw_text, field.get("normalize", []))
     scoped = _scope_text(text, field)
@@ -413,20 +432,28 @@ def _extract_field(field: dict, raw_text: str) -> Any:
             field.get("allow_empty", False),
         )
     if extractor == "labeled_number":
-        label = field.get("label")
-        if label:
+        labels = _configured_text_options(field, "label", "labels")
+        number_match = None
+        matched_label = ""
+        for label in labels:
             number_match = re.search(
                 rf"{re.escape(label)}\s*[:=]?\s*({_FLOAT_PATTERN})",
                 scoped,
                 re.IGNORECASE,
             )
-        elif field.get("anchor"):
+            if number_match:
+                matched_label = label
+                break
+        if not labels and _configured_text_options(field, "anchor", "anchors"):
             number_match = _FLOAT_RE.search(scoped)
-        else:
-            raise ContractExtractionError("labeled_number requires label or anchor")
         if not number_match:
-            raise ContractExtractionError(f"could not find labeled value '{label or field.get('anchor')}'")
-        numeric_text = number_match.group(1) if label else number_match.group(0)
+            expected_labels = labels or _configured_text_options(field, "anchor", "anchors")
+            description = " | ".join(expected_labels)
+            raise ContractExtractionError(
+                f"could not find labeled value '{description}'",
+                code="missing_label" if labels else "missing_anchor",
+            )
+        numeric_text = number_match.group(1) if matched_label else number_match.group(0)
         return int(float(numeric_text)) if field.get("number_type") == "integer" else float(numeric_text)
     if extractor in {"point", "points"}:
         matches = [(float(x), float(y)) for x, y in _POINT_PATTERN.findall(scoped)]
@@ -436,7 +463,7 @@ def _extract_field(field: dict, raw_text: str) -> Any:
             raise ContractExtractionError("point occurrence/count is invalid")
         selected = matches[occurrence:occurrence + count]
         if len(selected) != count:
-            raise ContractExtractionError("required point value was not found")
+            raise ContractExtractionError("required point value was not found", code="missing_semantic_value")
         return selected[0] if extractor == "point" else selected
     if extractor == "boolean":
         true_aliases = field.get("true_aliases", [])
@@ -450,7 +477,10 @@ def _extract_field(field: dict, raw_text: str) -> Any:
                 if position >= 0:
                     candidates.append((position, -len(normalized_alias), value, position + len(normalized_alias)))
         if not candidates:
-            raise ContractExtractionError("none of the configured boolean aliases were found")
+            raise ContractExtractionError(
+                "none of the configured boolean aliases were found",
+                code="missing_semantic_value",
+            )
         _, _, value, match_end = min(candidates)
         # An alias immediately followed by a negation states the opposite of the
         # bare alias ("is not", "isn't", "has not"), even when that phrasing is
@@ -463,14 +493,33 @@ def _extract_field(field: dict, raw_text: str) -> Any:
 
 
 def _scope_text(text: str, field: dict) -> str:
-    anchor = field.get("anchor")
-    if not anchor:
+    anchors = _configured_text_options(field, "anchor", "anchors")
+    if not anchors:
         return text
-    position = text.lower().find(anchor.lower())
-    if position < 0:
-        raise ContractExtractionError(f"anchor '{anchor}' was not found")
+    candidates = [
+        (text.lower().find(anchor.lower()), -len(anchor), anchor)
+        for anchor in anchors
+        if text.lower().find(anchor.lower()) >= 0
+    ]
+    if not candidates:
+        raise ContractExtractionError(
+            f"anchor '{' | '.join(anchors)}' was not found",
+            code="missing_anchor",
+        )
+    position, _, anchor = min(candidates)
     start = position + len(anchor)
     return text[start:start + field.get("window", MAX_WINDOW)]
+
+
+def _configured_text_options(field: dict, singular: str, plural: str) -> list[str]:
+    values: list[str] = []
+    single = field.get(singular)
+    if isinstance(single, str) and single:
+        values.append(single)
+    for value in field.get(plural, []):
+        if isinstance(value, str) and value and value not in values:
+            values.append(value)
+    return values
 
 
 def _normalize(text: str, normalizers: list[str]) -> str:
