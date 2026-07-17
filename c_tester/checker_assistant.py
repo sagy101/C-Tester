@@ -453,6 +453,7 @@ class FakeLLMProvider:
         return {
             "summary": "The fake reviewer grouped the supplied failures as one deterministic grading issue.",
             "deduction_is_plausible": True,
+            "deduction_caused_by": "student_code",
             "root_causes": [
                 {
                     "issue": "The output differs from the expected format or value for the listed inputs.",
@@ -929,6 +930,7 @@ def refine_checker(
     provider: LLMProvider,
     assignment_text: str = "",
     assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
+    review_feedback: list[dict] | None = None,
 ) -> SuggestionResult:
     base_payload = json.loads(
         build_suggestion_prompt(
@@ -952,11 +954,28 @@ def refine_checker(
         for result in audit_results
         if result.status in {"flagged", "uncertain"}
     ]
+    review_items = [
+        item
+        for item in (review_feedback or [])
+        if isinstance(item, dict) and str(item.get("cause", item.get("deduction_caused_by", ""))).strip() == "checker_or_app"
+    ]
+    base_payload["review_feedback"] = [
+        {
+            "cause": "checker_or_app",
+            "summary": str(item.get("summary", "")),
+            "risk_note": str(item.get("risk_note", "")),
+            "student_label": str(item.get("anonymized_label") or item.get("student_id") or "student"),
+        }
+        for item in review_items
+    ]
     base_payload["instructions"] += (
-        " Improve the current checker only where the audit feedback identifies a checker false rejection or false "
-        "acceptance. Preserve every semantic requirement already checked. Return the unchanged configuration when "
-        "feedback is uncertainty, missing evidence, or a student-specific grading issue rather than a checker defect. "
-        "The candidate will be rejected unless it passes mutation tests and cumulative no-regression checks."
+        " Improve the current checker only where the audit feedback or review_feedback identifies a checker false "
+        "rejection or false acceptance. Review findings with cause=checker_or_app are high-confidence evidence that "
+        "the checker penalized semantically equivalent student output; fix aliases, anchors, labels, and operators so "
+        "those equivalent phrasings pass while genuine content mistakes still fail. Preserve every semantic "
+        "requirement already checked. Return the unchanged configuration when feedback is uncertainty, missing "
+        "evidence, or a student-specific grading issue rather than a checker defect. The candidate will be rejected "
+        "unless it passes mutation tests and cumulative no-regression checks."
     )
     response = complete_json_with_schema(
         provider,

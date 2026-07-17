@@ -446,6 +446,7 @@ def review_case(case_id: str, description: str, code: str, keyword: str, fix: st
     fake_response = {
         "summary": f"The deduction is plausible because the code has a {keyword} issue.",
         "deduction_is_plausible": True,
+        "deduction_caused_by": "student_code",
         "root_causes": [{"issue": keyword, "failed_inputs": ["5"], "deduction_impact": "one root issue failed multiple inputs"}],
         "inline_comments": [{"line": 1, "comment": f"Check the {keyword} logic here."}],
         "fix_to_full_score": fix,
@@ -466,8 +467,8 @@ def review_case(case_id: str, description: str, code: str, keyword: str, fix: st
             "final_grade": 90,
         },
         {
-            "required_fields": ("summary", "deduction_is_plausible", "root_causes", "inline_comments", "fix_to_full_score"),
-            "field_equals": {"deduction_is_plausible": True},
+            "required_fields": ("summary", "deduction_is_plausible", "deduction_caused_by", "root_causes", "inline_comments", "fix_to_full_score"),
+            "field_equals": {"deduction_is_plausible": True, "deduction_caused_by": "student_code"},
             "response_contains": (keyword.split()[0],),
             "prompt_excludes": ("123456789", '"ID_number"'),
         },

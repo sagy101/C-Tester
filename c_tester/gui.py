@@ -161,6 +161,11 @@ from .post_scoring_review import (
     review_cases_with_llm,
     default_grading_policy,
 )
+from .workflow_status import (
+    compute_workflow_status,
+    review_cause_label,
+    review_response_cause,
+)
 from .semantic_grading import (
     DEFAULT_CHECKER_CONFIG_PATH,
     checker_config_errors,
@@ -381,24 +386,62 @@ class App(ctk.CTk):
         self.setup_status_frame = ctk.CTkFrame(self.top_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
         self.setup_status_frame.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="ew")
         self.setup_status_frame.grid_columnconfigure(0, weight=1)
-        self.setup_status_frame.grid_rowconfigure((0, 1), weight=0)
-        self.setup_status_label = ctk.CTkLabel(
+        self.setup_status_frame.grid_rowconfigure((0, 1, 2), weight=0)
+
+        self.workflow_title = ctk.CTkLabel(
             self.setup_status_frame,
-            text="Setup readiness: checking...",
+            text="Grading workflow",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["primary"],
+            anchor="w",
+        )
+        self.workflow_title.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
+
+        self.workflow_steps_frame = ctk.CTkFrame(self.setup_status_frame, fg_color="transparent")
+        self.workflow_steps_frame.grid(row=1, column=0, columnspan=3, padx=8, pady=(0, 4), sticky="ew")
+        self.workflow_steps_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.workflow_step_buttons = {}
+        self.workflow_step_details = {}
+        for index, (step_id, title) in enumerate(
+            (("setup", "1. Setup"), ("checker", "2. Checker"), ("grade", "3. Grade"), ("review", "4. Review"))
+        ):
+            card = ctk.CTkFrame(self.workflow_steps_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
+            card.grid(row=0, column=index, padx=4, pady=4, sticky="nsew")
+            card.grid_columnconfigure(0, weight=1)
+            button = ctk.CTkButton(
+                card,
+                text=title,
+                height=34,
+                corner_radius=6,
+                command=lambda selected=step_id: self.on_workflow_step_clicked(selected),
+            )
+            button.grid(row=0, column=0, padx=8, pady=(8, 2), sticky="ew")
+            detail = ctk.CTkLabel(
+                card,
+                text="…",
+                anchor="w",
+                justify="left",
+                wraplength=180,
+                font=ctk.CTkFont(size=11),
+            )
+            detail.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
+            self.workflow_step_buttons[step_id] = button
+            self.workflow_step_details[step_id] = detail
+
+        self.workflow_next_label = ctk.CTkLabel(
+            self.setup_status_frame,
+            text="Next: checking workflow…",
             anchor="w",
             justify="left",
             wraplength=900,
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.setup_status_label.grid(row=0, column=0, padx=12, pady=(8, 0), sticky="ew")
-        self.checker_status_label = ctk.CTkLabel(
-            self.setup_status_frame,
-            text="Checker audit: checking...",
-            anchor="w",
-            justify="left",
-            wraplength=900,
-        )
-        self.checker_status_label.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
-        self.setup_status_frame.bind("<Configure>", self._resize_setup_status_label)
+        self.workflow_next_label.grid(row=2, column=0, padx=12, pady=(0, 4), sticky="ew")
+
+        # Keep legacy labels as hidden compatibility targets for older tests/tools.
+        self.setup_status_label = ctk.CTkLabel(self.setup_status_frame, text="")
+        self.checker_status_label = ctk.CTkLabel(self.setup_status_frame, text="")
+
         self.global_apply_config_button = ctk.CTkButton(
             self.setup_status_frame,
             text="Apply Config",
@@ -407,7 +450,7 @@ class App(ctk.CTk):
             height=30,
             corner_radius=6,
         )
-        self.global_apply_config_button.grid(row=0, column=1, rowspan=2, padx=(12, 6), pady=8, sticky="e")
+        self.global_apply_config_button.grid(row=0, column=1, padx=(12, 6), pady=8, sticky="e")
         self.setup_assistant_button = ctk.CTkButton(
             self.setup_status_frame,
             text="Setup Assistant",
@@ -416,7 +459,8 @@ class App(ctk.CTk):
             height=30,
             corner_radius=6,
         )
-        self.setup_assistant_button.grid(row=0, column=2, rowspan=2, padx=(6, 12), pady=8, sticky="e")
+        self.setup_assistant_button.grid(row=0, column=2, padx=(6, 12), pady=8, sticky="e")
+        self.setup_status_frame.bind("<Configure>", self._resize_setup_status_label)
 
         # Section 0: Configuration
         self.config_frame = ctk.CTkFrame(self.controls_frame, corner_radius=8, border_width=1, border_color=COLORS["border"])
@@ -1275,11 +1319,15 @@ class App(ctk.CTk):
         state = "normal" if os.path.exists("final_grades.xlsx") else "disabled"
         self.open_excel_button.configure(state=state)
         self.score_review_button.configure(state=state)
+        self.update_setup_readiness_banner()
 
     def _resize_setup_status_label(self, event):
         wraplength = max(300, event.width - 330)
-        self.setup_status_label.configure(wraplength=wraplength)
-        self.checker_status_label.configure(wraplength=wraplength)
+        if hasattr(self, "workflow_next_label"):
+            self.workflow_next_label.configure(wraplength=wraplength)
+        card_wrap = max(120, (event.width - 80) // 4 - 24)
+        for detail in getattr(self, "workflow_step_details", {}).values():
+            detail.configure(wraplength=card_wrap)
 
     def open_final_excel(self):
         excel_path = os.path.abspath("final_grades.xlsx")
@@ -1360,37 +1408,86 @@ class App(ctk.CTk):
         return "; ".join(statuses) if statuses else "no configured questions"
 
     def update_setup_readiness_banner(self):
-        if not hasattr(self, "setup_status_label"):
+        if not hasattr(self, "workflow_next_label"):
             return
         readiness = self.get_setup_readiness()
-        preprocess_status = "ready" if readiness["preprocess"] else "needs setup"
-        scoring_status = "ready" if readiness["scoring"] else "needs setup"
-        checker_status = "ready" if readiness["checker"] else "needs setup"
-        missing = []
-        if not readiness["packages"]:
-            missing.append("Python packages")
-        if not readiness["assignment"]:
-            missing.append("assignment folders/files")
-        if not readiness["visual_studio"]:
-            missing.append("Visual Studio path")
-        if not readiness["submissions_zip"]:
-            missing.append("submissions zip")
-        if not readiness["rar"]:
-            missing.append("WinRAR/UnRAR")
-        if not readiness["checker_config"]:
-            missing.append("checker configuration")
-        if not readiness["compile_repair_api"]:
-            missing.append("GOOGLE_API_KEY or Fake provider for compile repair")
-        detail = "All required checks are ready." if not missing else "Missing: " + ", ".join(missing)
-        color = COLORS["secondary"] if readiness["preprocess"] and readiness["scoring"] and readiness["checker"] else COLORS["warning"]
+        workflow = compute_workflow_status(
+            self.gui_questions,
+            setup_readiness=readiness,
+            checker_config=load_checker_config(DEFAULT_CHECKER_CONFIG_PATH),
+            final_grades_path="final_grades.xlsx",
+            checker_config_path=DEFAULT_CHECKER_CONFIG_PATH,
+        )
+        status_colors = {
+            "done": COLORS["secondary"],
+            "ready": COLORS["primary"],
+            "pending": "#7f8c8d",
+            "stale": COLORS["warning"],
+            "attention": COLORS["danger"],
+        }
+        status_labels = {
+            "done": "Done",
+            "ready": "Ready",
+            "pending": "Pending",
+            "stale": "Re-run",
+            "attention": "Attention",
+        }
+        titles = {"setup": "1. Setup", "checker": "2. Checker", "grade": "3. Grade", "review": "4. Review"}
+        next_step = workflow.get("next_step")
+        for step_id, step in workflow["steps"].items():
+            color = status_colors.get(step["status"], COLORS["primary"])
+            label = status_labels.get(step["status"], step["status"])
+            emphasize = step_id == next_step or step["status"] in {"attention", "stale"}
+            self.workflow_step_buttons[step_id].configure(
+                text=f"{titles[step_id]} · {label}",
+                fg_color=color if emphasize else COLORS["dark_bg"],
+                hover_color=COLORS["hover"],
+                border_width=2 if step_id == next_step else 0,
+                border_color=color,
+            )
+            self.workflow_step_details[step_id].configure(text=step["detail"], text_color=COLORS["text_light"])
+        hint_color = status_colors.get(workflow["steps"][next_step]["status"], COLORS["primary"])
+        self.workflow_next_label.configure(text=workflow["next_hint"], text_color=hint_color)
         self.setup_status_label.configure(
-            text=f"Setup readiness: Preprocess {preprocess_status}; Scoring {scoring_status}; Checker {checker_status}. {detail}",
-            text_color=color,
+            text=f"Setup readiness: {workflow['steps']['setup']['status']}. {workflow['steps']['setup']['detail']}"
         )
-        self.checker_status_label.configure(
-            text=f"Checker audit: {self.checker_status_summary()}",
-            text_color=color,
+        self.checker_status_label.configure(text=f"Checker audit: {self.checker_status_summary()}")
+
+    def get_workflow_status(self):
+        return compute_workflow_status(
+            self.gui_questions,
+            setup_readiness=self.get_setup_readiness(),
+            checker_config=load_checker_config(DEFAULT_CHECKER_CONFIG_PATH),
+            final_grades_path="final_grades.xlsx",
+            checker_config_path=DEFAULT_CHECKER_CONFIG_PATH,
         )
+
+    def on_workflow_step_clicked(self, step_id):
+        if step_id == "setup":
+            self.open_setup_assistant()
+            return
+        if step_id == "checker":
+            self.open_checker_manager()
+            return
+        if step_id == "grade":
+            status = self.get_workflow_status()["steps"]["grade"]["status"]
+            if status == "pending":
+                messagebox.showinfo(
+                    "Grade Not Ready",
+                    "Finish Setup and Checker calibration first, then click Grade again.",
+                )
+                return
+            if status == "done":
+                if messagebox.askyesno(
+                    "Regrade All Students?",
+                    "Grades already exist. Regrade all students with the current checker?",
+                ):
+                    self.start_grading()
+                return
+            self.start_grading()
+            return
+        if step_id == "review":
+            self.open_post_scoring_review(attention_only=True)
 
     def open_setup_assistant(self):
         if self.setup_assistant_window and self.setup_assistant_window.winfo_exists():
@@ -1694,23 +1791,32 @@ class App(ctk.CTk):
             )
         return GeminiProvider(model=self.gui_llm_compile_repair_model or None)
 
-    def open_checker_manager(self):
+    def open_checker_manager(self, question=None, review_feedback=None):
         existing_window = getattr(self, "checker_manager_window", None)
         if existing_window is not None and existing_window.winfo_exists():
             existing_window.show_on_top()
+            if question or review_feedback:
+                existing_window.apply_external_focus(question, review_feedback)
             return
-        self.checker_manager_window = CheckerManagerWindow(self)
+        self.checker_manager_window = CheckerManagerWindow(
+            self,
+            initial_question=question,
+            review_feedback=review_feedback,
+        )
         self.checker_manager_window.show_on_top()
 
-    def open_post_scoring_review(self):
+    def open_post_scoring_review(self, attention_only=False):
         existing_window = getattr(self, "score_review_window", None)
         if existing_window is not None and existing_window.winfo_exists():
+            if attention_only:
+                existing_window.attention_only_var.set(True)
+                existing_window.render_table()
             existing_window.show_on_top()
             return
         if not os.path.exists("final_grades.xlsx"):
             messagebox.showwarning("No Final Grades", "Run grading first so final_grades.xlsx exists.")
             return
-        self.score_review_window = PostScoringReviewWindow(self)
+        self.score_review_window = PostScoringReviewWindow(self, attention_only=attention_only)
         self.score_review_window.show_on_top()
 
     def _add_config_row(self, question_name="", weight=""):
@@ -2620,7 +2726,7 @@ class SetupAssistantWindow(ctk.CTkToplevel):
 class PostScoringReviewWindow(ctk.CTkToplevel):
     """Review scored rows with an LLM while keeping student identity out of prompts."""
 
-    def __init__(self, parent: App):
+    def __init__(self, parent: App, attention_only: bool = False):
         super().__init__(parent)
         self.parent = parent
         self.title("Post-Scoring LLM Review")
@@ -2635,7 +2741,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
         self.status_var = tk.StringVar(value="Loading scored rows...")
         self.only_deductions_var = tk.BooleanVar(value=True)
-        self.attention_only_var = tk.BooleanVar(value=False)
+        self.attention_only_var = tk.BooleanVar(value=bool(attention_only))
         self.id_search_var = tk.StringVar(value="")
         self.cases: list[ReviewCase] = []
         self.visible_cases: list[ReviewCase] = []
@@ -2681,6 +2787,15 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.review_selected_button = ctk.CTkButton(top, text="Review Selected", command=self.review_selected)
         self.review_selected_button.grid(row=0, column=6, padx=8, pady=8, sticky="ew")
 
+        self.review_attention_button = ctk.CTkButton(
+            top,
+            text="Review All Attention Needed",
+            command=self.review_all_attention_needed,
+            fg_color=COLORS["accent"],
+            hover_color=("#8649a3", "#61347a"),
+        )
+        self.review_attention_button.grid(row=0, column=7, padx=8, pady=8, sticky="ew")
+
         ctk.CTkLabel(top, text="Search ID:").grid(row=1, column=0, padx=8, pady=(0, 8), sticky="w")
         self.id_search_entry = ctk.CTkEntry(
             top,
@@ -2699,13 +2814,37 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             variable=self.attention_only_var,
             command=self.render_table,
         )
-        self.attention_only_checkbox.grid(row=1, column=3, columnspan=2, padx=8, pady=(0, 8), sticky="w")
+        self.attention_only_checkbox.grid(row=1, column=3, padx=8, pady=(0, 8), sticky="w")
+
+        self.select_visible_button = ctk.CTkButton(top, text="Select Visible", width=120, command=self.select_visible_rows)
+        self.select_visible_button.grid(row=1, column=4, padx=8, pady=(0, 8), sticky="w")
+
+        self.recalibrate_button = ctk.CTkButton(
+            top,
+            text="Recalibrate From Reviews",
+            command=self.recalibrate_from_reviews,
+            fg_color=COLORS["warning"],
+            hover_color=("#d68910", "#b9770e"),
+            state="disabled",
+        )
+        self.recalibrate_button.grid(row=1, column=5, padx=8, pady=(0, 8), sticky="ew")
 
         self.open_lab_button = ctk.CTkButton(top, text="Open Review Lab", command=self.open_review_lab)
-        self.open_lab_button.grid(row=1, column=5, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+        self.open_lab_button.grid(row=1, column=6, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
 
         self.key_status_label = ctk.CTkLabel(top, text="", anchor="w", justify="left")
         self.key_status_label.grid(row=2, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+
+        self.feedback_banner = ctk.CTkLabel(
+            top,
+            text="",
+            anchor="w",
+            justify="left",
+            wraplength=1100,
+            text_color=COLORS["danger"],
+        )
+        self.feedback_banner.grid(row=3, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+        self.feedback_banner.grid_remove()
 
         self.status_label = ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left")
         self.status_label.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
@@ -2723,7 +2862,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.configure_review_tree_style()
         self.review_tree = ttk.Treeview(
             self.table_frame,
-            columns=("student_id", "question", "score", "final", "status", "notes"),
+            columns=("student_id", "question", "score", "final", "status", "cause", "notes"),
             show="headings",
             selectmode="extended",
             height=5,
@@ -2734,16 +2873,21 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.review_tree.column("question", width=80, stretch=False, anchor="w")
         self.review_tree.column("score", width=70, stretch=False, anchor="w")
         self.review_tree.column("final", width=70, stretch=False, anchor="w")
-        self.review_tree.column("status", width=110, stretch=False, anchor="w")
-        self.review_tree.column("notes", width=720, stretch=True, anchor="w")
+        self.review_tree.column("status", width=100, stretch=False, anchor="w")
+        self.review_tree.column("cause", width=90, stretch=False, anchor="w")
+        self.review_tree.column("notes", width=640, stretch=True, anchor="w")
         self.review_tree.grid(row=0, column=0, padx=(8, 0), pady=8, sticky="ew")
         self.review_tree.bind("<<TreeviewSelect>>", self.on_review_tree_select)
         self.review_tree.bind("<Double-1>", lambda _event: self.detail_tabview.set("Notes"))
         self.review_tree.bind("<Control-c>", self.copy_selected_student_ids)
         self.review_tree.bind("<Control-C>", self.copy_selected_student_ids)
+        self.review_tree.bind("<Control-a>", self.select_visible_rows)
+        self.review_tree.bind("<Control-A>", self.select_visible_rows)
         self.review_tree.tag_configure("original", foreground=COLORS["text_light"])
         self.review_tree.tag_configure("repaired", foreground=COLORS["accent"])
         self.review_tree.tag_configure("reviewed", foreground=COLORS["secondary"])
+        self.review_tree.tag_configure("checker_or_app", foreground=COLORS["danger"])
+        self.review_tree.tag_configure("unclear", foreground=COLORS["warning"])
         self.review_scrollbar = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.review_tree.yview)
         self.review_scrollbar.grid(row=0, column=1, padx=(0, 8), pady=8, sticky="ns")
         self.review_tree.configure(yscrollcommand=self.review_scrollbar.set)
@@ -2838,6 +2982,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             ("score", "Score"),
             ("final", "Final"),
             ("status", "Status"),
+            ("cause", "Cause"),
             ("notes", "Notes Preview"),
         ]
 
@@ -2867,12 +3012,17 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
                 text_color=COLORS["warning"],
             )
             self.review_selected_button.configure(state="disabled")
+            if hasattr(self, "review_attention_button"):
+                self.review_attention_button.configure(state="disabled")
         else:
             self.key_status_label.configure(
                 text="Ready. Reviewed rows are locked and require deleting their review JSON to re-run.",
                 text_color=COLORS["secondary"],
             )
-            self.review_selected_button.configure(state="normal" if not self.review_running else "disabled")
+            enabled = "normal" if not self.review_running else "disabled"
+            self.review_selected_button.configure(state=enabled)
+            if hasattr(self, "review_attention_button"):
+                self.review_attention_button.configure(state=enabled)
 
     def _create_code_view(self, tab, code_font):
         tab.grid_columnconfigure(1, weight=1)
@@ -2975,11 +3125,12 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         filter_text = f" matching {', '.join(filters)}" if filters else ""
         self.status_var.set(
             f"Loaded {len(self.visible_cases)} row(s){filter_text}, {reviewed} already reviewed. "
-            "Click a notes preview to open the full Notes tab."
+            "Use Review All Attention Needed for the recommended one-click path."
         )
 
         selected_iid = self.populate_review_tree(previous_key)
         self.select_review_tree_item(selected_iid)
+        self.refresh_feedback_banner()
 
     def populate_review_tree(self, previous_key):
         self.review_tree.configure(height=max(2, min(8, len(self.visible_cases) + 1)))
@@ -3010,8 +3161,15 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         return case.final_grade < 50 or case.final_grade <= attention_threshold
 
     def insert_review_tree_row(self, iid, case):
-        status_text = "Reviewed" if case.reviewed else case.code_source.title()
-        tag = "reviewed" if case.reviewed else case.code_source
+        cause = ""
+        tag = case.code_source
+        status_text = case.code_source.title()
+        if case.reviewed:
+            response = (case.saved_review or {}).get("response", {})
+            cause_key = review_response_cause(response if isinstance(response, dict) else {})
+            cause = review_cause_label(cause_key)
+            status_text = "Reviewed"
+            tag = cause_key if cause_key in {"checker_or_app", "unclear"} else "reviewed"
         self.review_tree.insert(
             "",
             "end",
@@ -3023,6 +3181,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
                 f"{case.question_score:g}",
                 f"{case.final_grade:g}",
                 status_text,
+                cause,
                 self._shorten(case.notes or case.grade_text, 120),
             ),
         )
@@ -3050,13 +3209,15 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.render_table()
 
     def review_sort_key(self, case: ReviewCase):
+        response = ((case.saved_review or {}).get("response") if case.reviewed else {}) or {}
         values = {
             "student_id": self._natural_sort_key(case.student_id),
             "question": self._natural_sort_key(case.question),
             "score": case.question_score,
             "final": case.final_grade,
             "status": "Reviewed" if case.reviewed else case.code_source.title(),
-            "notes": (case.notes or case.grade_text).lower(),
+            "cause": review_cause_label(review_response_cause(response if isinstance(response, dict) else {})),
+            "notes": (case.notes or case.grade_text or "").lower(),
         }
         return (values.get(self.review_sort_column), self._case_sort_key(case))
 
@@ -3082,6 +3243,130 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         if selected:
             self.show_case(selected[0])
 
+    def select_visible_rows(self, _event=None):
+        iids = list(self.review_tree.get_children())
+        if not iids:
+            self.status_var.set("No visible rows to select.")
+            return "break"
+        self.review_tree.selection_set(iids)
+        self.review_tree.focus(iids[0])
+        self.show_case(self.table_case_by_iid[iids[0]])
+        self.status_var.set(f"Selected {len(iids)} visible row(s).")
+        return "break"
+
+    def attention_cases(self):
+        threshold = self.attention_threshold()
+        return [case for case in self.cases if self.is_attention_case(case, threshold)]
+
+    def checker_defect_cases(self):
+        defects = []
+        for case in self.cases:
+            if not case.reviewed:
+                continue
+            response = (case.saved_review or {}).get("response", {})
+            if review_response_cause(response if isinstance(response, dict) else {}) == "checker_or_app":
+                defects.append(case)
+        return defects
+
+    def refresh_feedback_banner(self):
+        defects = self.checker_defect_cases()
+        if not defects:
+            self.feedback_banner.configure(text="")
+            self.feedback_banner.grid_remove()
+            self.recalibrate_button.configure(state="disabled")
+            return
+        questions = sorted({case.question for case in defects})
+        self.feedback_banner.configure(
+            text=(
+                f"{len(defects)} review(s) blame the checker/app on {', '.join(questions)}. "
+                "Click Recalibrate From Reviews, then regrade, then re-review attention rows."
+            )
+        )
+        self.feedback_banner.grid()
+        self.recalibrate_button.configure(state="normal")
+
+    def review_all_attention_needed(self):
+        if self.review_running:
+            return
+        self.attention_only_var.set(True)
+        self.render_table()
+        pending = [case for case in self.attention_cases() if not case.reviewed]
+        if not pending:
+            messagebox.showinfo(
+                "Attention Review Complete",
+                "Every attention-needed student already has a review.",
+            )
+            return
+        # Select the pending attention rows that are currently visible.
+        pending_keys = {self._case_identity(case) for case in pending}
+        iids = [
+            iid
+            for iid, case in self.table_case_by_iid.items()
+            if self._case_identity(case) in pending_keys
+        ]
+        if iids:
+            self.review_tree.selection_set(iids)
+            self.review_tree.focus(iids[0])
+            self.show_case(self.table_case_by_iid[iids[0]])
+        self._start_review(pending, label=f"attention-needed ({len(pending)})")
+
+    def recalibrate_from_reviews(self):
+        defects = self.checker_defect_cases()
+        if not defects:
+            messagebox.showinfo("No Checker Defects", "No reviews currently blame the checker or app.")
+            return
+        by_question: dict[str, list[dict]] = {}
+        for case in defects:
+            response = (case.saved_review or {}).get("response", {}) if case.saved_review else {}
+            by_question.setdefault(case.question, []).append(
+                {
+                    "question": case.question,
+                    "student_id": case.student_id,
+                    "anonymized_label": case.anonymized_label,
+                    "cause": "checker_or_app",
+                    "summary": str(response.get("summary", "")),
+                    "risk_note": str(response.get("risk_note", "")),
+                }
+            )
+        # Prefer the currently selected question if it has defects; otherwise the densest question.
+        selected = self.selected_review_cases()
+        question = None
+        if selected and selected[0].question in by_question:
+            question = selected[0].question
+        else:
+            question = max(by_question, key=lambda key: len(by_question[key]))
+        findings = by_question[question]
+        if not messagebox.askyesno(
+            "Recalibrate Checker?",
+            (
+                f"{len(findings)} review(s) say {question}'s checker caused unjustified deductions.\n\n"
+                "Open Checker Manager and run one-click calibration for this question using those findings?"
+            ),
+        ):
+            return
+        self.parent.open_checker_manager(question=question, review_feedback={question: findings})
+
+    def review_selected(self):
+        if self.review_running:
+            return
+        selected = [case for case in self.selected_review_cases() if not case.reviewed]
+        if not selected:
+            messagebox.showinfo("No Rows Selected", "Select one or more unlocked rows to review.")
+            return
+        self._start_review(selected, label=f"selected ({len(selected)})")
+
+    def _start_review(self, selected, label):
+        try:
+            provider = self.make_provider()
+        except Exception as exc:
+            messagebox.showerror("LLM Setup Error", str(exc))
+            return
+        self.review_running = True
+        self.review_selected_button.configure(state="disabled")
+        self.review_attention_button.configure(state="disabled")
+        self.status_var.set(f"Reviewing {label}...")
+        threading.Thread(target=self._review_worker, args=(selected, provider), daemon=True).start()
+
     def copy_selected_student_ids(self, _event=None):
         student_ids = []
         for case in self.selected_review_cases():
@@ -3102,23 +3387,6 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             return
         ReviewLabWindow(self, selected[0]).show_on_top()
 
-    def review_selected(self):
-        if self.review_running:
-            return
-        selected = [case for case in self.selected_review_cases() if not case.reviewed]
-        if not selected:
-            messagebox.showinfo("No Rows Selected", "Select one or more unlocked rows to review.")
-            return
-        try:
-            provider = self.make_provider()
-        except Exception as exc:
-            messagebox.showerror("LLM Setup Error", str(exc))
-            return
-        self.review_running = True
-        self.review_selected_button.configure(state="disabled")
-        self.status_var.set(f"Reviewing {len(selected)} selected row(s)...")
-        threading.Thread(target=self._review_worker, args=(selected, provider), daemon=True).start()
-
     def _review_worker(self, selected: list[ReviewCase], provider):
         try:
             review_cases_with_llm(selected, provider, max_workers=2, progress_callback=self._review_progress)
@@ -3131,12 +3399,23 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
     def _review_finished(self):
         self.review_running = False
+        self.review_selected_button.configure(state="normal")
+        self.review_attention_button.configure(state="normal")
         self.reload_cases()
         self.update_gemini_key_status()
-        self.status_var.set("Review complete. Reviewed rows are now locked.")
+        defects = self.checker_defect_cases()
+        if defects:
+            self.status_var.set(
+                f"Review complete. {len(defects)} review(s) blame the checker/app — use Recalibrate From Reviews."
+            )
+        else:
+            self.status_var.set("Review complete. Reviewed rows are now locked.")
+        self.parent.update_setup_readiness_banner()
 
     def _review_failed(self, exc):
         self.review_running = False
+        self.review_selected_button.configure(state="normal")
+        self.review_attention_button.configure(state="normal")
         self.update_gemini_key_status()
         self.status_var.set(f"Review failed: {exc}")
         messagebox.showerror("Review Failed", str(exc))
@@ -3225,6 +3504,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         lines = [
             f"{case.question} {case.anonymized_label}",
             f"Deduction plausible: {response.get('deduction_is_plausible')}",
+            f"Caused by: {review_cause_label(response.get('deduction_caused_by'))}",
             "",
             "Summary:",
             str(response.get("summary", "")),
@@ -3894,12 +4174,13 @@ class ReviewLabWindow(ctk.CTkToplevel):
 
 
 class CheckerManagerWindow(ctk.CTkToplevel):
-    def __init__(self, parent: App):
+    def __init__(self, parent: App, initial_question=None, review_feedback=None):
         super().__init__(parent)
         self._ui_queue = queue.Queue()
         self._closing = False
         self._background_running = False
         self._worker_snapshot = {}
+        self.pending_review_feedback = dict(review_feedback or {})
         super().after(50, self._drain_ui_queue)
         self.parent = parent
         self.title("Checker Manager")
@@ -3914,6 +4195,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.latest_checker_test_status = {}
         self.latest_checker_test_hash = {}
         self.assignment_path_var = tk.StringVar(value="")
+        self._initial_question = initial_question
         self.provider_var = tk.StringVar(value="Gemini")
         self.gemini_model_var = tk.StringVar(value=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
         self.gemini_model_values = App.default_model_options(self.gemini_model_var.get())
@@ -4128,6 +4410,39 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.show_available_checkers()
         self.update_gemini_key_status()
         self.refresh_checker_status_strip()
+        if self._initial_question or self.pending_review_feedback:
+            self.after(0, lambda: self.apply_external_focus(self._initial_question, self.pending_review_feedback))
+
+    def apply_external_focus(self, question=None, review_feedback=None):
+        if review_feedback:
+            self.pending_review_feedback.update(dict(review_feedback))
+        if question and question in (self.parent.gui_questions or []):
+            self.question_var.set(question)
+            self.load_question_config()
+        focused = question or self.question_var.get()
+        findings = list(self.pending_review_feedback.get(focused, []))
+        if findings:
+            self.show_json_result(
+                {
+                    "review_feedback": findings,
+                    "hint": (
+                        f"{len(findings)} post-scoring review(s) blame the {focused} checker. "
+                        "Click One-click Calibrate (Current Question) to refine with this feedback, then regrade."
+                    ),
+                }
+            )
+            self.set_status(
+                f"{focused}: {len(findings)} review finding(s) blame the checker. "
+                "Run One-click Calibrate (Current Question)."
+            )
+            if messagebox.askyesno(
+                "Start Calibration?",
+                (
+                    f"Apply {len(findings)} checker-defect review finding(s) to {focused} now?\n\n"
+                    "This runs one-click calibrate for the current question."
+                ),
+            ):
+                self.auto_setup_current_question()
 
     def show_on_top(self):
         self.deiconify()
@@ -4290,6 +4605,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             anchor="w",
             justify="left",
         ).grid(row=0, column=len(questions) + 1, padx=8, pady=6, sticky="e")
+        self.parent.update_setup_readiness_banner()
 
     def compact_checker_status_for_question(self, question):
         question_config = self.checker_config.get("questions", {}).get(question) or self.checker_config.get("questions", {}).get(question.upper())
@@ -4836,6 +5152,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         round_summaries = []
         total_reviewed = 0
         last_status = "flagged"
+        review_feedback = list(self.pending_review_feedback.get(question, []))
 
         for round_number in range(1, 4):
             self.after(
@@ -4899,6 +5216,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             flagged = [result for result in results if result.status == "flagged"]
             uncertain = [result for result in results if result.status == "uncertain"]
             errors = [result for result in results if result.status == "error"]
+            force_review_refine = bool(review_feedback) and round_number == 1
             round_summary = {
                 "round": round_number,
                 "sampled": len(results),
@@ -4907,10 +5225,11 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 "uncertain": len(uncertain),
                 "errors": len(errors),
                 "sample_hashes": anonymized_student_hashes({result.student_id for result in results}),
+                "review_feedback_used": len(review_feedback) if force_review_refine else 0,
             }
             round_summaries.append(round_summary)
 
-            if not flagged:
+            if not flagged and not force_review_refine:
                 if errors and len(errors) == len(results):
                     last_status = "error"
                 elif uncertain or errors:
@@ -4945,6 +5264,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 provider,
                 focused_context.text,
                 focused_context.images,
+                review_feedback=review_feedback if force_review_refine else None,
             )
             if proposal.status != "supported" or not proposal.checker:
                 round_summary.update(status="rejected", reason="LLM did not produce a supported candidate.")
@@ -4999,6 +5319,9 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             active_config = editable_checker_config(promoted)
             cumulative_rows.extend(candidate_rows)
             needs_post_promotion_audit = True
+            if force_review_refine:
+                self.pending_review_feedback.pop(question, None)
+                review_feedback = []
             round_summary.update(
                 status="promoted",
                 reason="Candidate passed deterministic, cumulative, and audited-student no-regression gates.",

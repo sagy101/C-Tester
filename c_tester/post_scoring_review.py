@@ -14,6 +14,7 @@ import pandas as pd
 
 from .checker_assistant import LLMProvider, complete_json_with_schema
 from . import configuration
+from .workflow_status import normalize_deduction_cause
 
 
 MAX_PROMPT_TEXT = 12000
@@ -23,6 +24,10 @@ SCORE_REVIEW_RESPONSE_SCHEMA = {
     "properties": {
         "summary": {"type": "string"},
         "deduction_is_plausible": {"type": "boolean"},
+        "deduction_caused_by": {
+            "type": "string",
+            "enum": ["student_code", "checker_or_app", "unclear"],
+        },
         "root_causes": {
             "type": "array",
             "items": {
@@ -65,6 +70,7 @@ SCORE_REVIEW_RESPONSE_SCHEMA = {
     "required": [
         "summary",
         "deduction_is_plausible",
+        "deduction_caused_by",
         "root_causes",
         "inline_comments",
         "fix_to_full_score",
@@ -220,6 +226,10 @@ def build_score_review_prompt(case: ReviewCase) -> str:
             "If notes or final_fields mention preprocessing/submission errors such as RAR extraction, naming, missing files, or nested subfolder issues, explain them as submission penalties rather than code-output failures. "
             "If code_source is repaired, include the compile_repair penalty from grading_policy and repair_metadata when explaining the final deduction. "
             "Describe why the observed deductions are plausible or where a grader should double-check. "
+            "Set deduction_caused_by to exactly one of: student_code, checker_or_app, or unclear. "
+            "Use student_code when the student's logic, missing implementation, crash, wrong values, or genuinely missing required output facts caused the deduction. "
+            "Use checker_or_app when the student's output is semantically equivalent to the expected output and the deduction comes from checker/parser/label/anchor/phrasing sensitivity or an application defect; in that case set deduction_is_plausible to false. "
+            "Use unclear only when the evidence is insufficient to choose. "
             "Suggest the smallest question-specific fix needed to pass all inputs for this question. "
             "Do not recommend style cleanup, refactors, rewrites, or edits to unrelated questions unless they are required for this question to pass. "
             "Return inline comments using 1-based line numbers from student_code when possible."
@@ -227,6 +237,7 @@ def build_score_review_prompt(case: ReviewCase) -> str:
         "response_schema": {
             "summary": "short grader-facing explanation",
             "deduction_is_plausible": "boolean",
+            "deduction_caused_by": "student_code | checker_or_app | unclear",
             "root_causes": [
                 {
                     "issue": "logic issue",
@@ -300,6 +311,7 @@ def _review_one_case(case: ReviewCase, provider: LLMProvider) -> ReviewResult:
         response = {
             "summary": f"Review failed: {exc}",
             "deduction_is_plausible": False,
+            "deduction_caused_by": "unclear",
             "root_causes": [],
             "inline_comments": [],
             "fix_to_full_score": "",
@@ -421,9 +433,14 @@ def _parse_failed_cases(grade_text: str, max_failed_cases: int) -> list[ReviewFa
 
 
 def _normalize_review_response(response: dict[str, Any]) -> dict[str, Any]:
+    cause = normalize_deduction_cause(response.get("deduction_caused_by"))
+    plausible = bool(response.get("deduction_is_plausible", False))
+    if cause == "checker_or_app":
+        plausible = False
     return {
         "summary": str(response.get("summary", "")),
-        "deduction_is_plausible": bool(response.get("deduction_is_plausible", False)),
+        "deduction_is_plausible": plausible,
+        "deduction_caused_by": cause,
         "root_causes": _normalize_root_causes(response.get("root_causes", [])),
         "inline_comments": response.get("inline_comments", []) if isinstance(response.get("inline_comments", []), list) else [],
         "fix_to_full_score": str(response.get("fix_to_full_score", "")),

@@ -76,6 +76,8 @@ class TestPostScoringReview(unittest.TestCase):
                 self.assertIn("cumulative_per_error", prompt)
                 self.assertIn("RAR extraction", prompt)
                 self.assertIn("nested subfolder", prompt)
+                self.assertIn("deduction_caused_by", prompt)
+                self.assertIn("checker_or_app", prompt)
                 self.assertNotIn("123456789", prompt)
                 self.assertNotIn('"ID_number"', prompt)
 
@@ -86,6 +88,7 @@ class TestPostScoringReview(unittest.TestCase):
                 reloaded = load_review_cases(["Q1"])[0]
                 self.assertTrue(reloaded.reviewed)
                 self.assertIn("summary", reloaded.saved_review["response"])
+                self.assertEqual(reloaded.saved_review["response"]["deduction_caused_by"], "student_code")
                 self.assertIn("examples", reloaded.saved_review["response"]["root_causes"][0])
                 self.assertEqual(reloaded.saved_review["response"]["root_causes"][0]["examples"][0]["input"], "0")
             finally:
@@ -424,8 +427,9 @@ class TestPostScoringReview(unittest.TestCase):
                         original_review_window = gui.PostScoringReviewWindow
 
                         class FakeReviewWindow:
-                            def __init__(self, parent):
+                            def __init__(self, parent, attention_only=False):
                                 self.parent = parent
+                                self.attention_only = attention_only
                                 self.shown = False
                                 self.policy = original_review_window.active_grading_policy(self)
 
