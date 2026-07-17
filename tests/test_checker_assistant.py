@@ -422,6 +422,26 @@ class TestCheckerAssistant(unittest.TestCase):
         self.assertIn("structural recursion/loop check fields", payload["instructions"])
         self.assertEqual(payload["per_question_excel_fields"]["Structural_Check_Status"], "failed")
 
+    def test_audit_prompt_requires_semantic_fairness_review_of_deductions(self):
+        case = AuditCase(
+            student_id="123456789",
+            question="Q1",
+            score=16,
+            grade_text="Grade: 16%\nDiscrepancies:\nExpected: isn't\nActual: is not",
+            output_text="The triangle is not a right-angled triangle.",
+            excel_fields={"Grade": 16},
+            final_fields={"Final_Grade": 16},
+        )
+        payload = json.loads(build_audit_prompt(case, {"checker": "output_contract", "config": {}}))
+
+        flagged_text = " ".join(payload["eval_cases"]["flagged_when"])
+        self.assertIn("semantically equivalent", flagged_text)
+        self.assertIn("checker defect", flagged_text)
+        self.assertIn("Audit fairness as well as bookkeeping", payload["instructions"])
+        self.assertIn("judge on the merits", payload["instructions"])
+        self.assertIn("every output-comparison deduction", payload["instructions"])
+        self.assertIn("genuine content mistake", payload["instructions"])
+
     def test_long_audit_evidence_preserves_start_and_end_with_explicit_metadata(self):
         source = "SOURCE_START\n" + ("middle-data\n" * 200) + "SOURCE_END"
         evidence = _compact_audit_text(source, max_chars=500)

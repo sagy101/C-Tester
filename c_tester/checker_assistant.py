@@ -79,7 +79,7 @@ CHECKER_SUGGESTION_EVAL_CASES = {
 CHECKER_AUDIT_EVAL_CASES = {
     "looks_correct_when": [
         "Perfect score, grade text, output, checker result, and Excel fields agree.",
-        "Wrong-input count, comments, and assigned score match the configured checker failures.",
+        "Wrong-input count, comments, and assigned score match checker failures whose expected-vs-actual evidence shows genuine content mistakes.",
         "Compile repair succeeded and the final score reflects the configured repair penalty and repair note.",
         "Structural recursion/loop checks were enforced when configured, and the score/comments reflect any structural penalty.",
         "Submission penalties in final fields match naming, RAR, missing-file, or nested-folder notes.",
@@ -90,6 +90,13 @@ CHECKER_AUDIT_EVAL_CASES = {
         "Final weighted grade does not match question scores, weights, or submission penalties when those fields are present.",
         "Structural check status, structural penalty, grade text, or final comments contradict each other.",
         "Checker configuration is unsupported or appears mismatched to the assignment intent and would hide mistakes.",
+        (
+            "The checker rejected student output that is semantically equivalent to the expected output. Compare the "
+            "expected-vs-actual text in the grade discrepancies yourself: if the failed cases differ only in phrasing, "
+            "wording variants (for example \"is not\" versus \"isn't\"), synonyms, labels, punctuation, spacing, or other "
+            "formatting the assignment does not explicitly require, the deduction is a checker defect even when the score "
+            "is arithmetically consistent with the checker's pass/fail counts."
+        ),
     ],
     "uncertain_when": [
         "Reference context is insufficient to know whether text formatting is semantically important.",
@@ -758,7 +765,12 @@ def build_suggestion_prompt(
                 "labeled_number": "requires label, or anchor to capture the first following number",
                 "point": "optional anchor; occurrence defaults to 0; returns one coordinate pair",
                 "points": "optional anchor; count is required when more than two points matter",
-                "boolean": "requires non-empty true_aliases and false_aliases; anchor is strongly recommended",
+                "boolean": (
+                    "requires non-empty true_aliases and false_aliases; anchor is strongly recommended. The earliest "
+                    "alias occurrence wins and longer aliases win position ties, so cover negated phrasing variants in "
+                    "false_aliases (for example both \"isn't\" and \"is not\") rather than relying on a bare positive "
+                    "alias. An alias directly followed by a negation (\"not\"/\"n't\") is automatically inverted."
+                ),
                 "integers_or_floats": "select is all, last, {index: n}, or {slice: [start, count]}",
             },
             "normalizers": ["collapse_whitespace", "lowercase", "strip_punctuation", "normalize_apostrophe"],
@@ -781,6 +793,11 @@ def build_suggestion_prompt(
                 "For programs printing before/after values, check both values with point/points fields and exchanged assertions; address text alone is not enough.",
                 "Cover every function behavior exercised by the reference main program, not only final calculations.",
                 "Numeric tolerance cannot exceed 0.011. Use 0.011 for two-decimal output and a smaller value for higher precision.",
+                (
+                    "Students phrase equivalent facts differently. Configure aliases and anchors so semantically "
+                    "equivalent wording passes: include common contractions and their expansions in boolean aliases, "
+                    "and never anchor on decorative text a correct program could reasonably omit or reword."
+                ),
             ],
         },
         "eval_cases": CHECKER_SUGGESTION_EVAL_CASES,
@@ -1102,7 +1119,24 @@ def _contract_mutation_variants(checker_config: dict, expected_output: str) -> l
         truncated = expected_output[: len(expected_output) // 2]
         if truncated not in seen_outputs:
             variants.append(("reject_truncated", truncated, False))
+    # Semantically equivalent rewording must keep passing: expanding
+    # contractions ("isn't" -> "is not") preserves meaning, so a contract that
+    # rejects it would deduct points for phrasing instead of content.
+    reworded = _expand_negative_contractions(expected_output)
+    if reworded != expected_output and reworded not in seen_outputs:
+        variants.append(("accept_equivalent_negation", reworded, True))
     return variants
+
+
+def _expand_negative_contractions(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        word = match.group(0)
+        # Irregular stems ("can't" -> "ca") would produce gibberish; keep them.
+        if word[:-3].lower() in {"ca", "wo", "sha", "ai"}:
+            return word
+        return f"{word[:-3]} not"
+
+    return re.sub(r"[A-Za-z]+n't\b", replace, text, flags=re.IGNORECASE)
 
 
 def _mutation_changes_extracted_value(field: dict, original: str, mutated: str) -> bool:
@@ -1346,13 +1380,21 @@ def build_audit_prompt(
                 "student output, checker configuration, and selected-question assignment intent. Verify comments, penalties, compile-error flags, timeout "
                 "fields, wrong-input fields, structural recursion/loop check fields, structural penalties, and final weighted grade fields "
                 "when present. Do not change the grade. "
+                "Audit fairness as well as bookkeeping: a deduction being consistent with the checker's own pass/fail "
+                "counts does not make it correct, because the checker itself may be defective. For every deduction, read "
+                "the expected-vs-actual discrepancy evidence in the grade text and judge on the merits whether the "
+                "student's output genuinely differs in content (wrong numbers, missing required facts, crashes) or only "
+                "in semantically equivalent phrasing or formatting. If failures come only from equivalent phrasing or "
+                "formatting the assignment does not explicitly require, return flagged and name the checker as the cause. "
                 "The application may compact exceptionally long grade or output evidence. When evidence metadata says "
                 "application_compacted=true, the omitted middle is an application size limit, not evidence that the student's "
                 "program crashed or truncated its output. The source beginning and ending are both retained; use the ending, "
                 "runtime/timeout fields, and grade evidence to judge actual completion. "
-                "Return looks_correct only when the fields are internally consistent and the grading decision appears "
-                "reasonable. Return flagged for likely scoring/Excel mistakes. Return uncertain when more human review "
-                "is needed."
+                "Return looks_correct only when the fields are internally consistent, every output-comparison deduction "
+                "reflects a genuine content mistake by the student, and configured policy penalties (compile repair, "
+                "structural, submission) follow their documented rules. Return flagged for likely scoring/Excel mistakes "
+                "or checker defects that penalize semantically equivalent output. Return uncertain when more human "
+                "review is needed."
             ),
             "response_schema": {
                 "verdict": "looks_correct | flagged | uncertain",

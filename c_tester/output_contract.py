@@ -22,6 +22,8 @@ _POINT_PATTERN = re.compile(
 )
 _INTEGER_PATTERN = re.compile(r"-?\d+")
 _FLOAT_RE = re.compile(_FLOAT_PATTERN)
+# Matches a negation directly after a boolean alias: "is" + "n't"/"nt"/" not".
+_NEGATION_SUFFIX_RE = re.compile(r"^(?:n'?t\b|\s+not\b)")
 
 _NORMALIZERS = {"collapse_whitespace", "lowercase", "strip_punctuation", "normalize_apostrophe"}
 _EXTRACTORS = {"text", "integers", "floats", "labeled_number", "point", "points", "boolean"}
@@ -440,15 +442,23 @@ def _extract_field(field: dict, raw_text: str) -> Any:
         true_aliases = field.get("true_aliases", [])
         false_aliases = field.get("false_aliases", [])
         candidates = []
-        lowered = scoped.lower()
+        lowered = scoped.replace("\u2019", "'").lower()
         for value, aliases in ((True, true_aliases), (False, false_aliases)):
             for alias in aliases:
-                position = lowered.find(alias.lower())
+                normalized_alias = alias.replace("\u2019", "'").lower()
+                position = lowered.find(normalized_alias)
                 if position >= 0:
-                    candidates.append((position, -len(alias), value))
+                    candidates.append((position, -len(normalized_alias), value, position + len(normalized_alias)))
         if not candidates:
             raise ContractExtractionError("none of the configured boolean aliases were found")
-        return min(candidates)[2]
+        _, _, value, match_end = min(candidates)
+        # An alias immediately followed by a negation states the opposite of the
+        # bare alias ("is not", "isn't", "has not"), even when that phrasing is
+        # missing from the configured aliases. Longer configured aliases still
+        # win at the same position, so explicit negated aliases stay authoritative.
+        if _NEGATION_SUFFIX_RE.match(lowered[match_end:]):
+            return not value
+        return value
     raise ContractExtractionError(f"unsupported extractor '{extractor}'")
 
 

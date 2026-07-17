@@ -249,6 +249,97 @@ class OutputContractTests(unittest.TestCase):
         )
         self.assertTrue(any(row["variant"].startswith("reject_") for row in rows))
 
+    def test_boolean_alias_followed_by_negation_is_inverted(self):
+        # Regression: aliases ["is"] / ["isn't"] misparsed "is not" as True
+        # because the negated phrasing was missing from the alias list.
+        contract = {
+            "version": 1,
+            "fields": [
+                {
+                    "id": "ref_flag",
+                    "source": "reference",
+                    "extract": "boolean",
+                    "anchor": "The triangle",
+                    "true_aliases": ["is"],
+                    "false_aliases": ["isn't"],
+                },
+                {
+                    "id": "act_flag",
+                    "source": "actual",
+                    "extract": "boolean",
+                    "anchor": "The triangle",
+                    "true_aliases": ["is"],
+                    "false_aliases": ["isn't"],
+                },
+            ],
+            "checks": [
+                {"id": "flag", "op": "equal", "left": {"field": "act_flag"}, "right": {"field": "ref_flag"}},
+            ],
+        }
+        reference = "The triangle isn't a right-angled triangle."
+        for equivalent_phrasing in (
+            "The triangle is not a right-angled triangle.",
+            "The triangle isn't a right-angled triangle.",
+            "The triangle isn\u2019t a right-angled triangle.",
+            "The triangle isnt a right-angled triangle.",
+        ):
+            with self.subTest(actual=equivalent_phrasing):
+                result = evaluate_contract(contract, "1 2 3", reference, equivalent_phrasing)
+                self.assertTrue(result.passed, result.reason)
+
+        positive = evaluate_contract(contract, "1 2 3", reference, "The triangle is a right-angled triangle.")
+        self.assertFalse(positive.passed)
+
+    def test_boolean_negation_inversion_applies_after_bare_positive_alias(self):
+        contract = {
+            "version": 1,
+            "fields": [
+                {
+                    "id": "act_changed",
+                    "source": "actual",
+                    "extract": "boolean",
+                    "anchor": "p address",
+                    "true_aliases": ["has"],
+                    "false_aliases": ["hasn't"],
+                },
+            ],
+            "checks": [
+                {"id": "changed", "op": "equal", "left": {"field": "act_changed"}, "right": {"literal": False}},
+            ],
+        }
+        for wording in ("p address hasn't changed", "p address has not changed", "p address hasnt changed"):
+            with self.subTest(actual=wording):
+                result = evaluate_contract(contract, "", "unused", wording)
+                self.assertTrue(result.passed, result.reason)
+        result = evaluate_contract(contract, "", "unused", "p address has changed")
+        self.assertFalse(result.passed)
+
+    def test_draft_tests_accept_equivalent_negation_rewording(self):
+        rows = run_checker_tests(
+            {"checker": "output_contract", "config": {"contract": trace_contract()}},
+            [("0 0 3 0 0 4", REFERENCE)],
+        )
+        rewording_rows = [row for row in rows if row["variant"] == "accept_equivalent_negation"]
+        self.assertTrue(rewording_rows)
+        self.assertIn("has not changed", rewording_rows[0]["actual_output"])
+        self.assertTrue(all(row["expected_pass"] for row in rewording_rows))
+        self.assertTrue(
+            all(row["test_passed"] for row in rewording_rows),
+            [row["reason"] for row in rewording_rows if not row["test_passed"]],
+        )
+
+    def test_contraction_expansion_keeps_irregular_contractions_intact(self):
+        from c_tester.checker_assistant import _expand_negative_contractions
+
+        self.assertEqual(
+            _expand_negative_contractions("It isn't right and the value hasn't changed."),
+            "It is not right and the value has not changed.",
+        )
+        self.assertEqual(
+            _expand_negative_contractions("You can't and won't divide; DOESN'T matter."),
+            "You can't and won't divide; DOES not matter.",
+        )
+
     def test_zero_answer_draft_wrong_variant_is_still_rejected(self):
         rows = run_checker_tests(
             {"checker": "last_integer", "config": {}},
