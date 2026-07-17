@@ -154,7 +154,10 @@ from .checker_assistant import (
     refine_checker,
     review_feedback_test_rows,
     run_checker_tests,
+    audit_population_records,
+    load_audit_population,
     select_audit_cases,
+    select_strict_audit_cases,
     suggest_checker,
 )
 from .post_scoring_review import (
@@ -177,19 +180,23 @@ from .semantic_grading import (
     save_checker_config,
 )
 from .checker_calibration import (
+    SemanticAuditEvidence,
     anonymized_student_hashes,
     append_checker_version,
     candidate_preserves_audited_cases,
     checker_config_hash,
     editable_checker_config,
+    evaluate_strict_population_confidence,
     validate_candidate_against_rows,
 )
 from .verification import (
     AUDIT_RUBRIC_VERSION,
     audit_metadata_is_current,
     editable_checker_hash,
+    grade_population_evidence_fingerprint,
     latest_audit_evidence_mtime,
     stable_fingerprint,
+    strict_confidence_metadata,
 )
 from .structural_analysis import structural_requirements_errors
 from .clear_utils import (
@@ -4665,18 +4672,38 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         test_status = metadata.get("test_status", "not_run")
         positive_status = metadata.get("positive_gate_status", "not_run")
         negative_status = metadata.get("negative_gate_status", "not_run")
+        low = metadata.get("strict_too_low", {}) if isinstance(metadata.get("strict_too_low"), dict) else {}
+        high = metadata.get("strict_too_high", {}) if isinstance(metadata.get("strict_too_high"), dict) else {}
+        confidence_current = audit_metadata_is_current(question_config, question)
+        low_status = str(low.get("status", "in progress")).replace("_", " ").title()
+        high_status = str(high.get("status", "in progress")).replace("_", " ").title()
+        if metadata.get("strict_status") == "verified" and not confidence_current:
+            low_status = high_status = "Stale"
+        low_line = (
+            f"Too-low: {low_status} — "
+            f"deductions reviewed {low.get('reviewed', 0)}/{low.get('required', 0)}"
+        )
+        bound = high.get("upper_bound")
+        bound_text = "not available" if bound is None else f"{100 * float(bound):.1f}%"
+        high_line = (
+            f"Too-high: {high_status} — "
+            f"full-score sample {high.get('reviewed', 0)}/{high.get('required', 0)}, "
+            f"95% upper bound {bound_text}"
+        )
         if (
             metadata.get("calibration_status") == "passed"
-            and audit_metadata_is_current(question_config, question)
+            and confidence_current
         ):
             return (
-                f"{question}: verified — equivalent variants pass; semantic mutations fail ({checker_name})",
+                f"{question}: Verified ({checker_name})\n{low_line}\n{high_line}",
                 COLORS["secondary"],
             )
+        blockers = list(metadata.get("strict_blockers", []) or [])
+        blocker_text = f"\nNext: {blockers[0]}" if blockers else ""
         if audit_status == "passed":
             return (
-                f"{question}: audit exists but bidirectional gates are not current "
-                f"(accept={positive_status}, reject={negative_status}; {checker_name})",
+                f"{question}: In progress ({checker_name}; accept={positive_status}, reject={negative_status})"
+                f"\n{low_line}\n{high_line}{blocker_text}",
                 COLORS["warning"],
             )
         if audit_status == "partial":
@@ -4687,7 +4714,11 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             return f"{question}: audit {audit_status}; review checker before trusting scores ({checker_name})", COLORS["danger"]
         if test_status == "passed":
             return f"{question}: checker saved and draft tests passed; run grading/audit next ({checker_name})", COLORS["warning"]
-        return f"{question}: checker saved; run Test Draft then Audit ({checker_name})", COLORS["warning"]
+        return (
+            f"{question}: In progress ({checker_name})\n{low_line}\n{high_line}"
+            f"{blocker_text or chr(10) + 'Next: Run Test Draft, then One-click Calibrate.'}",
+            COLORS["warning"],
+        )
 
     def update_checker_metadata(self, question, **metadata_updates):
         question_config = self.checker_config.setdefault("questions", {}).setdefault(question, {"checker": "exact", "config": {}})
@@ -4719,6 +4750,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 "calibration_status": "not_run",
                 "positive_gate_status": "not_run",
                 "negative_gate_status": "not_run",
+                "strict_status": "stale",
+                "strict_blockers": ["Checker changed; regrade and rerun strict verification."],
             }
         )
         self.checker_config.setdefault("questions", {})[question] = saved_config
@@ -5241,6 +5274,9 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         total_reviewed = 0
         last_status = "flagged"
         review_feedback = list(self.pending_review_feedback.get(question, []))
+        latest_results = []
+        latest_cases = []
+        strict_seed = sum(ord(character) for character in question) * 1000
 
         for round_number in range(1, MAX_CALIBRATION_ROUNDS + 1):
             self.after(
@@ -5250,12 +5286,11 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 ),
             )
             self.force_grade_outputs()
-            seed = sum(ord(character) for character in question) * 1000 + round_number
-            cases = select_audit_cases(
+            seed = strict_seed + round_number
+            cases = select_strict_audit_cases(
                 [question],
-                max_cases=self.get_audit_size(),
                 seed=seed,
-                exclude_student_ids=sampled_ids,
+                exclude_full_score_ids=sampled_ids,
             )
             if not cases:
                 last_status = "flagged" if needs_post_promotion_audit else ("passed" if round_summaries else "skipped")
@@ -5296,6 +5331,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                     ),
                 ),
             )
+            latest_results = results
+            latest_cases = cases
             total_reviewed += len(results)
             needs_post_promotion_audit = False
             self.record_audit_results(results, self.audit_overall_status(results))
@@ -5419,6 +5456,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 test_status="passed",
                 audit_status="not_run",
                 calibration_round=round_number,
+                strict_status="stale",
+                strict_blockers=["Checker promotion invalidated prior population evidence."],
             )
             self.checker_config["questions"][question] = promoted
             save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
@@ -5465,6 +5504,8 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 test_status="passed",
                 audit_status="flagged",
                 calibration_rollback=True,
+                strict_status="stale",
+                strict_blockers=["Rollback and regrade invalidated prior population evidence."],
             )
             self.checker_config["questions"][question] = rollback_version
             save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
@@ -5483,16 +5524,56 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             if negative_rows and all(row.get("test_passed", False) for row in negative_rows)
             else "failed"
         )
+        checker_hash = editable_checker_hash(self.checker_config["questions"][question])
+        strict_result = evaluate_strict_population_confidence(
+            audit_population_records(load_audit_population([question])),
+            [
+                SemanticAuditEvidence(
+                    student_id=result.student_id,
+                    status=result.status,
+                    checker_behavior=result.checker_behavior,
+                    checker_hash=checker_hash,
+                    evidence_fingerprint=stable_fingerprint(
+                        result.status,
+                        result.checker_behavior,
+                        result.reason,
+                        result.evidence,
+                    ),
+                    verification_passes=result.verification_passes,
+                    disagreement=(
+                        result.status == "uncertain"
+                        and "disagreed" in str(result.reason).lower()
+                    ),
+                )
+                for result in latest_results
+            ],
+            checker_hash=checker_hash,
+            deterministic_negative_gate_passed=metadata["negative_gate_status"] == "passed",
+            seed=strict_seed,
+            fresh=not needs_post_promotion_audit,
+            sampled_full_score_ids={
+                case.student_id for case in latest_cases if float(case.score) >= 99.999
+            },
+        )
+        metadata.update(
+            strict_confidence_metadata(
+                strict_result,
+                checker_hash=checker_hash,
+                population_fingerprint=grade_population_evidence_fingerprint(question),
+                sampled_id_hashes=anonymized_student_hashes(set(strict_result.sampled_ids)),
+            )
+        )
         if last_status == "passed" and (
             metadata["positive_gate_status"] != "passed"
             or metadata["negative_gate_status"] != "passed"
+            or strict_result.status != "verified"
         ):
             last_status = "flagged"
             round_summaries.append(
                 {
                     "round": len(round_summaries) + 1,
                     "status": "flagged",
-                    "reason": "Bidirectional positive/negative checker gates were incomplete or failed.",
+                    "reason": "Strict too-low or too-high confidence coverage was incomplete, stale, uncertain, or failed.",
                 }
             )
         metadata["calibration_status"] = last_status
@@ -5533,6 +5614,12 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
 
     def force_grade_outputs(self):
+        for question_config in self.checker_config.get("questions", {}).values():
+            if isinstance(question_config, dict):
+                metadata = question_config.setdefault("metadata", {})
+                metadata["strict_status"] = "stale"
+                metadata["strict_blockers"] = ["Regrading invalidated prior population evidence."]
+        save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
         run_tests(
             self.parent.gui_questions,
             progress_callback=lambda *_args: None,

@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from c_tester.workflow_status import (
     compute_workflow_status,
@@ -9,7 +10,7 @@ from c_tester.workflow_status import (
     review_cause_label,
     review_response_cause,
 )
-from c_tester.verification import editable_checker_hash
+from c_tester.verification import STRICT_CONFIDENCE_POLICY_VERSION, audit_metadata_is_current, editable_checker_hash
 
 
 class WorkflowStatusTests(unittest.TestCase):
@@ -128,25 +129,73 @@ class WorkflowStatusTests(unittest.TestCase):
             "audit_evidence_mtime": 9999999999,
             "positive_gate_status": "passed",
             "negative_gate_status": "passed",
+            "strict_policy_version": STRICT_CONFIDENCE_POLICY_VERSION,
+            "strict_status": "verified",
+            "strict_checker_hash": editable_checker_hash(config),
+            "grade_population_fingerprint": "population",
+            "strict_sampled_id_hashes": ["anonymous"],
+            "strict_too_low": {
+                "status": "verified", "reviewed": 2, "required": 2,
+                "observed_errors": 0, "blockers": [],
+            },
+            "strict_too_high": {
+                "status": "verified", "reviewed": 39, "required": 39,
+                "observed_errors": 0, "upper_bound": 0.05,
+                "confidence_level": 0.95, "blockers": [],
+            },
+            "strict_blockers": [],
         }
-        workflow = compute_workflow_status(
-            ["Q1"],
-            setup_readiness={"scoring": True},
-            checker_config={"questions": {"Q1": config}},
-            final_grades_path="missing-grades.xlsx",
-            checker_config_path="missing-checker.json",
-        )
+        with patch("c_tester.verification.grade_population_evidence_fingerprint", return_value="population"):
+            workflow = compute_workflow_status(
+                ["Q1"],
+                setup_readiness={"scoring": True},
+                checker_config={"questions": {"Q1": config}},
+                final_grades_path="missing-grades.xlsx",
+                checker_config_path="missing-checker.json",
+            )
         self.assertEqual(workflow["steps"]["checker"]["status"], "done")
 
         config["metadata"]["negative_gate_status"] = "failed"
-        workflow = compute_workflow_status(
-            ["Q1"],
-            setup_readiness={"scoring": True},
-            checker_config={"questions": {"Q1": config}},
-            final_grades_path="missing-grades.xlsx",
-            checker_config_path="missing-checker.json",
-        )
+        with patch("c_tester.verification.grade_population_evidence_fingerprint", return_value="population"):
+            workflow = compute_workflow_status(
+                ["Q1"],
+                setup_readiness={"scoring": True},
+                checker_config={"questions": {"Q1": config}},
+                final_grades_path="missing-grades.xlsx",
+                checker_config_path="missing-checker.json",
+            )
         self.assertEqual(workflow["steps"]["checker"]["status"], "ready")
+
+    def test_partial_or_stale_strict_evidence_cannot_verify(self):
+        config = {"checker": "exact", "config": {}}
+        config["metadata"] = {
+            "audit_status": "passed",
+            "audit_rubric_version": 2,
+            "audit_checker_hash": editable_checker_hash(config),
+            "audit_evidence_fingerprint": "audit",
+            "positive_gate_status": "passed",
+            "negative_gate_status": "passed",
+            "strict_policy_version": STRICT_CONFIDENCE_POLICY_VERSION,
+            "strict_status": "verified",
+            "strict_checker_hash": editable_checker_hash(config),
+            "grade_population_fingerprint": "population",
+            "strict_sampled_id_hashes": [],
+            "strict_too_low": {
+                "status": "verified", "reviewed": 1, "required": 2,
+                "observed_errors": 0, "blockers": [],
+            },
+            "strict_too_high": {
+                "status": "verified", "reviewed": 10, "required": 10,
+                "observed_errors": 0, "upper_bound": 0.05,
+                "confidence_level": 0.95, "blockers": [],
+            },
+            "strict_blockers": [],
+        }
+        self.assertFalse(audit_metadata_is_current(config))
+        config["metadata"]["strict_too_low"]["reviewed"] = 2
+        self.assertTrue(audit_metadata_is_current(config))
+        config["metadata"]["strict_checker_hash"] = "old-checker"
+        self.assertFalse(audit_metadata_is_current(config))
 
 
 if __name__ == "__main__":

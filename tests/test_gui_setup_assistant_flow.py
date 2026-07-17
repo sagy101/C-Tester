@@ -280,12 +280,19 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                 os.environ["C_TESTER_SUPPRESS_TK_BGERRORS"] = "1"
                 from c_tester import gui
                 from c_tester.checker_assistant import AuditResult
+                from c_tester.verification import (
+                    STRICT_CONFIDENCE_POLICY_VERSION,
+                    editable_checker_hash,
+                    grade_population_evidence_fingerprint,
+                )
 
                 app = gui.App()
                 app.withdraw()
                 window = gui.CheckerManagerWindow(app)
                 window.withdraw()
                 try:
+                    with open(os.path.join("Q1", "original_sol_output.txt"), "w", encoding="utf-8") as output_file:
+                        output_file.write("Output: fixture\n")
                     checker_config = {"checker": "exact", "config": {}}
                     window.mark_checker_saved("Q1", checker_config, test_status="passed")
                     window.record_audit_results(
@@ -297,6 +304,21 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                         calibration_status="passed",
                         positive_gate_status="passed",
                         negative_gate_status="passed",
+                        strict_policy_version=STRICT_CONFIDENCE_POLICY_VERSION,
+                        strict_status="verified",
+                        strict_checker_hash=editable_checker_hash(checker_config),
+                        grade_population_fingerprint=grade_population_evidence_fingerprint("Q1"),
+                        strict_sampled_id_hashes=[],
+                        strict_too_low={
+                            "status": "verified", "reviewed": 0, "required": 0,
+                            "observed_errors": 0, "blockers": [],
+                        },
+                        strict_too_high={
+                            "status": "verified", "reviewed": 0, "required": 0,
+                            "observed_errors": 0, "upper_bound": 0.0,
+                            "confidence_level": 0.95, "blockers": [],
+                        },
+                        strict_blockers=[],
                     )
                     app.update()
 

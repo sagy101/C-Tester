@@ -14,7 +14,7 @@ import pandas as pd
 
 from .checker_assistant import LLMProvider, complete_json_with_schema
 from . import configuration
-from .workflow_status import normalize_deduction_cause
+from .workflow_status import normalize_deduction_cause, strict_confidence_status
 from .verification import (
     REVIEW_SCHEMA_VERSION,
     latest_review_evidence_mtime,
@@ -118,6 +118,16 @@ COMMON_INTRO_C_LOGIC_RUBRIC = {
         "reverse-number loop early, or using the wrong comparison branch."
     ),
 }
+
+
+def post_scoring_confidence_summary(question_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Plain-language confidence state for review surfaces."""
+    config = question_config if isinstance(question_config, dict) else {}
+    metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
+    summary = strict_confidence_status(metadata)
+    if summary["status"] != "verified" and not summary["next_action"]:
+        summary["next_action"] = "Run One-click Calibrate, resolve blockers, then regrade."
+    return summary
 
 
 @dataclass(frozen=True)

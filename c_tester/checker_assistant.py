@@ -18,10 +18,15 @@ from typing import Any, Protocol
 
 import pandas as pd
 
+from .checker_calibration import (
+    PopulationRecord,
+    required_zero_error_sample_size,
+    seeded_signature_stratified_sample,
+)
 from .output_contract import ContractConfigError, _extract_field, compile_preset
 from .checker_variants import generate_checker_variants
 from .semantic_grading import available_checker_templates, checker_config_errors, compare_output_with_config
-from .verification import AUDIT_RUBRIC_VERSION
+from .verification import AUDIT_RUBRIC_VERSION, stable_fingerprint
 
 
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
@@ -216,6 +221,7 @@ class AuditCase:
     excel_fields: dict[str, Any]
     final_fields: dict[str, Any]
     reference_output_text: str = ""
+    suspected_anomaly: bool = False
 
 
 @dataclass(frozen=True)
@@ -1411,6 +1417,86 @@ def select_audit_cases(
     return _take_bucketed_cases(cases_by_bucket, max_cases, selected)
 
 
+def select_strict_audit_cases(
+    questions: list[str],
+    *,
+    seed: int,
+    exclude_full_score_ids: set[str] | None = None,
+) -> list[AuditCase]:
+    """Select every deduction plus the exact seeded full-score confidence sample."""
+    selected: list[AuditCase] = []
+    final_df = _read_excel_if_exists("final_grades.xlsx")
+    final_by_id = _rows_by_id(final_df)
+    excluded_full = {str(student_id) for student_id in (exclude_full_score_ids or set())}
+    for question in questions:
+        question_df = _read_excel_if_exists(os.path.join(question, f"{question}_grades_to_upload.xlsx"))
+        cases = [_make_audit_case(question, row, final_by_id) for _, row in question_df.iterrows()]
+        deductions = [case for case in cases if float(case.score) < 99.999]
+        full_cases = [case for case in cases if float(case.score) >= 99.999]
+        records = [
+            PopulationRecord(
+                student_id=case.student_id,
+                score=case.score,
+                signature=_audit_case_signature(case),
+            )
+            for case in full_cases
+            if case.student_id not in excluded_full
+        ]
+        sample_size = required_zero_error_sample_size(len(full_cases))
+        sampled_ids = {
+            record.student_id
+            for record in seeded_signature_stratified_sample(records, sample_size, seed)
+        }
+        selected.extend(deductions)
+        selected.extend(case for case in full_cases if case.student_id in sampled_ids)
+    return selected
+
+
+def load_audit_population(questions: list[str]) -> list[AuditCase]:
+    """Load the complete current grade population for confidence accounting."""
+    final_by_id = _rows_by_id(_read_excel_if_exists("final_grades.xlsx"))
+    population: list[AuditCase] = []
+    for question in questions:
+        question_df = _read_excel_if_exists(os.path.join(question, f"{question}_grades_to_upload.xlsx"))
+        population.extend(_make_audit_case(question, row, final_by_id) for _, row in question_df.iterrows())
+    return population
+
+
+def audit_population_records(cases: list[AuditCase]) -> list[PopulationRecord]:
+    return [
+        PopulationRecord(
+            student_id=case.student_id,
+            score=case.score,
+            signature=_audit_case_signature(case),
+            high_risk=float(case.score) == 0,
+            extraction_only=_audit_has_extraction_only_failure(case.grade_text),
+            anomaly=bool(case.suspected_anomaly),
+        )
+        for case in cases
+    ]
+
+
+def _audit_case_signature(case: AuditCase) -> str:
+    """Assignment-neutral deterministic signature used only for sample strata."""
+    fields = case.excel_fields if isinstance(case.excel_fields, dict) else {}
+    wrong_inputs = str(fields.get("Wrong_Inputs", "") or "")
+    compile_error = bool(fields.get("Compilation_Error", False))
+    timeout = bool(fields.get("Timeouts", ""))
+    extraction = _audit_has_extraction_only_failure(case.grade_text)
+    output_shape = re.sub(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?",
+        "<number>",
+        str(case.output_text or "").lower(),
+        flags=re.IGNORECASE,
+    )
+    output_shape = " ".join(output_shape.split())
+    shape_hash = stable_fingerprint(output_shape)
+    return (
+        f"score={float(case.score):g}|wrong={wrong_inputs}|compile={compile_error}|"
+        f"timeout={timeout}|extract={extraction}|output_shape={shape_hash}"
+    )
+
+
 def _empty_audit_buckets() -> dict[str, list[AuditCase]]:
     return {
         "extraction_failure": [],
@@ -1493,7 +1579,7 @@ def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider
         primary_decision = _derive_audit_decision(primary, case, focused_context.text)
         responses = [primary]
         decisions = [primary_decision]
-        if _needs_challenger_audit(case):
+        if _needs_challenger_audit(case) or primary_decision["status"] in {"flagged", "uncertain"}:
             challenger_prompt = build_audit_prompt(
                 case,
                 checker_config,
@@ -1610,7 +1696,11 @@ def _derive_audit_decision(response: dict[str, Any], case: AuditCase, assignment
 
 
 def _needs_challenger_audit(case: AuditCase) -> bool:
-    return float(case.score) == 0 or _audit_has_extraction_only_failure(case.grade_text)
+    return (
+        float(case.score) == 0
+        or _audit_has_extraction_only_failure(case.grade_text)
+        or bool(case.suspected_anomaly)
+    )
 
 
 def _audit_has_extraction_only_failure(grade_text: str) -> bool:

@@ -189,6 +189,7 @@ def compute_workflow_status(
     calibrated = []
     configured = []
     missing = []
+    checker_confidence = {}
     for question in questions:
         question_config = question_configs.get(question) or question_configs.get(str(question).upper())
         if not isinstance(question_config, dict):
@@ -199,6 +200,13 @@ def compute_workflow_status(
         positive_ok = metadata.get("positive_gate_status") == "passed"
         negative_ok = metadata.get("negative_gate_status") == "passed"
         current_audit = audit_metadata_is_current(question_config, question)
+        checker_confidence[question] = strict_confidence_status(metadata)
+        if checker_confidence[question]["status"] == "verified" and not current_audit:
+            checker_confidence[question]["status"] = "stale"
+            checker_confidence[question]["too_low"]["status"] = "stale"
+            checker_confidence[question]["too_high"]["status"] = "stale"
+            checker_confidence[question]["blockers"] = ["Checker or grade-population evidence changed."]
+            checker_confidence[question]["next_action"] = "Regrade and rerun strict verification."
         if metadata.get("calibration_status") == "passed" and current_audit and positive_ok and negative_ok:
             calibrated.append(question)
 
@@ -313,6 +321,47 @@ def compute_workflow_status(
         "attention_total": attention_total,
         "attention_reviewed": len(reviewed_attention_ids & attention_ids) if attention_ids else len(reviewed_attention_ids),
         "attention_threshold": threshold,
+        "checker_confidence": checker_confidence,
+    }
+
+
+def strict_confidence_status(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    low = metadata.get("strict_too_low") if isinstance(metadata.get("strict_too_low"), dict) else {}
+    high = metadata.get("strict_too_high") if isinstance(metadata.get("strict_too_high"), dict) else {}
+    status = str(metadata.get("strict_status", "in_progress"))
+    if status not in {"verified", "blocked", "stale"}:
+        status = "in_progress"
+    blockers = list(metadata.get("strict_blockers", []) or [])
+    bound = high.get("upper_bound")
+    return {
+        "status": status,
+        "too_low": {
+            "status": str(low.get("status", "in_progress")),
+            "reviewed": int(low.get("reviewed", 0) or 0),
+            "required": int(low.get("required", 0) or 0),
+            "line": (
+                f"Too-low: deductions reviewed {int(low.get('reviewed', 0) or 0)}/"
+                f"{int(low.get('required', 0) or 0)}."
+            ),
+        },
+        "too_high": {
+            "status": str(high.get("status", "in_progress")),
+            "reviewed": int(high.get("reviewed", 0) or 0),
+            "required": int(high.get("required", 0) or 0),
+            "upper_bound": bound,
+            "line": (
+                f"Too-high: full-score sample {int(high.get('reviewed', 0) or 0)}/"
+                f"{int(high.get('required', 0) or 0)}; 95% upper bound "
+                f"{'not available' if bound is None else f'{100 * float(bound):.1f}%'}."
+            ),
+        },
+        "blockers": blockers,
+        "next_action": (
+            str(low.get("next_action") or high.get("next_action") or "")
+            if status != "verified"
+            else ""
+        ),
     }
 
 
