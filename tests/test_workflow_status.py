@@ -154,6 +154,10 @@ class WorkflowStatusTests(unittest.TestCase):
                 checker_config_path="missing-checker.json",
             )
         self.assertEqual(workflow["steps"]["checker"]["status"], "done")
+        self.assertIn("Too-low", workflow["steps"]["checker"]["detail"])
+        self.assertIn("Too-high", workflow["steps"]["checker"]["detail"])
+        self.assertIn("2/2", workflow["steps"]["checker"]["detail"])
+        self.assertIn("39/39", workflow["steps"]["checker"]["detail"])
 
         config["metadata"]["negative_gate_status"] = "failed"
         with patch("c_tester.verification.grade_population_evidence_fingerprint", return_value="population"):
@@ -164,7 +168,9 @@ class WorkflowStatusTests(unittest.TestCase):
                 final_grades_path="missing-grades.xlsx",
                 checker_config_path="missing-checker.json",
             )
-        self.assertEqual(workflow["steps"]["checker"]["status"], "ready")
+        self.assertIn(workflow["steps"]["checker"]["status"], {"ready", "stale"})
+        self.assertNotEqual(workflow["steps"]["checker"]["status"], "done")
+        self.assertIn("Too-low", workflow["steps"]["checker"]["detail"])
 
     def test_partial_or_stale_strict_evidence_cannot_verify(self):
         config = {"checker": "exact", "config": {}}
@@ -196,6 +202,31 @@ class WorkflowStatusTests(unittest.TestCase):
         self.assertTrue(audit_metadata_is_current(config))
         config["metadata"]["strict_checker_hash"] = "old-checker"
         self.assertFalse(audit_metadata_is_current(config))
+
+    def test_checker_detail_includes_blockers_when_not_verified(self):
+        config = {"checker": "exact", "config": {}}
+        config["metadata"] = {
+            "calibration_status": "passed",
+            "audit_status": "passed",
+            "positive_gate_status": "passed",
+            "negative_gate_status": "passed",
+            "strict_status": "blocked",
+            "strict_blockers": ["Deduction audit coverage is incomplete."],
+            "strict_too_low": {"status": "blocked", "reviewed": 1, "required": 3},
+            "strict_too_high": {"status": "blocked", "reviewed": 0, "required": 10, "upper_bound": 1.0},
+        }
+        workflow = compute_workflow_status(
+            ["Q1"],
+            setup_readiness={"scoring": True},
+            checker_config={"questions": {"Q1": config}},
+            final_grades_path="missing-grades.xlsx",
+            checker_config_path="missing-checker.json",
+        )
+        detail = workflow["steps"]["checker"]["detail"]
+        self.assertNotEqual(workflow["steps"]["checker"]["status"], "done")
+        self.assertIn("Too-low 1/3", detail)
+        self.assertIn("Too-high 0/10", detail)
+        self.assertIn("Deduction audit coverage is incomplete.", detail)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from c_tester.post_scoring_review import (
     build_score_review_prompt,
     default_grading_policy,
     load_review_cases,
+    post_scoring_confidence_summary,
     review_cases_with_llm,
 )
 from tools.privacy_audit import private_matches
@@ -726,6 +727,29 @@ class TestPostScoringReview(unittest.TestCase):
             ignore_index=True,
         )
         final_df.to_excel("final_grades.xlsx", index=False)
+
+    def test_post_scoring_confidence_summary_exposes_next_action(self):
+        summary = post_scoring_confidence_summary(
+            {
+                "checker": "exact",
+                "config": {},
+                "metadata": {
+                    "strict_status": "blocked",
+                    "strict_blockers": ["Full-score audit sample coverage is incomplete."],
+                    "strict_too_low": {"status": "verified", "reviewed": 2, "required": 2},
+                    "strict_too_high": {
+                        "status": "blocked",
+                        "reviewed": 1,
+                        "required": 10,
+                        "upper_bound": 0.8,
+                    },
+                },
+            }
+        )
+        self.assertEqual(summary["status"], "blocked")
+        self.assertEqual(summary["too_low"]["reviewed"], 2)
+        self.assertEqual(summary["too_high"]["required"], 10)
+        self.assertIn("Full-score audit sample coverage is incomplete.", summary["next_action"])
 
 
 if __name__ == "__main__":

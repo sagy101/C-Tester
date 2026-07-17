@@ -210,6 +210,7 @@ def compute_workflow_status(
         if metadata.get("calibration_status") == "passed" and current_audit and positive_ok and negative_ok:
             calibrated.append(question)
 
+    confidence_detail = _checker_confidence_detail(checker_confidence)
     if defect_questions:
         checker_status = "attention"
         checker_detail = (
@@ -224,12 +225,26 @@ def compute_workflow_status(
         checker_detail = f"Configure and one-click calibrate: {', '.join(missing)}."
     elif len(calibrated) == len(questions):
         checker_status = "done"
-        checker_detail = "Checkers passed current false-rejection and false-acceptance verification."
-    elif configured:
-        checker_status = "ready"
         checker_detail = (
-            f"Saved checkers still need calibration: "
-            f"{', '.join(q for q in questions if q not in calibrated)}."
+            "Checkers passed current Too-low and Too-high verification."
+            + (f" {confidence_detail}" if confidence_detail else "")
+        )
+    elif configured:
+        unfinished = [q for q in questions if q not in calibrated]
+        stale_or_blocked = [
+            question
+            for question, summary in checker_confidence.items()
+            if summary.get("status") in {"stale", "blocked"}
+        ]
+        if stale_or_blocked and not missing:
+            checker_status = "stale" if any(
+                checker_confidence[q]["status"] == "stale" for q in stale_or_blocked
+            ) else "ready"
+        else:
+            checker_status = "ready"
+        checker_detail = (
+            f"Saved checkers still need calibration: {', '.join(unfinished)}."
+            + (f" {confidence_detail}" if confidence_detail else "")
         )
     else:
         checker_status = "ready"
@@ -332,8 +347,15 @@ def strict_confidence_status(metadata: dict[str, Any] | None) -> dict[str, Any]:
     status = str(metadata.get("strict_status", "in_progress"))
     if status not in {"verified", "blocked", "stale"}:
         status = "in_progress"
-    blockers = list(metadata.get("strict_blockers", []) or [])
+    blockers = [str(item) for item in (metadata.get("strict_blockers") or []) if str(item).strip()]
     bound = high.get("upper_bound")
+    next_action = ""
+    if status != "verified":
+        next_action = str(
+            blockers[0]
+            if blockers
+            else (low.get("next_action") or high.get("next_action") or "")
+        )
     return {
         "status": status,
         "too_low": {
@@ -357,12 +379,28 @@ def strict_confidence_status(metadata: dict[str, Any] | None) -> dict[str, Any]:
             ),
         },
         "blockers": blockers,
-        "next_action": (
-            str(low.get("next_action") or high.get("next_action") or "")
-            if status != "verified"
-            else ""
-        ),
+        "next_action": next_action,
     }
+
+
+def _checker_confidence_detail(checker_confidence: dict[str, dict[str, Any]]) -> str:
+    parts = []
+    for question in sorted(checker_confidence):
+        summary = checker_confidence[question]
+        low = summary.get("too_low") or {}
+        high = summary.get("too_high") or {}
+        status = str(summary.get("status", "in_progress")).replace("_", " ")
+        bound = high.get("upper_bound")
+        bound_text = "n/a" if bound is None else f"{100 * float(bound):.1f}%"
+        part = (
+            f"{question} {status}: Too-low {low.get('reviewed', 0)}/{low.get('required', 0)}; "
+            f"Too-high {high.get('reviewed', 0)}/{high.get('required', 0)} (95% ≤ {bound_text})"
+        )
+        next_action = str(summary.get("next_action") or "").strip()
+        if next_action and summary.get("status") != "verified":
+            part += f" — Next: {next_action}"
+        parts.append(part)
+    return " | ".join(parts)
 
 
 def _next_step(steps: dict[str, dict[str, Any]]) -> str:

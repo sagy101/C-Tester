@@ -164,6 +164,7 @@ from .post_scoring_review import (
     ReviewCase,
     build_score_review_prompt,
     load_review_cases,
+    post_scoring_confidence_summary,
     review_cases_with_llm,
     default_grading_policy,
 )
@@ -171,6 +172,7 @@ from .workflow_status import (
     compute_workflow_status,
     review_cause_label,
     review_response_cause,
+    strict_confidence_status,
 )
 from .semantic_grading import (
     DEFAULT_CHECKER_CONFIG_PATH,
@@ -1404,23 +1406,37 @@ class App(ctk.CTk):
     def checker_status_summary(self):
         checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
         question_configs = checker_config.get("questions", {}) if isinstance(checker_config, dict) else {}
-        audited = []
-        needs_audit = []
+        verified = []
+        blocked = []
+        stale = []
+        in_progress = []
         needs_checker = []
         for question in self.gui_questions:
             question_config = question_configs.get(question) or question_configs.get(question.upper())
-            metadata = question_config.get("metadata", {}) if isinstance(question_config, dict) else {}
-            if metadata.get("audit_status") == "passed":
-                audited.append(question)
-            elif question_config:
-                needs_audit.append(question)
-            else:
+            if not question_config:
                 needs_checker.append(question)
+                continue
+            metadata = question_config.get("metadata", {}) if isinstance(question_config, dict) else {}
+            summary = strict_confidence_status(metadata)
+            if summary["status"] == "verified" and audit_metadata_is_current(question_config, question):
+                verified.append(question)
+            elif summary["status"] == "stale" or (
+                summary["status"] == "verified" and not audit_metadata_is_current(question_config, question)
+            ):
+                stale.append(question)
+            elif summary["status"] == "blocked":
+                blocked.append(question)
+            else:
+                in_progress.append(question)
         statuses = []
-        if audited:
-            statuses.append(f"audited: {', '.join(audited)}")
-        if needs_audit:
-            statuses.append(f"needs audit: {', '.join(needs_audit)}")
+        if verified:
+            statuses.append(f"verified Too-low/Too-high: {', '.join(verified)}")
+        if blocked:
+            statuses.append(f"blocked: {', '.join(blocked)}")
+        if stale:
+            statuses.append(f"stale: {', '.join(stale)}")
+        if in_progress:
+            statuses.append(f"needs calibrate: {', '.join(in_progress)}")
         if needs_checker:
             statuses.append(f"needs checker: {', '.join(needs_checker)}")
         return "; ".join(statuses) if statuses else "no configured questions"
@@ -2853,6 +2869,15 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.key_status_label = ctk.CTkLabel(top, text="", anchor="w", justify="left")
         self.key_status_label.grid(row=2, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
 
+        self.confidence_banner = ctk.CTkLabel(
+            top,
+            text="",
+            anchor="w",
+            justify="left",
+            wraplength=1100,
+        )
+        self.confidence_banner.grid(row=3, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+
         self.feedback_banner = ctk.CTkLabel(
             top,
             text="",
@@ -2861,7 +2886,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             wraplength=1100,
             text_color=COLORS["danger"],
         )
-        self.feedback_banner.grid(row=3, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+        self.feedback_banner.grid(row=4, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
         self.feedback_banner.grid_remove()
 
         self.status_label = ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left")
@@ -3148,7 +3173,52 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
         selected_iid = self.populate_review_tree(previous_key)
         self.select_review_tree_item(selected_iid)
+        self.refresh_confidence_banner()
         self.refresh_feedback_banner()
+
+    def refresh_confidence_banner(self):
+        checker_config = load_checker_config(DEFAULT_CHECKER_CONFIG_PATH)
+        question_configs = checker_config.get("questions", {}) if isinstance(checker_config, dict) else {}
+        parts = []
+        overall = "verified"
+        priority = {"verified": 0, "in_progress": 1, "stale": 2, "blocked": 3}
+        for question in self.parent.gui_questions or []:
+            summary = post_scoring_confidence_summary(
+                question_configs.get(question) or question_configs.get(str(question).upper())
+            )
+            status = summary.get("status", "in_progress")
+            if priority.get(status, 1) > priority.get(overall, 0):
+                overall = status
+            low = summary.get("too_low") or {}
+            high = summary.get("too_high") or {}
+            bound = high.get("upper_bound")
+            bound_text = "n/a" if bound is None else f"{100 * float(bound):.1f}%"
+            part = (
+                f"{question} {str(status).replace('_', ' ')}: "
+                f"Too-low {low.get('reviewed', 0)}/{low.get('required', 0)}; "
+                f"Too-high {high.get('reviewed', 0)}/{high.get('required', 0)} "
+                f"(95% ≤ {bound_text})"
+            )
+            next_action = str(summary.get("next_action") or "").strip()
+            if next_action and status != "verified":
+                part += f" — Next: {next_action}"
+            parts.append(part)
+        if not parts:
+            self.confidence_banner.configure(
+                text="Checker confidence: run One-click Calibrate to verify Too-low and Too-high coverage.",
+                text_color=COLORS["warning"],
+            )
+            return
+        colors = {
+            "verified": COLORS["secondary"],
+            "blocked": COLORS["danger"],
+            "stale": COLORS["warning"],
+            "in_progress": COLORS["warning"],
+        }
+        self.confidence_banner.configure(
+            text="Checker confidence — " + " | ".join(parts),
+            text_color=colors.get(overall, COLORS["warning"]),
+        )
 
     def populate_review_tree(self, previous_key):
         self.review_tree.configure(height=max(2, min(8, len(self.visible_cases) + 1)))
@@ -4631,11 +4701,28 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         self.checker_state_frame.grid_columnconfigure(len(questions) + 1, weight=1)
         ctk.CTkLabel(
             self.checker_state_frame,
-            text="Green=audited, yellow=needs audit, red=needs checker",
+            text="Green=both confidence gates verified; yellow=incomplete or stale; red=blocked",
             text_color="gray",
             anchor="w",
             justify="left",
         ).grid(row=0, column=len(questions) + 1, padx=8, pady=6, sticky="e")
+        focused_question = self.question_var.get() or (questions[0] if questions else "Q1")
+        detail_text, detail_color = self.checker_status_for_question(focused_question)
+        ctk.CTkLabel(
+            self.checker_state_frame,
+            text=detail_text,
+            text_color=detail_color,
+            anchor="w",
+            justify="left",
+            wraplength=1100,
+        ).grid(
+            row=1,
+            column=0,
+            columnspan=len(questions) + 2,
+            padx=8,
+            pady=(0, 8),
+            sticky="ew",
+        )
         self.parent.update_setup_readiness_banner()
 
     def compact_checker_status_for_question(self, question):

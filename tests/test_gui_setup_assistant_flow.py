@@ -328,10 +328,17 @@ class TestGuiSetupAssistantFlow(unittest.TestCase):
                     )
                     status_texts = " ".join(child.cget("text") for child in window.checker_state_frame.winfo_children())
                     self.assertIn("Q1: verified both ways", status_texts)
-                    self.assertEqual({int(child.grid_info()["row"]) for child in window.checker_state_frame.winfo_children()}, {0})
-                    self.assertIn("audited: Q1", app.checker_status_summary())
+                    self.assertIn("Too-low: Verified", status_texts)
+                    self.assertIn("deductions reviewed 0/0", status_texts)
+                    self.assertIn("Too-high: Verified", status_texts)
+                    self.assertIn("95% upper bound 0.0%", status_texts)
+                    self.assertEqual(
+                        {int(child.grid_info()["row"]) for child in window.checker_state_frame.winfo_children()},
+                        {0, 1},
+                    )
+                    self.assertIn("verified Too-low/Too-high: Q1", app.checker_status_summary())
                     app.update_setup_readiness_banner()
-                    self.assertIn("audited: Q1", app.checker_status_label.cget("text"))
+                    self.assertIn("verified Too-low/Too-high: Q1", app.checker_status_label.cget("text"))
                 finally:
                     window.destroy()
                     app.shutdown_for_tests()
