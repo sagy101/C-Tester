@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import re
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -26,12 +27,18 @@ from .checker_calibration import (
 from .output_contract import ContractConfigError, _extract_field, compile_preset
 from .checker_variants import generate_checker_variants
 from .semantic_grading import available_checker_templates, checker_config_errors, compare_output_with_config
-from .verification import AUDIT_RUBRIC_VERSION, stable_fingerprint
+from .verification import AUDIT_RUBRIC_VERSION, audit_evidence_fingerprint, stable_fingerprint
 
 
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
+DEFAULT_CHEAP_GEMINI_MODEL = os.getenv("C_TESTER_CHEAP_GEMINI_MODEL", "gemini-2.5-flash-lite")
+DEFAULT_THINKING_LEVEL = "MEDIUM"
 MAX_ASSIGNMENT_IMAGES = 8
 MAX_AUDIT_TEXT_CHARS = 100_000
+MAX_AUDIT_PROMPT_TEXT_CHARS = 12_000
+MAX_ASSIGNMENT_TEXT_CHARS = 6_000
+GEMINI_RATE_LIMIT_ATTEMPTS = 4
+GEMINI_RATE_LIMIT_BASE_SLEEP_SECONDS = 8.0
 CHECKER_SUGGESTION_EVAL_CASES = {
     "common_supported": [
         {
@@ -268,9 +275,16 @@ class LLMProvider(Protocol):
 class GeminiProvider:
     """Small Gemini REST client using GOOGLE_API_KEY by default."""
 
-    def __init__(self, api_key: str | None = None, model: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        *,
+        thinking_level: str = DEFAULT_THINKING_LEVEL,
+    ):
         self.api_key = api_key or get_google_api_key()
         self.model = model or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self.thinking_level = str(thinking_level or DEFAULT_THINKING_LEVEL).upper()
         if not self.api_key:
             raise ValueError("GOOGLE_API_KEY is not set")
 
@@ -294,30 +308,81 @@ class GeminiProvider:
                     }
                 }
             )
-        generation_config = {"responseMimeType": "application/json"}
+        generation_config = {
+            "responseMimeType": "application/json",
+            "thinkingConfig": _thinking_config_for_model(self.model, self.thinking_level),
+        }
         if response_schema:
             generation_config["responseSchema"] = gemini_response_schema(response_schema)
         payload = {
             "contents": [{"parts": parts}],
             "generationConfig": generation_config,
         }
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Gemini request failed: {exc}; {error_body[:1000]}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Gemini request failed: {exc}") from exc
+        encoded = json.dumps(payload).encode("utf-8")
+        last_error: Exception | None = None
+        for attempt in range(GEMINI_RATE_LIMIT_ATTEMPTS):
+            request = urllib.request.Request(
+                url,
+                data=encoded,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=90) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                text = _extract_gemini_text(body)
+                return parse_json_object(text)
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError(f"Gemini request failed: {exc}; {error_body[:1000]}")
+                if exc.code != 429 or attempt + 1 >= GEMINI_RATE_LIMIT_ATTEMPTS:
+                    raise last_error from exc
+                sleep_seconds = _rate_limit_sleep_seconds(error_body, attempt)
+                logging.warning(
+                    "Gemini rate-limited on %s; backing off %.1fs (attempt %s/%s)",
+                    self.model,
+                    sleep_seconds,
+                    attempt + 1,
+                    GEMINI_RATE_LIMIT_ATTEMPTS,
+                )
+                time.sleep(sleep_seconds)
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Gemini request failed: {exc}") from exc
+        raise RuntimeError(str(last_error or "Gemini request failed after rate-limit retries"))
 
-        text = body["candidates"][0]["content"]["parts"][0]["text"]
-        return parse_json_object(text)
+
+def _thinking_config_for_model(model: str, thinking_level: str = DEFAULT_THINKING_LEVEL) -> dict[str, Any]:
+    """Prefer medium thinking; use numeric budgets on Gemini 2.5 / 1.5 models."""
+    level = str(thinking_level or DEFAULT_THINKING_LEVEL).upper()
+    lowered = str(model or "").lower()
+    if "2.5" in lowered or "1.5" in lowered:
+        budget_by_level = {"MINIMAL": 0, "LOW": 1024, "MEDIUM": 4096, "HIGH": 8192}
+        return {"thinkingBudget": budget_by_level.get(level, 4096)}
+    return {"thinkingLevel": level if level in {"MINIMAL", "LOW", "MEDIUM", "HIGH"} else "MEDIUM"}
+
+
+def _extract_gemini_text(body: dict[str, Any]) -> str:
+    parts = (((body.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+    texts = [str(part.get("text", "")) for part in parts if part.get("text")]
+    if not texts:
+        raise RuntimeError("Gemini response contained no text parts")
+    return texts[-1]
+
+
+def _rate_limit_sleep_seconds(error_body: str, attempt: int) -> float:
+    match = re.search(r"retryDelay\"?\s*:\s*\"?(\d+(?:\.\d+)?)s?", error_body or "", re.IGNORECASE)
+    if match:
+        return min(120.0, max(1.0, float(match.group(1))))
+    return min(120.0, GEMINI_RATE_LIMIT_BASE_SLEEP_SECONDS * (2 ** attempt))
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "resource_exhausted" in text or "too many requests" in text
+
+
+def cheap_gemini_model_name(preferred: str | None = None) -> str:
+    return str(preferred or os.getenv("C_TESTER_CHEAP_GEMINI_MODEL") or DEFAULT_CHEAP_GEMINI_MODEL).strip()
 
 
 def gemini_response_schema(schema: Any) -> Any:
@@ -1078,9 +1143,11 @@ def _complete_checker_json_with_retry(
     try:
         return complete_json_with_schema(provider, prompt, images)
     except Exception as first_error:
+        if is_rate_limit_error(first_error):
+            raise RuntimeError(f"{first_error}; checker JSON not retried after rate limit") from first_error
         retry_prompt = (
             f"{prompt}\n\n"
-            "Your previous response failed transport or JSON parsing. Return one complete valid JSON object only, "
+            "Your previous response failed JSON parsing. Return one complete valid JSON object only, "
             "with no markdown fence, comments, or trailing text."
         )
         try:
@@ -1551,34 +1618,159 @@ def audit_cases_with_llm(
     checker_configs: dict[str, dict],
     provider: LLMProvider,
     assignment_context: AssignmentContext | str = "",
-    max_workers: int = 4,
+    max_workers: int = 3,
     progress_callback=None,
+    *,
+    expensive_provider: LLMProvider | None = None,
+    case_cache: dict[str, dict[str, Any]] | None = None,
+    checker_hash: str = "",
 ) -> list[AuditResult]:
     results = []
     if isinstance(assignment_context, str):
         assignment_context = AssignmentContext(text=assignment_context)
+    expensive = expensive_provider or provider
+    fresh_cases, reused = partition_reusable_audit_cases(cases, case_cache or {}, checker_hash)
+    results.extend(reused)
+    if progress_callback:
+        for index, result in enumerate(reused, start=1):
+            progress_callback(result, index, len(cases))
+    if not fresh_cases:
+        return sorted(results, key=lambda item: (item.question, item.student_id))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_audit_one_case, case, checker_configs.get(case.question, {}), provider, assignment_context): case
-            for case in cases
+            executor.submit(
+                _audit_one_case,
+                case,
+                checker_configs.get(case.question, {}),
+                provider,
+                assignment_context,
+                expensive,
+            ): case
+            for case in fresh_cases
         }
-        total = len(futures)
+        total = len(cases)
+        done = len(reused)
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
+            done += 1
             if progress_callback:
-                progress_callback(result, len(results), total)
+                progress_callback(result, done, total)
     return sorted(results, key=lambda item: (item.question, item.student_id))
 
 
-def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider, assignment_context: AssignmentContext) -> AuditResult:
+def partition_reusable_audit_cases(
+    cases: list[AuditCase],
+    case_cache: dict[str, dict[str, Any]],
+    checker_hash: str,
+) -> tuple[list[AuditCase], list[AuditResult]]:
+    """Reuse only passed audits whose checker hash and evidence fingerprint still match."""
+    fresh: list[AuditCase] = []
+    reused: list[AuditResult] = []
+    for case in cases:
+        cached = reusable_audit_result(case, case_cache, checker_hash)
+        if cached is None:
+            fresh.append(case)
+        else:
+            reused.append(cached)
+    return fresh, reused
+
+
+def reusable_audit_result(
+    case: AuditCase,
+    case_cache: dict[str, dict[str, Any]],
+    checker_hash: str,
+) -> AuditResult | None:
+    entry = case_cache.get(str(case.student_id))
+    if not isinstance(entry, dict) or not checker_hash:
+        return None
+    if entry.get("checker_hash") != checker_hash:
+        return None
+    if entry.get("audit_rubric_version") != AUDIT_RUBRIC_VERSION:
+        return None
+    if entry.get("evidence_fingerprint") != audit_evidence_fingerprint(case):
+        return None
+    if entry.get("status") != "passed" or entry.get("checker_behavior") != "correct":
+        return None
+    return AuditResult(
+        case.student_id,
+        case.question,
+        "passed",
+        str(entry.get("verdict", "looks_correct")),
+        str(entry.get("risk", "low")),
+        str(entry.get("reason", "Reused current passed audit evidence.")),
+        str(entry.get("semantic_assessment", "genuine_error" if float(case.score) < 99.999 else "equivalent")),
+        str(entry.get("format_requirement", "unclear")),
+        "correct",
+        str(entry.get("evidence", "cached")),
+        max(1, int(entry.get("verification_passes", 1) or 1)),
+        tuple(_audit_failed_examples(case.grade_text)),
+    )
+
+
+def audit_result_cache_entry(case: AuditCase, result: AuditResult, checker_hash: str) -> dict[str, Any]:
+    return {
+        "student_id": result.student_id,
+        "question": result.question,
+        "status": result.status,
+        "verdict": result.verdict,
+        "risk": result.risk,
+        "reason": result.reason,
+        "semantic_assessment": result.semantic_assessment,
+        "format_requirement": result.format_requirement,
+        "checker_behavior": result.checker_behavior,
+        "evidence": result.evidence,
+        "verification_passes": result.verification_passes,
+        "checker_hash": checker_hash,
+        "evidence_fingerprint": audit_evidence_fingerprint(case),
+        "audit_rubric_version": AUDIT_RUBRIC_VERSION,
+    }
+
+
+def _audit_one_case(
+    case: AuditCase,
+    checker_config: dict,
+    provider: LLMProvider,
+    assignment_context: AssignmentContext,
+    expensive_provider: LLMProvider | None = None,
+) -> AuditResult:
     focused_context = assignment_context_for_question(assignment_context, case.question)
-    prompt = build_audit_prompt(case, checker_config, focused_context.text, focused_context.images)
+    expensive = expensive_provider or provider
+    deducted = float(case.score) < 99.999
+    use_expensive_first = deducted or _needs_challenger_audit(case)
+    primary_provider = expensive if use_expensive_first else provider
+    primary_images = focused_context.images if use_expensive_first else ()
+    prompt = build_audit_prompt(
+        case,
+        checker_config,
+        focused_context.text,
+        primary_images,
+        include_assignment_images=bool(primary_images),
+    )
     try:
-        primary = _complete_audit_json_with_retry(provider, prompt, focused_context.images)
+        primary = _complete_audit_json_with_retry(primary_provider, prompt, primary_images or None)
         primary_decision = _derive_audit_decision(primary, case, focused_context.text)
         responses = [primary]
         decisions = [primary_decision]
+        # Escalate cheap full-score first-pass doubt to the expensive model with images.
+        if (
+            not use_expensive_first
+            and primary_decision["status"] in {"flagged", "uncertain"}
+            and expensive is not primary_provider
+        ):
+            escalate_prompt = build_audit_prompt(
+                case,
+                checker_config,
+                focused_context.text,
+                focused_context.images,
+                audit_pass="expensive_escalation",
+                include_assignment_images=True,
+            )
+            primary = _complete_audit_json_with_retry(expensive, escalate_prompt, focused_context.images)
+            primary_decision = _derive_audit_decision(primary, case, focused_context.text)
+            responses = [primary]
+            decisions = [primary_decision]
+            use_expensive_first = True
         if _needs_challenger_audit(case) or primary_decision["status"] in {"flagged", "uncertain"}:
             challenger_prompt = build_audit_prompt(
                 case,
@@ -1586,8 +1778,9 @@ def _audit_one_case(case: AuditCase, checker_config: dict, provider: LLMProvider
                 focused_context.text,
                 focused_context.images,
                 audit_pass="independent_challenger",
+                include_assignment_images=True,
             )
-            challenger = _complete_audit_json_with_retry(provider, challenger_prompt, focused_context.images)
+            challenger = _complete_audit_json_with_retry(expensive, challenger_prompt, focused_context.images)
             responses.append(challenger)
             decisions.append(_derive_audit_decision(challenger, case, focused_context.text))
 
@@ -1735,6 +1928,8 @@ def _complete_audit_json_with_retry(
     try:
         return complete_json_with_schema(provider, prompt, images, AUDIT_RESPONSE_SCHEMA)
     except Exception as first_error:
+        if is_rate_limit_error(first_error):
+            raise RuntimeError(f"{first_error}; audit JSON not retried after rate limit") from first_error
         retry_prompt = (
             f"{prompt}\n\n"
             "The previous response could not be parsed as JSON. Return one valid JSON object only, with no markdown, "
@@ -1753,10 +1948,30 @@ def build_audit_prompt(
     assignment_text: str = "",
     assignment_images: list[AssignmentImage] | tuple[AssignmentImage, ...] | None = None,
     audit_pass: str = "primary",
+    *,
+    include_assignment_images: bool = False,
 ) -> str:
-    grade_evidence = _compact_audit_text(case.grade_text)
-    output_evidence = _compact_audit_text(case.output_text)
-    reference_evidence = _compact_audit_text(case.reference_output_text)
+    failed_examples = _audit_failed_examples(case.grade_text, max_examples=4)
+    grade_evidence = _compact_audit_text(case.grade_text, max_chars=MAX_AUDIT_PROMPT_TEXT_CHARS)
+    # Prefer concrete failed examples over full dumps; keep short bookends for perfect scores.
+    if failed_examples:
+        student_snippet = _compact_audit_text(
+            "\n\n".join(
+                f"Input: {item['input']}\nExpected: {item['expected_output'][:1200]}\n"
+                f"Actual: {item['actual_output'][:1200]}\nReason: {item['reason']}"
+                for item in failed_examples
+            ),
+            max_chars=MAX_AUDIT_PROMPT_TEXT_CHARS,
+        )
+        reference_snippet = {"text": "", "metadata": {"note": "Covered by failed_examples."}}
+    else:
+        student_snippet = _compact_audit_text(case.output_text, max_chars=MAX_AUDIT_PROMPT_TEXT_CHARS // 2)
+        reference_snippet = _compact_audit_text(
+            case.reference_output_text,
+            max_chars=MAX_AUDIT_PROMPT_TEXT_CHARS // 2,
+        )
+    assignment_excerpt = _compact_audit_text(assignment_text, max_chars=MAX_ASSIGNMENT_TEXT_CHARS)
+    image_labels = [image.label for image in assignment_images or []] if include_assignment_images else []
     return json.dumps(
         {
             "task": "audit_score",
@@ -1766,44 +1981,35 @@ def build_audit_prompt(
             "student_id": case.student_id,
             "question": case.question,
             "target_question_number": question_number_from_name(case.question),
-            "assignment_text_for_selected_question_optional": assignment_text,
-            "assignment_images_for_selected_question_optional": [image.label for image in assignment_images or []],
+            "assignment_text_for_selected_question_optional": assignment_excerpt["text"],
+            "assignment_text_evidence": assignment_excerpt["metadata"],
+            "assignment_images_attached": bool(include_assignment_images and image_labels),
+            "assignment_images_for_selected_question_optional": image_labels,
             "eval_cases": CHECKER_AUDIT_EVAL_CASES,
             "checker_config": checker_config,
             "assigned_score": case.score,
+            "failed_examples": failed_examples,
             "grade_text": grade_evidence["text"],
             "grade_text_evidence": grade_evidence["metadata"],
-            "student_output": output_evidence["text"],
-            "student_output_evidence": output_evidence["metadata"],
-            "reference_output_by_input": reference_evidence["text"],
-            "reference_output_evidence": reference_evidence["metadata"],
+            "student_output": student_snippet["text"],
+            "student_output_evidence": student_snippet["metadata"],
+            "reference_output_by_input": reference_snippet["text"],
+            "reference_output_evidence": reference_snippet["metadata"],
             "parsed_discrepancy_signals": _audit_discrepancy_signals(case.grade_text),
-            "per_question_excel_fields": case.excel_fields,
-            "final_excel_fields": case.final_fields,
+            "per_question_excel_fields": _compact_excel_fields(case.excel_fields),
+            "final_excel_fields": _compact_excel_fields(case.final_fields),
             "instructions": (
-                f"Focus only on {case.question}. If assignment text or images contain multiple questions, ignore other "
-                "question sections. Check whether the assigned score and Excel fields are consistent with the grade text, "
-                "student output, checker configuration, and selected-question assignment intent. Verify comments, penalties, compile-error flags, timeout "
-                "fields, wrong-input fields, structural recursion/loop check fields, structural penalties, and final weighted grade fields "
-                "when present. Do not change the grade. "
-                "Audit fairness as well as bookkeeping: a deduction being consistent with the checker's own pass/fail "
-                "counts does not make it correct, because the checker itself may be defective. For every deduction, read "
-                "the expected-vs-actual discrepancy evidence in the grade text and judge on the merits whether the "
-                "student's output genuinely differs in content (wrong numbers, missing required facts, crashes) or only "
-                "in semantically equivalent phrasing or formatting. If failures come only from equivalent phrasing or "
-                "formatting the assignment does not explicitly require, return flagged and name the checker as the cause. "
-                "The application may compact exceptionally long grade or output evidence. When evidence metadata says "
-                "application_compacted=true, the omitted middle is an application size limit, not evidence that the student's "
-                "program crashed or truncated its output. The source beginning and ending are both retained; use the ending, "
-                "runtime/timeout fields, and grade evidence to judge actual completion. "
-                "Return looks_correct only when the fields are internally consistent, every output-comparison deduction "
-                "reflects a genuine content mistake by the student, and configured policy penalties (compile repair, "
-                "structural, submission) follow their documented rules. Return flagged for likely scoring/Excel mistakes "
-                "or checker defects that penalize semantically equivalent output. Return uncertain when more human "
-                "review is needed. Independently classify semantic_assessment, format_requirement, and checker_behavior. "
-                "A missing parser label or anchor is not itself a student semantic error. Claim format_requirement=explicit "
-                "only when evidence quotes or closely paraphrases a requirement in the selected assignment context. "
-                "Also detect false_accept when a passing/high score hides a genuine semantic error."
+                f"Focus only on {case.question}. Prefer failed_examples and discrepancy signals over raw dumps. "
+                "Check whether the assigned score and Excel fields are consistent with the grade evidence, "
+                "checker configuration, and selected-question assignment intent. Do not change the grade. "
+                "A deduction that matches the checker's pass/fail counts can still be wrong if the checker is defective. "
+                "If failures come only from equivalent phrasing or formatting the assignment does not explicitly require, "
+                "return flagged and name the checker as the cause. "
+                "When evidence metadata says application_compacted=true, the omitted middle is an application size limit. "
+                "Return looks_correct only for genuine consistency; return flagged for checker defects or scoring mistakes; "
+                "return uncertain when human review is needed. Independently classify semantic_assessment, "
+                "format_requirement, and checker_behavior. Claim format_requirement=explicit only with grounded assignment "
+                "evidence. Detect false_accept when a high score hides a genuine semantic error."
             ),
             "response_schema": {
                 "verdict": "looks_correct | flagged | uncertain",
@@ -1824,6 +2030,24 @@ def build_audit_prompt(
         indent=2,
         default=str,
     )
+
+
+def _compact_excel_fields(fields: dict[str, Any] | None) -> dict[str, Any]:
+    source = fields if isinstance(fields, dict) else {}
+    keep = {
+        "Grade",
+        "Wrong_Inputs",
+        "Compilation_Error",
+        "Timeouts",
+        "Comments",
+        "Final_Grade",
+        "Structural_Check",
+        "Structural_Penalty",
+        "Compilation_Repair",
+        "Compilation_Repair_Penalty",
+    }
+    compacted = {key: source.get(key) for key in keep if key in source}
+    return compacted or dict(list(source.items())[:12])
 
 
 def _audit_discrepancy_signals(grade_text: str) -> dict[str, Any]:

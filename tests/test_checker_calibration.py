@@ -21,13 +21,18 @@ from c_tester.checker_calibration import (
 from c_tester.checker_assistant import (
     AssignmentContext,
     AuditCase,
+    AuditResult,
     _audit_case_signature,
     _audit_one_case,
+    _complete_audit_json_with_retry,
+    _thinking_config_for_model,
+    audit_result_cache_entry,
+    build_audit_prompt,
+    is_rate_limit_error,
+    partition_reusable_audit_cases,
     select_audit_cases,
     select_strict_audit_cases,
 )
-
-
 class _UncertainProvider:
     def complete_json(self, prompt, images=None, response_schema=None):
         return {"verdict": "uncertain", "risk": "medium", "reason": "evidence is truncated"}
@@ -334,6 +339,50 @@ class CheckerCalibrationTests(unittest.TestCase):
         case = AuditCase("123", "Q1", 50, "Grade: 50", "truncated", {}, {})
         result = _audit_one_case(case, {"checker": "exact", "config": {}}, _UncertainProvider(), AssignmentContext())
         self.assertEqual(result.status, "uncertain")
+
+    def test_medium_thinking_config_and_rate_limit_detection(self):
+        self.assertEqual(_thinking_config_for_model("gemini-3.5-flash", "MEDIUM"), {"thinkingLevel": "MEDIUM"})
+        self.assertEqual(_thinking_config_for_model("gemini-2.5-flash-lite", "MEDIUM"), {"thinkingBudget": 4096})
+        self.assertTrue(is_rate_limit_error(RuntimeError("HTTP Error 429: RESOURCE_EXHAUSTED")))
+        self.assertFalse(is_rate_limit_error(RuntimeError("invalid json")))
+
+    def test_passed_audit_cache_skips_unchanged_evidence(self):
+        case = AuditCase("123", "Q1", 100, "Grade: 100%", "ok", {}, {}, "ok")
+        result = AuditResult("123", "Q1", "passed", "looks_correct", "low", "ok", "equivalent", "not_explicit", "correct", "ok", 1)
+        cache = {"123": audit_result_cache_entry(case, result, "hash-a")}
+        fresh, reused = partition_reusable_audit_cases([case], cache, "hash-a")
+        self.assertEqual(fresh, [])
+        self.assertEqual(len(reused), 1)
+        fresh, reused = partition_reusable_audit_cases([case], cache, "hash-b")
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(reused, [])
+
+    def test_audit_prompt_prefers_failed_examples_over_full_dumps(self):
+        grade = (
+            "Grade: 0%\nDiscrepancies:\n"
+            "Input: 1\nExpected: Area: 4\nActual: Area: 5\nSemantic Reason: mismatch\n"
+        )
+        case = AuditCase("123", "Q1", 0, grade, "Area: 5\n" * 2000, {}, {}, "Area: 4\n" * 2000)
+        prompt = build_audit_prompt(case, {"checker": "exact", "config": {}}, assignment_text="x" * 20000)
+        payload = __import__("json").loads(prompt)
+        self.assertTrue(payload["failed_examples"])
+        self.assertLessEqual(len(payload["assignment_text_for_selected_question_optional"]), 6000)
+        self.assertLess(len(payload["student_output"]), len(case.output_text))
+
+    def test_rate_limited_audit_json_is_not_double_spent(self):
+        class _RateLimitProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, prompt, images=None, response_schema=None):
+                self.calls += 1
+                raise RuntimeError("Gemini request failed: HTTP Error 429: RESOURCE_EXHAUSTED")
+
+        provider = _RateLimitProvider()
+        with self.assertRaises(RuntimeError) as ctx:
+            _complete_audit_json_with_retry(provider, '{"task":"audit"}')
+        self.assertIn("not retried after rate limit", str(ctx.exception))
+        self.assertEqual(provider.calls, 1)
 
     def test_format_only_zero_requires_two_agreeing_false_reject_audits(self):
         case = AuditCase(

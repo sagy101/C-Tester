@@ -136,16 +136,20 @@ from .preprocess import detect_submission_naming, preprocess_submissions
 from .process import run_tests, setup_visual_studio_environment, read_inputs_from_file, get_ground_truth, compile_file, run_executable
 from .create_excel import create_excels
 from .checker_assistant import (
+    DEFAULT_CHEAP_GEMINI_MODEL,
     DEFAULT_GEMINI_MODEL,
+    AuditCase,
     AuditResult,
     FakeLLMProvider,
     GeminiProvider,
     SuggestionResult,
     assignment_context_for_question,
     audit_cases_with_llm,
+    audit_result_cache_entry,
     available_checker_templates,
     build_audit_prompt,
     build_suggestion_prompt,
+    cheap_gemini_model_name,
     complete_json_with_schema,
     corroborated_review_feedback_item,
     get_google_api_key,
@@ -4839,6 +4843,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 "negative_gate_status": "not_run",
                 "strict_status": "stale",
                 "strict_blockers": ["Checker changed; regrade and rerun strict verification."],
+                "audit_case_cache": {},
             }
         )
         self.checker_config.setdefault("questions", {})[question] = saved_config
@@ -5363,7 +5368,10 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         review_feedback = list(self.pending_review_feedback.get(question, []))
         latest_results = []
         latest_cases = []
+        accumulated_results: list[AuditResult] = []
+        accumulated_cases_by_id: dict[str, AuditCase] = {}
         strict_seed = sum(ord(character) for character in question) * 1000
+        cheap_provider = self.make_cheap_provider(provider)
 
         for round_number in range(1, MAX_CALIBRATION_ROUNDS + 1):
             self.after(
@@ -5402,12 +5410,20 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                     f"{question}: round {current_round}/{MAX_CALIBRATION_ROUNDS} — auditing 0/{count}"
                 ),
             )
+            checker_hash = editable_checker_hash(self.checker_config["questions"][question])
+            case_cache = (
+                self.checker_config["questions"][question]
+                .get("metadata", {})
+                .get("audit_case_cache", {})
+            )
+            if not isinstance(case_cache, dict):
+                case_cache = {}
             results = audit_cases_with_llm(
                 cases,
                 self.checker_config.get("questions", {}),
-                provider,
+                cheap_provider,
                 assignment_context,
-                max_workers=4,
+                max_workers=3,
                 progress_callback=lambda result, done, total, current_round=round_number: self.after(
                     0,
                     lambda: (
@@ -5417,12 +5433,17 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                         ),
                     ),
                 ),
+                expensive_provider=provider,
+                case_cache=case_cache,
+                checker_hash=checker_hash,
             )
             latest_results = results
             latest_cases = cases
+            accumulated_results.extend(results)
+            accumulated_cases_by_id.update({case.student_id: case for case in cases})
             total_reviewed += len(results)
             needs_post_promotion_audit = False
-            self.record_audit_results(results, self.audit_overall_status(results))
+            self.record_audit_results(results, self.audit_overall_status(results), cases=cases)
             passed_ids = {result.student_id for result in results if result.status == "passed"}
             protected_passed_ids.update(passed_ids)
             flagged = [result for result in results if result.status == "flagged"]
@@ -5545,6 +5566,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 calibration_round=round_number,
                 strict_status="stale",
                 strict_blockers=["Checker promotion invalidated prior population evidence."],
+                audit_case_cache={},
             )
             self.checker_config["questions"][question] = promoted
             save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
@@ -5593,6 +5615,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 calibration_rollback=True,
                 strict_status="stale",
                 strict_blockers=["Rollback and regrade invalidated prior population evidence."],
+                audit_case_cache={},
             )
             self.checker_config["questions"][question] = rollback_version
             save_checker_config(self.checker_config, DEFAULT_CHECKER_CONFIG_PATH)
@@ -5612,6 +5635,9 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             else "failed"
         )
         checker_hash = editable_checker_hash(self.checker_config["questions"][question])
+        evidence_by_student: dict[str, AuditResult] = {}
+        for result in accumulated_results or latest_results:
+            evidence_by_student[result.student_id] = result
         strict_result = evaluate_strict_population_confidence(
             audit_population_records(load_audit_population([question])),
             [
@@ -5632,13 +5658,18 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                         and "disagreed" in str(result.reason).lower()
                     ),
                 )
-                for result in latest_results
+                for result in evidence_by_student.values()
             ],
             checker_hash=checker_hash,
             deterministic_negative_gate_passed=metadata["negative_gate_status"] == "passed",
             seed=strict_seed,
             fresh=not needs_post_promotion_audit,
             sampled_full_score_ids={
+                student_id
+                for student_id, case in accumulated_cases_by_id.items()
+                if float(case.score) >= 99.999
+            }
+            or {
                 case.student_id for case in latest_cases if float(case.score) >= 99.999
             },
         )
@@ -5767,12 +5798,16 @@ class CheckerManagerWindow(ctk.CTkToplevel):
             "results": [result.__dict__ for result in results],
         }
 
-    def record_audit_results(self, results, overall_status):
+    def record_audit_results(self, results, overall_status, cases=None):
         if not results:
             for question in self.parent.gui_questions:
                 if question in self.checker_config.get("questions", {}):
                     self.update_checker_metadata(question, audit_status="skipped")
             return
+        cases_by_key = {
+            (case.question, case.student_id): case
+            for case in (cases or [])
+        }
         results_by_question = {}
         for result in results:
             results_by_question.setdefault(result.question, []).append(result)
@@ -5789,6 +5824,24 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 audit_status = "error"
             else:
                 audit_status = "flagged"
+            checker_hash = editable_checker_hash(
+                self.checker_config.get("questions", {}).get(question, {})
+            )
+            metadata = (
+                self.checker_config.get("questions", {})
+                .get(question, {})
+                .get("metadata", {})
+            )
+            case_cache = dict(metadata.get("audit_case_cache", {})) if isinstance(metadata, dict) else {}
+            for result in question_results:
+                case = cases_by_key.get((result.question, result.student_id))
+                if case is None or result.status != "passed":
+                    continue
+                case_cache[str(result.student_id)] = audit_result_cache_entry(
+                    case,
+                    result,
+                    checker_hash,
+                )
             self.update_checker_metadata(
                 question,
                 audit_status=audit_status,
@@ -5796,9 +5849,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                 audit_errors=sum(1 for result in question_results if result.status == "error"),
                 audit_reasons=[result.reason for result in question_results],
                 audit_rubric_version=AUDIT_RUBRIC_VERSION,
-                audit_checker_hash=editable_checker_hash(
-                    self.checker_config.get("questions", {}).get(question, {})
-                ),
+                audit_checker_hash=checker_hash,
                 audit_evidence_fingerprint=stable_fingerprint(
                     [
                         {
@@ -5812,6 +5863,7 @@ class CheckerManagerWindow(ctk.CTkToplevel):
                     ]
                 ),
                 audit_evidence_mtime=latest_audit_evidence_mtime(question),
+                audit_case_cache=case_cache,
             )
 
     def ensure_grade_outputs_for_audit(self, audit_questions):
@@ -5916,8 +5968,31 @@ class CheckerManagerWindow(ctk.CTkToplevel):
         if provider_name == "Gemini":
             if not self.has_gemini_api_key():
                 raise ValueError(self.gemini_key_missing_message())
-            return GeminiProvider(model=str(model_name).strip() or None)
+            return GeminiProvider(model=str(model_name).strip() or None, thinking_level="MEDIUM")
         return FakeLLMProvider()
+
+    def make_cheap_provider(self, expensive_provider=None):
+        """First-pass full-score audits use a cheaper Flash model when available."""
+        if isinstance(expensive_provider, FakeLLMProvider) or not isinstance(expensive_provider, GeminiProvider):
+            if (
+                (self._worker_snapshot.get("provider") if "provider" in self._worker_snapshot else self.provider_var.get())
+                != "Gemini"
+            ):
+                return FakeLLMProvider()
+        if not self.has_gemini_api_key():
+            return expensive_provider or self.make_provider()
+        expensive_model = (
+            self._worker_snapshot["model"]
+            if "model" in self._worker_snapshot
+            else self.gemini_model_var.get()
+        )
+        cheap_model = cheap_gemini_model_name()
+        if cheap_model == str(expensive_model or "").strip():
+            return expensive_provider or self.make_provider()
+        try:
+            return GeminiProvider(model=cheap_model or DEFAULT_CHEAP_GEMINI_MODEL, thinking_level="MEDIUM")
+        except Exception:
+            return expensive_provider or self.make_provider()
 
     def gemini_key_missing_message(self):
         return (

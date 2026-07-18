@@ -409,6 +409,8 @@ The GUI has three separate LLM workflows:
 
 The default Gemini model is `gemini-flash-latest` through `DEFAULT_GEMINI_MODEL`; use the GUI model picker or `GEMINI_MODEL` environment variable to choose another model available to your key. Fake/Offline is deterministic and intended for regression tests and demos, not real grading judgment or audit verification.
 
+Calibration cost controls keep the same Too-low/Too-high guarantees while reducing spend: passed audits with unchanged evidence fingerprints are reused; audit prompts prefer failed examples and compact text; assignment images are attached only on expensive deduction/challenger/escalation passes; full-score first-pass audits use a cheaper model (`C_TESTER_CHEAP_GEMINI_MODEL`, default `gemini-2.5-flash-lite`) and escalate only when needed; Gemini requests use medium thinking (`thinkingLevel=MEDIUM`, or a medium `thinkingBudget` on 2.5 models); and HTTP 429 responses back off inside the client instead of immediately double-spending a second JSON retry.
+
 Strict verification is evidence-specific, not a general proof that a checker is perfect. Persisted evidence records the policy version, editable-checker hash, current grade-population fingerprint, anonymized sampled-ID hashes, coverage/error/disagreement counts, and achieved bound. Checker promotion, regrading, changed outputs/grades, partial evidence, or an older policy makes the state Stale or Blocked until fresh verification completes. The 5% statement is a one-sided 95% upper confidence bound conditional on zero errors in the statistically selected full-score sample; it does not claim zero prevalence, cover submissions outside the current population, or replace human resolution of ambiguous semantic requirements.
 
 #### LLM Endpoint Evals

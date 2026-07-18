@@ -421,8 +421,10 @@ class TestCheckerAssistant(unittest.TestCase):
         self.assertIn("Checker configuration is unsupported", flagged_text)
         self.assertIn("Reference context is insufficient", uncertain_text)
         self.assertEqual(payload["target_question_number"], 2)
-        self.assertIn("structural recursion/loop check fields", payload["instructions"])
-        self.assertEqual(payload["per_question_excel_fields"]["Structural_Check_Status"], "failed")
+        self.assertIn("Prefer failed_examples", payload["instructions"])
+        self.assertEqual(payload["per_question_excel_fields"]["Grade"], 85)
+        self.assertEqual(payload["per_question_excel_fields"]["Structural_Penalty"], 15)
+        self.assertNotIn("Structural_Check_Status", payload["per_question_excel_fields"])
 
     def test_audit_prompt_requires_semantic_fairness_review_of_deductions(self):
         case = AuditCase(
@@ -439,10 +441,10 @@ class TestCheckerAssistant(unittest.TestCase):
         flagged_text = " ".join(payload["eval_cases"]["flagged_when"])
         self.assertIn("semantically equivalent", flagged_text)
         self.assertIn("checker defect", flagged_text)
-        self.assertIn("Audit fairness as well as bookkeeping", payload["instructions"])
-        self.assertIn("judge on the merits", payload["instructions"])
-        self.assertIn("every output-comparison deduction", payload["instructions"])
-        self.assertIn("genuine content mistake", payload["instructions"])
+        self.assertIn("Prefer failed_examples", payload["instructions"])
+        self.assertIn("checker is defective", payload["instructions"])
+        self.assertIn("equivalent phrasing or formatting", payload["instructions"])
+        self.assertIn("name the checker as the cause", payload["instructions"])
 
     def test_long_audit_evidence_preserves_start_and_end_with_explicit_metadata(self):
         source = "SOURCE_START\n" + ("middle-data\n" * 200) + "SOURCE_END"
@@ -484,7 +486,8 @@ class TestCheckerAssistant(unittest.TestCase):
         self.assertTrue(payload["student_output_evidence"]["application_compacted"])
         self.assertTrue(payload["student_output"].startswith("OUTPUT_START"))
         self.assertTrue(payload["student_output"].endswith("OUTPUT_END"))
-        self.assertIn("not evidence that the student's program crashed", payload["instructions"])
+        self.assertIn("application size limit", payload["instructions"])
+        self.assertIn("application_compacted=true", payload["instructions"])
 
     def test_parse_json_object_accepts_trailing_text(self):
         parsed = parse_json_object('{"summary": "ok", "deduction_is_plausible": true}\nExtra explanation')
