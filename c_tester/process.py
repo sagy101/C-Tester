@@ -164,19 +164,27 @@ def parallel_compile_files(
 def run_executable(executable, input_value, timeout=5):
     """Run an executable with the given input and timeout (in seconds)."""
     try:
-        # Start the process without shell=True to avoid cmd.exe wrapper
+        # Absolute argv avoids WinError 2 when worker threads have a different cwd
+        # or when Windows treats a relative path as a bare command name.
+        executable_path = os.path.abspath(executable)
+        if not os.path.isfile(executable_path):
+            return f"Error: executable not found: {executable_path}"
         process = subprocess.Popen(
-            executable,
+            [executable_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=os.path.dirname(executable_path) or None,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP  # Windows-specific: create new process group
         )
         
         # Send input and get output with timeout
         try:
-            stdout, stderr = process.communicate(input=str(input_value), timeout=timeout)
+            payload = str(input_value)
+            if payload and not payload.endswith("\n"):
+                payload += "\n"
+            stdout, stderr = process.communicate(input=payload, timeout=timeout)
             if process.returncode != 0:
                 return f"Runtime Error: {stderr.strip()}"
             return stdout.strip()

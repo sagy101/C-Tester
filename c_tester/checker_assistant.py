@@ -31,7 +31,7 @@ from .verification import AUDIT_RUBRIC_VERSION, audit_evidence_fingerprint, stab
 
 
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
-DEFAULT_CHEAP_GEMINI_MODEL = os.getenv("C_TESTER_CHEAP_GEMINI_MODEL", "gemini-2.5-flash-lite")
+DEFAULT_CHEAP_GEMINI_MODEL = os.getenv("C_TESTER_CHEAP_GEMINI_MODEL", "gemini-flash-lite-latest")
 DEFAULT_THINKING_LEVEL = "MEDIUM"
 MAX_ASSIGNMENT_IMAGES = 8
 MAX_AUDIT_TEXT_CHARS = 100_000
