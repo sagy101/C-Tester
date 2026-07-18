@@ -3051,25 +3051,52 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         self.destroy()
 
     def update_gemini_key_status(self):
+        self._sync_review_action_buttons()
+
+    def _set_review_buttons_state(self, state: str):
+        self.review_selected_button.configure(state=state)
+        if hasattr(self, "review_attention_button"):
+            self.review_attention_button.configure(state=state)
+        if hasattr(self, "refresh_button"):
+            # Allow refresh even while reviewing so users can recover from a stuck run.
+            self.refresh_button.configure(state="normal")
+
+    def _sync_review_action_buttons(self):
         using_gemini = self.provider_var.get() == "Gemini"
         has_key = bool(get_google_api_key())
         if using_gemini and not has_key:
             self.key_status_label.configure(
-                text=f"Gemini key is not configured. Choose {FAKE_PROVIDER_LABEL} for deterministic testing or set GOOGLE_API_KEY.",
+                text=(
+                    f"Gemini key is not configured. Choose {FAKE_PROVIDER_LABEL} for deterministic testing "
+                    "or set GOOGLE_API_KEY."
+                ),
                 text_color=COLORS["warning"],
             )
-            self.review_selected_button.configure(state="disabled")
-            if hasattr(self, "review_attention_button"):
-                self.review_attention_button.configure(state="disabled")
-        else:
+            self._set_review_buttons_state("disabled")
+            return
+        if self.review_running:
             self.key_status_label.configure(
-                text="Ready. Current reviews are locked; stale evidence is automatically unlocked for re-review.",
-                text_color=COLORS["secondary"],
+                text=(
+                    "Review in progress — wait for it to finish. "
+                    "If this is stuck, click Refresh Rows to unlock the review buttons."
+                ),
+                text_color=COLORS["warning"],
             )
-            enabled = "normal" if not self.review_running else "disabled"
-            self.review_selected_button.configure(state=enabled)
-            if hasattr(self, "review_attention_button"):
-                self.review_attention_button.configure(state=enabled)
+            self._set_review_buttons_state("disabled")
+            return
+        self.key_status_label.configure(
+            text="Ready. Current reviews are locked; stale evidence is automatically unlocked for re-review.",
+            text_color=COLORS["secondary"],
+        )
+        self._set_review_buttons_state("normal")
+
+    def unlock_review_buttons(self, *, announce: bool = True):
+        """Recover when a prior review worker left the UI locked."""
+        was_running = self.review_running
+        self.review_running = False
+        self._sync_review_action_buttons()
+        if announce and was_running:
+            self.status_var.set("Review buttons unlocked. You can review selected or attention-needed rows.")
 
     def _create_code_view(self, tab, code_font):
         tab.grid_columnconfigure(1, weight=1)
@@ -3138,6 +3165,9 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
         textbox.tag_config("diff_note", foreground="#fde68a")
 
     def reload_cases(self):
+        if self.review_running:
+            # A hung/failed review worker can leave buttons disabled forever; Refresh recovers.
+            self.unlock_review_buttons(announce=True)
         try:
             self.cases = load_review_cases(self.parent.gui_questions, grading_policy=self.active_grading_policy())
         except Exception as exc:
@@ -3145,6 +3175,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             self.cases = []
         self.selected_vars.clear()
         self.render_table()
+        self._sync_review_action_buttons()
 
     def clear_id_search(self):
         self.id_search_var.set("")
@@ -3465,10 +3496,10 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
             provider = self.make_provider()
         except Exception as exc:
             messagebox.showerror("LLM Setup Error", str(exc))
+            self.unlock_review_buttons(announce=False)
             return
         self.review_running = True
-        self.review_selected_button.configure(state="disabled")
-        self.review_attention_button.configure(state="disabled")
+        self._sync_review_action_buttons()
         self.status_var.set(f"Reviewing {label}...")
         threading.Thread(target=self._review_worker, args=(selected, provider), daemon=True).start()
 
@@ -3504,10 +3535,8 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
     def _review_finished(self):
         self.review_running = False
-        self.review_selected_button.configure(state="normal")
-        self.review_attention_button.configure(state="normal")
         self.reload_cases()
-        self.update_gemini_key_status()
+        self._sync_review_action_buttons()
         defects = self.checker_defect_cases()
         if defects:
             self.status_var.set(
@@ -3519,9 +3548,7 @@ class PostScoringReviewWindow(ctk.CTkToplevel):
 
     def _review_failed(self, exc):
         self.review_running = False
-        self.review_selected_button.configure(state="normal")
-        self.review_attention_button.configure(state="normal")
-        self.update_gemini_key_status()
+        self._sync_review_action_buttons()
         self.status_var.set(f"Review failed: {exc}")
         messagebox.showerror("Review Failed", str(exc))
 
